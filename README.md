@@ -14,6 +14,14 @@ Inspired by [Claude Code UI](https://github.com/siteboon/claudecodeui).
 
 ## Install
 
+Install directly from GitHub:
+
+```
+uv tool install git+https://github.com/ddarmon/sesh
+```
+
+Or from a local clone:
+
 ```
 uv tool install /path/to/this/repo
 ```
@@ -32,6 +40,22 @@ uv run --directory /path/to/this/repo sesh
 
 Requires Python 3.10+ and
 [ripgrep](https://github.com/BurntSushi/ripgrep) for full-text search.
+
+## Platform support
+
+Developed and tested on macOS. The codebase uses `pathlib.Path` and
+`shutil.which()` throughout, so most of it is platform-agnostic.
+
+**Linux** -- Should work out of the box. The Claude Code, Codex, and
+Cursor data directories use the same paths as macOS (`~/.claude`,
+`~/.codex`, `~/.cursor`). Textual and ripgrep both support Linux.
+
+**Windows** -- Partially supported. The core TUI and CLI will run, but
+the Cursor provider's workspace storage path may not resolve correctly
+(it defaults to a Linux-style path instead of `AppData/Roaming/Cursor`
+on Windows). Claude Code and Codex path resolution should work via
+`Path.home()`. Ripgrep is available on Windows via `winget` or
+`choco install ripgrep`.
 
 ## Usage
 
