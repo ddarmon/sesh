@@ -7,6 +7,8 @@ terminal.
 assistants, lets you browse them by project, read message threads, and
 full-text search across all of them.
 
+Inspired by [Claude Code UI](https://github.com/siteboon/claudecodeui).
+
 ## Install
 
 ```
