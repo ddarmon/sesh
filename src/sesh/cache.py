@@ -11,6 +11,7 @@ from sesh.models import Provider, SessionMeta
 
 CACHE_DIR = Path.home() / ".cache" / "sesh"
 CACHE_FILE = CACHE_DIR / "sessions.json"
+INDEX_FILE = CACHE_DIR / "index.json"
 
 
 def _session_to_dict(s: SessionMeta) -> dict:
@@ -100,3 +101,52 @@ class SessionCache:
             "size": stat.st_size,
             "sessions": [_session_to_dict(s) for s in sessions],
         }
+
+
+def save_index(
+    projects: dict[str, "Project"],
+    sessions: dict[str, list[SessionMeta]],
+) -> None:
+    """Write the index file for fast CLI reads."""
+    from sesh.models import Project  # noqa: F811
+
+    now = datetime.now(tz=timezone.utc).isoformat()
+
+    proj_list = []
+    for path, proj in sorted(projects.items()):
+        proj_list.append({
+            "path": proj.path,
+            "display_name": proj.display_name,
+            "providers": sorted(p.value for p in proj.providers),
+            "session_count": proj.session_count,
+            "latest_activity": proj.latest_activity.isoformat() if proj.latest_activity else None,
+        })
+
+    sess_list = []
+    for path, sess in sessions.items():
+        for s in sess:
+            sess_list.append(_session_to_dict(s))
+
+    data = {
+        "refreshed_at": now,
+        "projects": proj_list,
+        "sessions": sess_list,
+    }
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(INDEX_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        pass
+
+
+def load_index() -> dict | None:
+    """Load the index file. Returns the parsed dict or None if missing/corrupt."""
+    if not INDEX_FILE.is_file():
+        return None
+    try:
+        with open(INDEX_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
