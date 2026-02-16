@@ -111,49 +111,208 @@ class CursorProvider(SessionProvider):
 
     def discover_projects(self) -> Iterator[tuple[str, str]]:
         """Yield (project_path, display_name) for projects with Cursor sessions."""
-        if not CURSOR_CHATS_DIR.is_dir():
-            return
+        seen: set[str] = set()
 
-        for hash_dir in CURSOR_CHATS_DIR.iterdir():
-            if not hash_dir.is_dir():
+        # 1. Existing: CLI agent sessions in ~/.cursor/chats/
+        if CURSOR_CHATS_DIR.is_dir():
+            for hash_dir in CURSOR_CHATS_DIR.iterdir():
+                if not hash_dir.is_dir():
+                    continue
+                workspace = self._extract_workspace_path(hash_dir)
+                if workspace:
+                    seen.add(workspace)
+                    display_name = Path(workspace).name or workspace
+                    yield workspace, display_name
+
+        # 2. IDE sessions via workspaceStorage
+        projects_dir_map = self._build_projects_dir_map()
+        for project_path, proj_dir in projects_dir_map.items():
+            if project_path in seen:
                 continue
-            workspace = self._extract_workspace_path(hash_dir)
-            if workspace:
-                display_name = Path(workspace).name or workspace
-                yield workspace, display_name
+            transcripts = proj_dir / "agent-transcripts"
+            if transcripts.is_dir() and any(transcripts.glob("*.txt")):
+                seen.add(project_path)
+                display_name = Path(project_path).name or project_path
+                yield project_path, display_name
 
     def get_sessions(self, project_path: str) -> list[SessionMeta]:
         """Return Cursor sessions for a project path."""
+        sessions: list[SessionMeta] = []
+        seen_ids: set[str] = set()
+
+        # 1. CLI agent sessions from ~/.cursor/chats/
         md5 = hashlib.md5(project_path.encode()).hexdigest()
         cursor_dir = CURSOR_CHATS_DIR / md5
+        if cursor_dir.is_dir():
+            for session_dir in cursor_dir.iterdir():
+                if not session_dir.is_dir():
+                    continue
+                store_db = session_dir / "store.db"
+                if not store_db.is_file():
+                    continue
+                meta = self._read_session_meta(store_db)
+                if meta:
+                    seen_ids.add(session_dir.name)
+                    sessions.append(SessionMeta(
+                        id=session_dir.name,
+                        project_path=project_path,
+                        provider=Provider.CURSOR,
+                        summary=meta.get("title", "Untitled Session"),
+                        timestamp=meta.get("timestamp", datetime.now(tz=timezone.utc)),
+                        message_count=meta.get("message_count", 0),
+                        model=meta.get("model"),
+                        source_path=str(store_db),
+                    ))
 
-        if not cursor_dir.is_dir():
-            return []
-
-        sessions = []
-        for session_dir in cursor_dir.iterdir():
-            if not session_dir.is_dir():
-                continue
-
-            store_db = session_dir / "store.db"
-            if not store_db.is_file():
-                continue
-
-            meta = self._read_session_meta(store_db)
-            if meta:
-                sessions.append(SessionMeta(
-                    id=session_dir.name,
-                    project_path=project_path,
-                    provider=Provider.CURSOR,
-                    summary=meta.get("title", "Untitled Session"),
-                    timestamp=meta.get("timestamp", datetime.now(tz=timezone.utc)),
-                    message_count=meta.get("message_count", 0),
-                    model=meta.get("model"),
-                    source_path=str(store_db),
-                ))
+        # 2. IDE sessions from workspaceStorage + agent-transcripts
+        ide_sessions = self._get_ide_sessions(project_path)
+        for s in ide_sessions:
+            if s.id not in seen_ids:
+                sessions.append(s)
 
         sessions.sort(key=lambda s: s.timestamp, reverse=True)
         return sessions
+
+    def _get_ide_sessions(self, project_path: str) -> list[SessionMeta]:
+        """Return IDE sessions from state.vscdb + agent-transcripts."""
+        proj_dir = self._find_projects_dir(project_path)
+        if not proj_dir:
+            return []
+        transcripts_dir = proj_dir / "agent-transcripts"
+        if not transcripts_dir.is_dir():
+            return []
+
+        # Build set of available transcript files
+        txt_files: dict[str, Path] = {}
+        for f in transcripts_dir.iterdir():
+            if f.suffix == ".txt" and f.is_file():
+                txt_files[f.stem] = f
+
+        if not txt_files:
+            return []
+
+        # Try to get rich metadata from state.vscdb
+        composer_meta = self._read_composer_data(project_path)
+
+        sessions: list[SessionMeta] = []
+        matched_ids: set[str] = set()
+
+        # Match composer metadata to transcript files
+        for entry in composer_meta:
+            composer_id = entry.get("composerId", "")
+            if composer_id in txt_files:
+                matched_ids.add(composer_id)
+                transcript_path = txt_files[composer_id]
+
+                name = entry.get("name", "")
+                if not name:
+                    name = self._first_user_message(transcript_path) or "Untitled Session"
+
+                timestamp = datetime.now(tz=timezone.utc)
+                created = entry.get("createdAt")
+                if isinstance(created, (int, float)):
+                    try:
+                        timestamp = datetime.fromtimestamp(created / 1000, tz=timezone.utc)
+                    except (ValueError, OSError):
+                        pass
+
+                model = entry.get("lastUsedModel")
+                msg_count = self._count_transcript_messages(transcript_path)
+
+                sessions.append(SessionMeta(
+                    id=composer_id,
+                    project_path=project_path,
+                    provider=Provider.CURSOR,
+                    summary=name,
+                    timestamp=timestamp,
+                    message_count=msg_count,
+                    model=model,
+                    source_path=str(transcript_path),
+                ))
+
+        # Pick up any .txt files not matched by composer metadata
+        for stem, path in txt_files.items():
+            if stem in matched_ids:
+                continue
+            name = self._first_user_message(path) or "Untitled Session"
+            try:
+                mtime = path.stat().st_mtime
+                timestamp = datetime.fromtimestamp(mtime, tz=timezone.utc)
+            except OSError:
+                timestamp = datetime.now(tz=timezone.utc)
+            sessions.append(SessionMeta(
+                id=stem,
+                project_path=project_path,
+                provider=Provider.CURSOR,
+                summary=name,
+                timestamp=timestamp,
+                message_count=self._count_transcript_messages(path),
+                source_path=str(path),
+            ))
+
+        return sessions
+
+    def _read_composer_data(self, project_path: str) -> list[dict]:
+        """Read composer.composerData from the workspace's state.vscdb."""
+        workspace_map = self._build_workspace_map()
+        ws_hash = workspace_map.get(project_path)
+        if not ws_hash:
+            return []
+        vscdb = WORKSPACE_STORAGE / ws_hash / "state.vscdb"
+        if not vscdb.is_file():
+            return []
+        try:
+            conn = sqlite3.connect(f"file:{vscdb}?mode=ro", uri=True)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT value FROM ItemTable WHERE key = 'composer.composerData'"
+            )
+            row = cur.fetchone()
+            conn.close()
+            if not row:
+                return []
+            data = json.loads(row[0])
+            return data.get("allComposers", [])
+        except (sqlite3.Error, json.JSONDecodeError, OSError):
+            return []
+
+    @staticmethod
+    def _first_user_message(transcript: Path) -> str | None:
+        """Extract the first user message text from a .txt transcript."""
+        try:
+            in_user = False
+            lines: list[str] = []
+            for line in open(transcript):
+                if line.rstrip() == "user:" and not in_user:
+                    in_user = True
+                    continue
+                if in_user:
+                    if line.rstrip() == "assistant:" or (
+                        lines and line.rstrip() == ""
+                        and any(l.strip() for l in lines)
+                    ):
+                        break
+                    stripped = line.strip()
+                    if stripped in ("<user_query>", "</user_query>"):
+                        continue
+                    if stripped:
+                        lines.append(stripped)
+            text = " ".join(lines).strip()
+            return text[:80] if text else None
+        except OSError:
+            return None
+
+    @staticmethod
+    def _count_transcript_messages(transcript: Path) -> int:
+        """Count user+assistant turns in a .txt transcript."""
+        count = 0
+        try:
+            for line in open(transcript):
+                if line.rstrip() in ("user:", "assistant:"):
+                    count += 1
+        except OSError:
+            pass
+        return count
 
     def get_messages(self, session: SessionMeta) -> list[Message]:
         """Load messages from a Cursor session's store.db."""
