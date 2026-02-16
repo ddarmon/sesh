@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import sqlite3
+import sys
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,15 @@ from sesh.models import Message, Provider, SessionMeta
 from sesh.providers import SessionProvider
 
 CURSOR_CHATS_DIR = Path.home() / ".cursor" / "chats"
+CURSOR_PROJECTS_DIR = Path.home() / ".cursor" / "projects"
+
+if sys.platform == "darwin":
+    WORKSPACE_STORAGE = (
+        Path.home() / "Library" / "Application Support"
+        / "Cursor" / "User" / "workspaceStorage"
+    )
+else:
+    WORKSPACE_STORAGE = Path.home() / ".config" / "Cursor" / "User" / "workspaceStorage"
 
 
 def _extract_content(content) -> str:
@@ -53,6 +63,51 @@ def _extract_tool_name(content) -> str | None:
 
 class CursorProvider(SessionProvider):
     """Provider for Cursor IDE sessions."""
+
+    def __init__(self) -> None:
+        self._workspace_map: dict[str, str] | None = None
+        self._projects_dir_map: dict[str, Path] | None = None
+
+    def _build_workspace_map(self) -> dict[str, str]:
+        """Return {project_path: workspace_hash} from workspaceStorage."""
+        if self._workspace_map is not None:
+            return self._workspace_map
+        self._workspace_map = {}
+        if not WORKSPACE_STORAGE.is_dir():
+            return self._workspace_map
+        for ws_dir in WORKSPACE_STORAGE.iterdir():
+            ws_json = ws_dir / "workspace.json"
+            if not ws_json.is_file():
+                continue
+            try:
+                data = json.loads(ws_json.read_text())
+                folder_uri = data.get("folder", "")
+                if folder_uri.startswith("file:///"):
+                    project_path = folder_uri[len("file://"):]
+                    self._workspace_map[project_path] = ws_dir.name
+            except (json.JSONDecodeError, OSError):
+                continue
+        return self._workspace_map
+
+    def _build_projects_dir_map(self) -> dict[str, Path]:
+        """Return {project_path: cursor_projects_subdir} from ~/.cursor/projects/."""
+        if self._projects_dir_map is not None:
+            return self._projects_dir_map
+        self._projects_dir_map = {}
+        if not CURSOR_PROJECTS_DIR.is_dir():
+            return self._projects_dir_map
+        workspace_map = self._build_workspace_map()
+        # Build reverse: encoded_name -> project_path from workspace_map
+        for project_path in workspace_map:
+            encoded = project_path.lstrip("/").replace("/", "-")
+            candidate = CURSOR_PROJECTS_DIR / encoded
+            if candidate.is_dir():
+                self._projects_dir_map[project_path] = candidate
+        return self._projects_dir_map
+
+    def _find_projects_dir(self, project_path: str) -> Path | None:
+        """Find the ~/.cursor/projects/ subdirectory for a project path."""
+        return self._build_projects_dir_map().get(project_path)
 
     def discover_projects(self) -> Iterator[tuple[str, str]]:
         """Yield (project_path, display_name) for projects with Cursor sessions."""
