@@ -21,7 +21,7 @@ uv tool install /path/to/this/repo
 To reinstall after changes:
 
 ```
-uv tool install --force /path/to/this/repo
+uv tool install --force --reinstall /path/to/this/repo
 ```
 
 Or run without installing:
