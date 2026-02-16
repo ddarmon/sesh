@@ -1,4 +1,4 @@
-"""sesh — Textual TUI for browsing AI coding sessions."""
+"""sesh — Textual TUI for browsing LLM coding sessions."""
 
 from __future__ import annotations
 
@@ -157,46 +157,11 @@ class SeshApp(App):
 
     def _discover_all(self) -> None:
         """Background threaded worker: discover projects and sessions."""
-        from sesh.providers.claude import ClaudeProvider
+        from sesh.discovery import discover_all
 
-        providers_list = [ClaudeProvider()]
-
-        try:
-            from sesh.providers.codex import CodexProvider
-            providers_list.append(CodexProvider())
-        except Exception:
-            pass
-
-        try:
-            from sesh.providers.cursor import CursorProvider
-            providers_list.append(CursorProvider())
-        except Exception:
-            pass
-
-        for provider in providers_list:
-            try:
-                for project_path, display_name in provider.discover_projects():
-                    if project_path not in self.projects:
-                        self.projects[project_path] = Project(
-                            path=project_path,
-                            display_name=display_name,
-                        )
-                    proj = self.projects[project_path]
-                    sessions = provider.get_sessions(project_path)
-                    if sessions:
-                        proj.providers.add(sessions[0].provider)
-                        existing = self.sessions.get(project_path, [])
-                        existing.extend(sessions)
-                        self.sessions[project_path] = existing
-                        proj.session_count = len(self.sessions[project_path])
-                        for s in sessions:
-                            if proj.latest_activity is None or s.timestamp > proj.latest_activity:
-                                proj.latest_activity = s.timestamp
-            except Exception:
-                pass
-
-        for path in self.sessions:
-            self.sessions[path].sort(key=lambda s: s.timestamp, reverse=True)
+        projects, sessions = discover_all()
+        self.projects = projects
+        self.sessions = sessions
 
         # Persist cache
         try:
@@ -491,10 +456,10 @@ class SeshApp(App):
         status.update("Session deleted")
 
 
-def main() -> None:
+def tui_main() -> None:
     app = SeshApp()
     app.run()
 
 
 if __name__ == "__main__":
-    main()
+    tui_main()
