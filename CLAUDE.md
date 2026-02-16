@@ -67,6 +67,13 @@ CLI to resume the session. Per-provider commands:
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
+## Bookmarks
+
+Pressing `b` on a session node toggles a bookmark. Bookmarked sessions
+show a star in the tree and appear in a dedicated Bookmarks section at
+the top. Bookmarks persist across sessions in
+`~/.cache/sesh/bookmarks.json`.
+
 ## Session deletion
 
 Pressing `d` on a session node shows a confirmation dialog. On confirm,
@@ -81,15 +88,17 @@ the session is deleted via the provider's `delete_session` method:
 All subcommands output JSON to stdout. Run `sesh refresh` first to build
 the index, then query it.
 
-| Command                                                   | Description                             |
-| --------------------------------------------------------- | --------------------------------------- |
-| `sesh`                                                    | Launch the TUI (default, no subcommand) |
-| `sesh refresh`                                            | Discover sessions and rebuild the index |
-| `sesh projects`                                           | List projects from the index            |
-| `sesh sessions [--project PATH] [--provider NAME]`        | List sessions with optional filters     |
-| `sesh messages <id> [--limit N] [--offset N] [--summary]` | Load messages for a session             |
-| `sesh search <query>`                                     | Full-text search via ripgrep            |
-| `sesh clean <query> [--dry-run]`                          | Delete sessions matching a search query |
+| Command                                                   | Description                              |
+| --------------------------------------------------------- | ---------------------------------------- |
+| `sesh`                                                    | Launch the TUI (default, no subcommand)  |
+| `sesh refresh`                                            | Discover sessions and rebuild the index  |
+| `sesh projects`                                           | List projects from the index             |
+| `sesh sessions [--project PATH] [--provider NAME]`        | List sessions with optional filters      |
+| `sesh messages <id> [--limit N] [--offset N] [--summary]` | Load messages for a session              |
+| `sesh search <query>`                                     | Full-text search (Claude, Codex, Cursor) |
+| `sesh clean <query> [--dry-run]`                          | Delete sessions matching a search query  |
+| `sesh resume <id> [--provider NAME]`                      | Resume a session in its provider's CLI   |
+| `sesh export <id> [--provider NAME] [--format md/json]`   | Export a session to Markdown or JSON     |
 
 The index is stored at `~/.cache/sesh/index.json`.
 

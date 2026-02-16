@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from datetime import datetime, timezone
 
@@ -92,6 +94,28 @@ def cmd_sessions(args: argparse.Namespace) -> None:
     _json_out(out)
 
 
+def _load_session_messages(session_data: dict):
+    """Look up a session from index data and load its messages via the provider."""
+    from sesh.cache import _dict_to_session
+    from sesh.models import Provider
+
+    session = _dict_to_session(session_data)
+
+    if session.provider == Provider.CLAUDE:
+        from sesh.providers.claude import ClaudeProvider
+        messages = ClaudeProvider().get_messages(session)
+    elif session.provider == Provider.CODEX:
+        from sesh.providers.codex import CodexProvider
+        messages = CodexProvider().get_messages(session)
+    elif session.provider == Provider.CURSOR:
+        from sesh.providers.cursor import CursorProvider
+        messages = CursorProvider().get_messages(session)
+    else:
+        messages = []
+
+    return session, messages
+
+
 def cmd_messages(args: argparse.Namespace) -> None:
     """Load and print messages for a session."""
     index = _require_index()
@@ -109,24 +133,7 @@ def cmd_messages(args: argparse.Namespace) -> None:
         )
         raise SystemExit(1)
 
-    session_data = matches[0]
-
-    # Load messages via provider
-    from sesh.cache import _dict_to_session
-    session = _dict_to_session(session_data)
-
-    from sesh.models import Provider
-    if session.provider == Provider.CLAUDE:
-        from sesh.providers.claude import ClaudeProvider
-        messages = ClaudeProvider().get_messages(session)
-    elif session.provider == Provider.CODEX:
-        from sesh.providers.codex import CodexProvider
-        messages = CodexProvider().get_messages(session)
-    elif session.provider == Provider.CURSOR:
-        from sesh.providers.cursor import CursorProvider
-        messages = CursorProvider().get_messages(session)
-    else:
-        messages = []
+    _session, messages = _load_session_messages(matches[0])
 
     # Filter system messages
     messages = [m for m in messages if not m.is_system]
@@ -192,10 +199,12 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
     from sesh.providers.claude import ClaudeProvider
     from sesh.providers.codex import CodexProvider
+    from sesh.providers.cursor import CursorProvider
 
     providers_map = {
         Provider.CLAUDE: ClaudeProvider(),
         Provider.CODEX: CodexProvider(),
+        Provider.CURSOR: CursorProvider(),
     }
 
     deleted = []
@@ -205,6 +214,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
         if r.provider == Provider.CLAUDE:
             source_path = str(Path(r.file_path).parent)
         elif r.provider == Provider.CODEX:
+            source_path = r.file_path
+        elif r.provider == Provider.CURSOR:
             source_path = r.file_path
         else:
             continue
@@ -251,6 +262,126 @@ def cmd_clean(args: argparse.Namespace) -> None:
     _json_out(out)
 
 
+def cmd_resume(args: argparse.Namespace) -> None:
+    """Resume a session in its provider's CLI."""
+    index = _require_index()
+
+    matches = [s for s in index["sessions"] if s["id"] == args.session_id]
+    if args.provider:
+        matches = [s for s in matches if s["provider"] == args.provider]
+
+    if not matches:
+        print(
+            f"Session '{args.session_id}' not found. "
+            "Run 'sesh refresh' to update the index.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    session_data = matches[0]
+
+    from sesh.cache import _dict_to_session
+    session = _dict_to_session(session_data)
+
+    # Cursor IDE sessions (txt transcripts) can't be resumed from CLI
+    from sesh.models import Provider
+    if (
+        session.provider == Provider.CURSOR
+        and session.source_path
+        and session.source_path.endswith(".txt")
+    ):
+        print(
+            "Cursor IDE sessions cannot be resumed from the CLI.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    commands: dict[Provider, tuple[str, list[str]]] = {
+        Provider.CLAUDE: ("claude", ["claude", "--resume", session.id]),
+        Provider.CODEX: ("codex", ["codex", "resume", session.id]),
+        Provider.CURSOR: ("agent", ["agent", f"--resume={session.id}"]),
+    }
+
+    binary, cmd_args = commands[session.provider]
+    binary_path = shutil.which(binary)
+    if binary_path is None:
+        print(
+            f"'{binary}' not found on PATH. "
+            f"Install it to resume {session.provider.value} sessions.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    os.chdir(session.project_path)
+    os.execvp(binary_path, cmd_args)
+
+
+def cmd_export(args: argparse.Namespace) -> None:
+    """Export a session to Markdown or JSON."""
+    index = _require_index()
+
+    matches = [s for s in index["sessions"] if s["id"] == args.session_id]
+    if args.provider:
+        matches = [s for s in matches if s["provider"] == args.provider]
+
+    if not matches:
+        print(
+            f"Session '{args.session_id}' not found. "
+            "Run 'sesh refresh' to update the index.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    session, messages = _load_session_messages(matches[0])
+
+    # Filter system messages
+    messages = [m for m in messages if not m.is_system]
+
+    if args.output_format == "json":
+        out_messages = []
+        for m in messages:
+            out_messages.append({
+                "role": m.role,
+                "content": m.content,
+                "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+                "tool_name": m.tool_name,
+            })
+
+        _json_out({
+            "session_id": session.id,
+            "provider": session.provider.value,
+            "project_path": session.project_path,
+            "model": session.model,
+            "timestamp": session.timestamp.isoformat(),
+            "messages": out_messages,
+        })
+    else:
+        # Markdown output
+        print(f"# Session: {session.id}")
+        print()
+        print(f"- **Provider:** {session.provider.value}")
+        print(f"- **Project:** {session.project_path}")
+        if session.model:
+            print(f"- **Model:** {session.model}")
+        print(f"- **Date:** {session.timestamp.strftime('%Y-%m-%d %H:%M')}")
+        print()
+
+        for m in messages:
+            ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
+            if m.role == "user":
+                print(f"## User{ts}")
+            elif m.role == "assistant":
+                print(f"## Assistant{ts}")
+            elif m.role == "tool":
+                tool = m.tool_name or "tool"
+                print(f"### {tool}{ts}")
+            else:
+                print(f"## {m.role}{ts}")
+            print()
+            print(m.content)
+            print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sesh",
@@ -264,7 +395,9 @@ def main() -> None:
             "  sesh sessions           # list all sessions\n"
             "  sesh messages <id>      # read a session's messages\n"
             "  sesh search <query>     # full-text search across sessions\n"
-            "  sesh clean <query>      # delete sessions matching a query"
+            "  sesh clean <query>      # delete sessions matching a query\n"
+            "  sesh resume <id>        # resume a session in its provider's CLI\n"
+            "  sesh export <id>        # export a session to Markdown or JSON"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -369,7 +502,7 @@ def main() -> None:
         description=(
             "Search for sessions using ripgrep and delete all matches. "
             "Use --dry-run to preview what would be deleted without making changes. "
-            "Currently supports Claude and Codex sessions (same scope as 'sesh search')."
+            "Supports Claude, Codex, and Cursor sessions."
         ),
     )
     p_clean.add_argument(
@@ -380,6 +513,54 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="Show what would be deleted without actually deleting",
+    )
+
+    # resume
+    p_resume = sub.add_parser(
+        "resume",
+        help="Resume a session in its provider's CLI",
+        description=(
+            "Look up a session by ID and launch the provider's CLI to resume it. "
+            "Replaces the sesh process with the provider CLI (claude, codex, or agent)."
+        ),
+    )
+    p_resume.add_argument(
+        "session_id",
+        help="The session ID to resume",
+    )
+    p_resume.add_argument(
+        "--provider",
+        metavar="NAME",
+        choices=["claude", "codex", "cursor"],
+        help="Disambiguate if the same ID exists in multiple providers",
+    )
+
+    # export
+    p_export = sub.add_parser(
+        "export",
+        help="Export a session to Markdown or JSON",
+        description=(
+            "Export all messages from a session to stdout. "
+            "System messages are excluded. "
+            "Default format is Markdown; use --format json for JSON."
+        ),
+    )
+    p_export.add_argument(
+        "session_id",
+        help="The session ID to export",
+    )
+    p_export.add_argument(
+        "--provider",
+        metavar="NAME",
+        choices=["claude", "codex", "cursor"],
+        help="Disambiguate if the same ID exists in multiple providers",
+    )
+    p_export.add_argument(
+        "--format",
+        dest="output_format",
+        choices=["md", "json"],
+        default="md",
+        help="Output format: md (Markdown, default) or json",
     )
 
     args = parser.parse_args()
@@ -400,6 +581,10 @@ def main() -> None:
         cmd_search(args)
     elif args.command == "clean":
         cmd_clean(args)
+    elif args.command == "resume":
+        cmd_resume(args)
+    elif args.command == "export":
+        cmd_export(args)
 
 
 if __name__ == "__main__":
