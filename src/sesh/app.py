@@ -13,6 +13,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Header, Input, Label, RichLog, Static, Tree
 
+from sesh.bookmarks import load_bookmarks, save_bookmarks
 from sesh.models import Message, Project, Provider, SearchResult, SessionMeta
 
 _DATETIME_MIN = datetime.min.replace(tzinfo=timezone.utc)
@@ -181,6 +182,7 @@ class SeshApp(App):
         Binding("s", "cycle_sort", "Sort"),
         Binding("J", "next_project", "Next Proj", key_display="J"),
         Binding("K", "prev_project", "Prev Proj", key_display="K"),
+        Binding("b", "toggle_bookmark", "Bookmark"),
         Binding("n", "search_messages", "Find"),
     ]
 
@@ -195,6 +197,7 @@ class SeshApp(App):
         self.sort_index = 0
         self._current_messages: list[Message] = []
         self._current_session: SessionMeta | None = None
+        self._bookmarks: set[tuple[str, str]] = set()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -209,6 +212,7 @@ class SeshApp(App):
         yield Static("Loading...", id="status-bar")
 
     def on_mount(self) -> None:
+        self._bookmarks = load_bookmarks()
         tree = self.query_one("#session-tree", SessionTree)
         tree.root.expand()
         tree.show_root = False
@@ -257,6 +261,7 @@ class SeshApp(App):
 
     def _session_label(self, session: SessionMeta, show_project: bool = False) -> str:
         """Build a display label for a session tree node."""
+        star = "\u2605 " if (session.provider.value, session.id) in self._bookmarks else ""
         ts = session.timestamp.strftime("%m-%d %H:%M")
         count = f"({session.message_count}) " if session.message_count else ""
         summary = session.summary[:50]
@@ -264,8 +269,8 @@ class SeshApp(App):
         if show_project:
             proj = self.projects.get(session.project_path)
             proj_name = proj.display_name if proj else session.project_path.rsplit("/", 1)[-1]
-            return f"{ts}  {count}{proj_name} — {summary}{model}"
-        return f"{ts}  {count}{summary}{model}"
+            return f"{star}{ts}  {count}{proj_name} — {summary}{model}"
+        return f"{star}{ts}  {count}{summary}{model}"
 
     def _populate_tree(self, filter_text: str = "", provider_filter: Provider | None = None) -> None:
         """Populate tree with projects and sessions."""
@@ -301,6 +306,18 @@ class SeshApp(App):
 
         all_sessions.sort(key=lambda s: s.timestamp, reverse=True)
 
+        # Bookmarks section
+        if self._bookmarks:
+            bookmarked = [
+                s for s in all_sessions
+                if (s.provider.value, s.id) in self._bookmarks
+            ]
+            if bookmarked:
+                bm_node = tree.root.add("\u2605 Bookmarks", expand=True)
+                for s in bookmarked:
+                    child = bm_node.add_leaf(self._session_label(s, show_project=True))
+                    child.data = s
+
         for session in all_sessions:
             label = self._session_label(session, show_project=True)
             child = tree.root.add_leaf(label)
@@ -329,6 +346,32 @@ class SeshApp(App):
 
         total_sessions = 0
         shown_projects = 0
+
+        # Bookmarks section
+        if self._bookmarks:
+            bookmarked = []
+            for proj_path, sessions in self.sessions.items():
+                for s in sessions:
+                    if (s.provider.value, s.id) not in self._bookmarks:
+                        continue
+                    if provider_filter and s.provider != provider_filter:
+                        continue
+                    if filter_lower:
+                        proj = self.projects.get(proj_path)
+                        proj_name = proj.display_name if proj else ""
+                        if not (
+                            filter_lower in proj_name.lower()
+                            or filter_lower in proj_path.lower()
+                            or filter_lower in s.summary.lower()
+                        ):
+                            continue
+                    bookmarked.append(s)
+            if bookmarked:
+                bookmarked.sort(key=lambda s: s.timestamp, reverse=True)
+                bm_node = tree.root.add("\u2605 Bookmarks", expand=True)
+                for s in bookmarked:
+                    child = bm_node.add_leaf(self._session_label(s, show_project=True))
+                    child.data = s
 
         for proj in sorted_projects:
             sessions = self.sessions.get(proj.path, [])
@@ -622,6 +665,35 @@ class SeshApp(App):
         status = self.query_one("#status-bar", Static)
         status.update(f"Copied: {cmd_str}")
 
+    def action_toggle_bookmark(self) -> None:
+        """Toggle bookmark on the selected session."""
+        tree = self.query_one("#session-tree", SessionTree)
+        node = tree.cursor_node
+        if node is None:
+            return
+        data = node.data
+        if isinstance(data, SearchResult):
+            session = self._session_from_search_result(data)
+        elif isinstance(data, SessionMeta):
+            session = data
+        else:
+            return
+        if session is None:
+            return
+
+        key = (session.provider.value, session.id)
+        status = self.query_one("#status-bar", Static)
+        if key in self._bookmarks:
+            self._bookmarks.discard(key)
+            status.update("Bookmark removed")
+        else:
+            self._bookmarks.add(key)
+            status.update("Bookmark added")
+        save_bookmarks(self._bookmarks)
+
+        search_text = self.query_one("#search-input", Input).value
+        self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
+
     def action_cycle_sort(self) -> None:
         """Cycle session sort order."""
         self.sort_index = (self.sort_index + 1) % len(self.sort_options)
@@ -757,6 +829,12 @@ class SeshApp(App):
         self.sessions[session.project_path] = [
             s for s in sess_list if s.id != session.id
         ]
+
+        # Remove bookmark if present
+        bm_key = (session.provider.value, session.id)
+        if bm_key in self._bookmarks:
+            self._bookmarks.discard(bm_key)
+            save_bookmarks(self._bookmarks)
 
         # Update project metadata
         proj = self.projects.get(session.project_path)
