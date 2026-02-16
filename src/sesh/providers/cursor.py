@@ -315,27 +315,31 @@ class CursorProvider(SessionProvider):
         return count
 
     def get_messages(self, session: SessionMeta) -> list[Message]:
-        """Load messages from a Cursor session's store.db."""
+        """Load messages from a Cursor session."""
         if not session.source_path:
             return []
 
-        store_db = Path(session.source_path)
-        if not store_db.is_file():
+        source = Path(session.source_path)
+        if not source.is_file():
             return []
 
-        messages = []
+        if source.suffix == ".txt":
+            return self._parse_txt_transcript(source)
+        return self._parse_store_db(source)
+
+    @staticmethod
+    def _parse_store_db(store_db: Path) -> list[Message]:
+        """Load messages from a store.db file."""
+        messages: list[Message] = []
         try:
             conn = sqlite3.connect(f"file:{store_db}?mode=ro", uri=True)
             cursor = conn.cursor()
 
-            # Read blobs table for messages (schema: id TEXT, data BLOB)
             try:
                 cursor.execute("SELECT id, data FROM blobs ORDER BY rowid")
                 for _blob_id, blob_data in cursor.fetchall():
                     if not blob_data:
                         continue
-                    # Blobs are either JSON messages or binary protobuf
-                    # internal data.  Only JSON blobs have role/content.
                     try:
                         text = (
                             blob_data.decode("utf-8")
@@ -362,6 +366,49 @@ class CursorProvider(SessionProvider):
 
             conn.close()
         except (sqlite3.Error, OSError):
+            pass
+
+        return messages
+
+    @staticmethod
+    def _parse_txt_transcript(transcript: Path) -> list[Message]:
+        """Parse a plain-text agent transcript file into messages."""
+        messages: list[Message] = []
+        current_role: str | None = None
+        lines: list[str] = []
+
+        def _flush() -> None:
+            if current_role and lines:
+                text = "\n".join(lines).strip()
+                if text:
+                    messages.append(Message(
+                        role=current_role,
+                        content=text,
+                        timestamp=None,
+                        is_system=current_role == "system",
+                    ))
+
+        try:
+            for raw_line in open(transcript):
+                line = raw_line.rstrip("\n")
+                stripped = line.rstrip()
+
+                # Detect role transitions
+                if stripped == "user:" or stripped == "assistant:" or stripped == "system:":
+                    _flush()
+                    current_role = stripped[:-1]  # strip trailing ':'
+                    lines = []
+                    continue
+
+                # Strip <user_query> / </user_query> tags
+                if stripped in ("<user_query>", "</user_query>"):
+                    continue
+
+                if current_role is not None:
+                    lines.append(line)
+
+            _flush()
+        except OSError:
             pass
 
         return messages
