@@ -199,10 +199,12 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
     from sesh.providers.claude import ClaudeProvider
     from sesh.providers.codex import CodexProvider
+    from sesh.providers.cursor import CursorProvider
 
     providers_map = {
         Provider.CLAUDE: ClaudeProvider(),
         Provider.CODEX: CodexProvider(),
+        Provider.CURSOR: CursorProvider(),
     }
 
     deleted = []
@@ -212,6 +214,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
         if r.provider == Provider.CLAUDE:
             source_path = str(Path(r.file_path).parent)
         elif r.provider == Provider.CODEX:
+            source_path = r.file_path
+        elif r.provider == Provider.CURSOR:
             source_path = r.file_path
         else:
             continue
@@ -498,7 +502,7 @@ def main() -> None:
         description=(
             "Search for sessions using ripgrep and delete all matches. "
             "Use --dry-run to preview what would be deleted without making changes. "
-            "Currently supports Claude and Codex sessions (same scope as 'sesh search')."
+            "Supports Claude, Codex, and Cursor sessions."
         ),
     )
     p_clean.add_argument(
