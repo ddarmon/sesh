@@ -55,32 +55,12 @@ class CursorProvider(SessionProvider):
     """Provider for Cursor IDE sessions."""
 
     def discover_projects(self) -> Iterator[tuple[str, str]]:
-        """Yield (project_path, display_name) for projects with Cursor sessions.
-
-        Strategy: iterate all hash directories under ~/.cursor/chats/,
-        then try to reverse-map them to known project paths from other providers.
-        Since we can't reverse an MD5 hash, we instead enumerate known project
-        paths (from Claude/Codex) and check if their hash directory exists.
-        """
+        """Yield (project_path, display_name) for projects with Cursor sessions."""
         if not CURSOR_CHATS_DIR.is_dir():
             return
 
-        # Collect known project paths from other providers
-        known_paths = self._collect_known_project_paths()
-
-        matched_hashes: set[str] = set()
-        for project_path in known_paths:
-            md5 = hashlib.md5(project_path.encode()).hexdigest()
-            cursor_dir = CURSOR_CHATS_DIR / md5
-            if cursor_dir.is_dir():
-                matched_hashes.add(md5)
-                display_name = Path(project_path).name or project_path
-                yield project_path, display_name
-
-        # For unmatched hash dirs, extract the workspace path from a
-        # store.db user_info blob so Cursor-only projects are discovered.
         for hash_dir in CURSOR_CHATS_DIR.iterdir():
-            if not hash_dir.is_dir() or hash_dir.name in matched_hashes:
+            if not hash_dir.is_dir():
                 continue
             workspace = self._extract_workspace_path(hash_dir)
             if workspace:
@@ -290,21 +270,6 @@ class CursorProvider(SessionProvider):
             return json.loads(text)
         except (json.JSONDecodeError, ValueError):
             return text
-
-    def _collect_known_project_paths(self) -> list[str]:
-        """Collect project paths from Claude and Codex providers."""
-        paths = set()
-
-        # From Claude projects
-        claude_projects_dir = Path.home() / ".claude" / "projects"
-        if claude_projects_dir.is_dir():
-            from sesh.providers.claude import _extract_project_path
-            for entry in claude_projects_dir.iterdir():
-                if entry.is_dir():
-                    project_path = _extract_project_path(entry.name, entry)
-                    paths.add(project_path)
-
-        return sorted(paths)
 
     @staticmethod
     def _extract_workspace_path(hash_dir: Path) -> str | None:
