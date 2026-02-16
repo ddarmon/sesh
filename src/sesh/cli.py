@@ -94,6 +94,28 @@ def cmd_sessions(args: argparse.Namespace) -> None:
     _json_out(out)
 
 
+def _load_session_messages(session_data: dict):
+    """Look up a session from index data and load its messages via the provider."""
+    from sesh.cache import _dict_to_session
+    from sesh.models import Provider
+
+    session = _dict_to_session(session_data)
+
+    if session.provider == Provider.CLAUDE:
+        from sesh.providers.claude import ClaudeProvider
+        messages = ClaudeProvider().get_messages(session)
+    elif session.provider == Provider.CODEX:
+        from sesh.providers.codex import CodexProvider
+        messages = CodexProvider().get_messages(session)
+    elif session.provider == Provider.CURSOR:
+        from sesh.providers.cursor import CursorProvider
+        messages = CursorProvider().get_messages(session)
+    else:
+        messages = []
+
+    return session, messages
+
+
 def cmd_messages(args: argparse.Namespace) -> None:
     """Load and print messages for a session."""
     index = _require_index()
@@ -111,24 +133,7 @@ def cmd_messages(args: argparse.Namespace) -> None:
         )
         raise SystemExit(1)
 
-    session_data = matches[0]
-
-    # Load messages via provider
-    from sesh.cache import _dict_to_session
-    session = _dict_to_session(session_data)
-
-    from sesh.models import Provider
-    if session.provider == Provider.CLAUDE:
-        from sesh.providers.claude import ClaudeProvider
-        messages = ClaudeProvider().get_messages(session)
-    elif session.provider == Provider.CODEX:
-        from sesh.providers.codex import CodexProvider
-        messages = CodexProvider().get_messages(session)
-    elif session.provider == Provider.CURSOR:
-        from sesh.providers.cursor import CursorProvider
-        messages = CursorProvider().get_messages(session)
-    else:
-        messages = []
+    _session, messages = _load_session_messages(matches[0])
 
     # Filter system messages
     messages = [m for m in messages if not m.is_system]
@@ -307,6 +312,72 @@ def cmd_resume(args: argparse.Namespace) -> None:
     os.execvp(binary_path, cmd_args)
 
 
+def cmd_export(args: argparse.Namespace) -> None:
+    """Export a session to Markdown or JSON."""
+    index = _require_index()
+
+    matches = [s for s in index["sessions"] if s["id"] == args.session_id]
+    if args.provider:
+        matches = [s for s in matches if s["provider"] == args.provider]
+
+    if not matches:
+        print(
+            f"Session '{args.session_id}' not found. "
+            "Run 'sesh refresh' to update the index.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    session, messages = _load_session_messages(matches[0])
+
+    # Filter system messages
+    messages = [m for m in messages if not m.is_system]
+
+    if args.output_format == "json":
+        out_messages = []
+        for m in messages:
+            out_messages.append({
+                "role": m.role,
+                "content": m.content,
+                "timestamp": m.timestamp.isoformat() if m.timestamp else None,
+                "tool_name": m.tool_name,
+            })
+
+        _json_out({
+            "session_id": session.id,
+            "provider": session.provider.value,
+            "project_path": session.project_path,
+            "model": session.model,
+            "timestamp": session.timestamp.isoformat(),
+            "messages": out_messages,
+        })
+    else:
+        # Markdown output
+        print(f"# Session: {session.id}")
+        print()
+        print(f"- **Provider:** {session.provider.value}")
+        print(f"- **Project:** {session.project_path}")
+        if session.model:
+            print(f"- **Model:** {session.model}")
+        print(f"- **Date:** {session.timestamp.strftime('%Y-%m-%d %H:%M')}")
+        print()
+
+        for m in messages:
+            ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
+            if m.role == "user":
+                print(f"## User{ts}")
+            elif m.role == "assistant":
+                print(f"## Assistant{ts}")
+            elif m.role == "tool":
+                tool = m.tool_name or "tool"
+                print(f"### {tool}{ts}")
+            else:
+                print(f"## {m.role}{ts}")
+            print()
+            print(m.content)
+            print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sesh",
@@ -321,7 +392,8 @@ def main() -> None:
             "  sesh messages <id>      # read a session's messages\n"
             "  sesh search <query>     # full-text search across sessions\n"
             "  sesh clean <query>      # delete sessions matching a query\n"
-            "  sesh resume <id>        # resume a session in its provider's CLI"
+            "  sesh resume <id>        # resume a session in its provider's CLI\n"
+            "  sesh export <id>        # export a session to Markdown or JSON"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -459,6 +531,34 @@ def main() -> None:
         help="Disambiguate if the same ID exists in multiple providers",
     )
 
+    # export
+    p_export = sub.add_parser(
+        "export",
+        help="Export a session to Markdown or JSON",
+        description=(
+            "Export all messages from a session to stdout. "
+            "System messages are excluded. "
+            "Default format is Markdown; use --format json for JSON."
+        ),
+    )
+    p_export.add_argument(
+        "session_id",
+        help="The session ID to export",
+    )
+    p_export.add_argument(
+        "--provider",
+        metavar="NAME",
+        choices=["claude", "codex", "cursor"],
+        help="Disambiguate if the same ID exists in multiple providers",
+    )
+    p_export.add_argument(
+        "--format",
+        dest="output_format",
+        choices=["md", "json"],
+        default="md",
+        help="Output format: md (Markdown, default) or json",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -479,6 +579,8 @@ def main() -> None:
         cmd_clean(args)
     elif args.command == "resume":
         cmd_resume(args)
+    elif args.command == "export":
+        cmd_export(args)
 
 
 if __name__ == "__main__":
