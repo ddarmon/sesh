@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Header, Input, Label, RichLog, Static, Tree
 
-from sesh.models import Message, Project, Provider, SessionMeta
+from sesh.models import Message, Project, Provider, SearchResult, SessionMeta
 
 _DATETIME_MIN = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -103,7 +103,7 @@ class SeshApp(App):
     }
 
     #session-tree {
-        width: 40;
+        width: 1fr;
         min-width: 30;
         border: solid $accent;
     }
@@ -203,7 +203,10 @@ class SeshApp(App):
                 continue
 
             if filter_lower:
-                proj_match = filter_lower in proj.display_name.lower()
+                proj_match = (
+                    filter_lower in proj.display_name.lower()
+                    or filter_lower in proj.path.lower()
+                )
                 if not proj_match:
                     sessions = [
                         s for s in sessions
@@ -244,16 +247,53 @@ class SeshApp(App):
             f"[{filter_name}] · q:Quit /:Search f:Filter o:Open d:Delete"
         )
 
+    @staticmethod
+    def _session_from_search_result(result: SearchResult) -> SessionMeta | None:
+        """Convert a SearchResult into a SessionMeta for message loading."""
+        if not result.session_id:
+            return None
+
+        source_path = result.file_path
+
+        # For Claude, source_path must be the project directory (not a file).
+        # ClaudeProvider.get_messages expects a directory to glob *.jsonl from.
+        if result.provider == Provider.CLAUDE:
+            marker = "/.claude/projects/"
+            idx = result.file_path.find(marker)
+            if idx != -1:
+                # Path after marker: {encoded_name}/... — take first component
+                after = result.file_path[idx + len(marker):]
+                encoded_name = after.split("/")[0]
+                source_path = result.file_path[:idx + len(marker)] + encoded_name
+
+        return SessionMeta(
+            id=result.session_id,
+            project_path=result.project_path,
+            provider=result.provider,
+            summary="",
+            timestamp=_DATETIME_MIN,
+            source_path=source_path,
+        )
+
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
-        """Load messages when a session node is selected."""
-        if isinstance(event.node.data, SessionMeta):
-            session = event.node.data
+        """Load messages when a session or search result node is selected."""
+        data = event.node.data
+        if isinstance(data, SessionMeta):
             self.run_worker(
-                lambda: self._load_messages(session),
+                lambda: self._load_messages(data),
                 thread=True,
                 exclusive=True,
                 group="messages",
             )
+        elif isinstance(data, SearchResult):
+            session = self._session_from_search_result(data)
+            if session:
+                self.run_worker(
+                    lambda: self._load_messages(session),
+                    thread=True,
+                    exclusive=True,
+                    group="messages",
+                )
 
     def _load_messages(self, session: SessionMeta) -> list[Message]:
         """Load messages in a thread."""
@@ -331,14 +371,17 @@ class SeshApp(App):
         else:
             self.call_from_thread(self._show_no_results, query)
 
-    def _show_search_results(self, results: list, query: str) -> None:
+    def _show_search_results(self, results: list[SearchResult], query: str) -> None:
         """Display search results in tree."""
         tree = self.query_one("#session-tree", SessionTree)
         tree.clear()
 
         node = tree.root.add(f"Search: '{query}' ({len(results)} matches)", expand=True)
+        badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U"}
         for r in results[:100]:
-            label = f"{r.matched_line[:60]}"
+            badge = badge_map.get(r.provider, "?")
+            snippet = r.matched_line.replace("\n", " ")[:80]
+            label = f"[{badge}] {snippet}"
             child = node.add_leaf(label)
             child.data = r
 
@@ -370,8 +413,14 @@ class SeshApp(App):
         """Open/resume the selected session in its CLI."""
         tree = self.query_one("#session-tree", SessionTree)
         node = tree.cursor_node
-        if node is not None and isinstance(node.data, SessionMeta):
+        if node is None:
+            return
+        if isinstance(node.data, SessionMeta):
             self._open_session(node.data)
+        elif isinstance(node.data, SearchResult):
+            session = self._session_from_search_result(node.data)
+            if session:
+                self._open_session(session)
 
     def _open_session(self, session: SessionMeta) -> None:
         """Suspend sesh and launch the provider's CLI to resume the session."""
