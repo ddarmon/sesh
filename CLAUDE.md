@@ -89,6 +89,7 @@ the index, then query it.
 | `sesh sessions [--project PATH] [--provider NAME]`        | List sessions with optional filters     |
 | `sesh messages <id> [--limit N] [--offset N] [--summary]` | Load messages for a session             |
 | `sesh search <query>`                                     | Full-text search via ripgrep            |
+| `sesh clean <query> [--dry-run]`                          | Delete sessions matching a search query |
 
 The index is stored at `~/.cache/sesh/index.json`.
 

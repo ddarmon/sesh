@@ -8,6 +8,7 @@ Workflow:
     sesh sessions         # list sessions (from index)
     sesh messages <id>    # read messages for a session
     sesh search <query>   # full-text search via ripgrep
+    sesh clean <query>    # delete sessions matching a query
     sesh                  # launch the TUI (default)
 """
 
@@ -176,6 +177,80 @@ def cmd_search(args: argparse.Namespace) -> None:
     _json_out(out)
 
 
+def cmd_clean(args: argparse.Namespace) -> None:
+    """Delete sessions matching a search query."""
+    from pathlib import Path
+
+    from sesh.models import Provider, SessionMeta
+    from sesh.search import ripgrep_search
+
+    results = ripgrep_search(args.query)
+
+    if not results:
+        _json_out({"deleted": [], "total": 0, "dry_run": args.dry_run})
+        return
+
+    from sesh.providers.claude import ClaudeProvider
+    from sesh.providers.codex import CodexProvider
+
+    providers_map = {
+        Provider.CLAUDE: ClaudeProvider(),
+        Provider.CODEX: CodexProvider(),
+    }
+
+    deleted = []
+    errors = []
+
+    for r in results:
+        if r.provider == Provider.CLAUDE:
+            source_path = str(Path(r.file_path).parent)
+        elif r.provider == Provider.CODEX:
+            source_path = r.file_path
+        else:
+            continue
+
+        entry = {
+            "session_id": r.session_id,
+            "provider": r.provider.value,
+            "file_path": r.file_path,
+            "matched_line": r.matched_line,
+        }
+
+        if args.dry_run:
+            deleted.append(entry)
+            continue
+
+        session = SessionMeta(
+            id=r.session_id,
+            project_path=r.project_path,
+            provider=r.provider,
+            summary="",
+            timestamp=datetime.now(tz=timezone.utc),
+            source_path=source_path,
+        )
+
+        provider = providers_map.get(r.provider)
+        if provider is None:
+            continue
+
+        try:
+            provider.delete_session(session)
+            deleted.append(entry)
+        except Exception as exc:
+            entry["error"] = str(exc)
+            errors.append(entry)
+
+    out: dict = {
+        "deleted": deleted,
+        "total": len(deleted),
+        "dry_run": args.dry_run,
+    }
+    if errors:
+        out["errors"] = errors
+
+    _json_out(out)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sesh",
@@ -188,7 +263,8 @@ def main() -> None:
             "  sesh projects           # list all projects\n"
             "  sesh sessions           # list all sessions\n"
             "  sesh messages <id>      # read a session's messages\n"
-            "  sesh search <query>     # full-text search across sessions"
+            "  sesh search <query>     # full-text search across sessions\n"
+            "  sesh clean <query>      # delete sessions matching a query"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -286,6 +362,26 @@ def main() -> None:
         help="The search term or regex pattern",
     )
 
+    # clean
+    p_clean = sub.add_parser(
+        "clean",
+        help="Delete sessions matching a search query",
+        description=(
+            "Search for sessions using ripgrep and delete all matches. "
+            "Use --dry-run to preview what would be deleted without making changes. "
+            "Currently supports Claude and Codex sessions (same scope as 'sesh search')."
+        ),
+    )
+    p_clean.add_argument(
+        "query",
+        help="The search term or regex pattern to match sessions for deletion",
+    )
+    p_clean.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be deleted without actually deleting",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -302,6 +398,8 @@ def main() -> None:
         cmd_messages(args)
     elif args.command == "search":
         cmd_search(args)
+    elif args.command == "clean":
+        cmd_clean(args)
 
 
 if __name__ == "__main__":
