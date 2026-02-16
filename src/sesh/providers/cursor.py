@@ -414,9 +414,17 @@ class CursorProvider(SessionProvider):
         return messages
 
     def delete_session(self, session: SessionMeta) -> None:
-        """Delete a Cursor session by removing its directory."""
-        if session.source_path:
-            session_dir = Path(session.source_path).parent
+        """Delete a Cursor session."""
+        if not session.source_path:
+            return
+        source = Path(session.source_path)
+        if source.suffix == ".txt":
+            # IDE transcript: just remove the file
+            if source.is_file():
+                source.unlink()
+        else:
+            # CLI agent store.db: remove the session directory
+            session_dir = source.parent
             if session_dir.is_dir():
                 shutil.rmtree(session_dir)
 
