@@ -7,6 +7,9 @@ terminal.
 assistants, lets you browse them by project, read message threads, and
 full-text search across all of them.
 
+It also has a CLI that outputs JSON, so LLM agents can query session
+history programmatically.
+
 Inspired by [Claude Code UI](https://github.com/siteboon/claudecodeui).
 
 ## Install
@@ -32,11 +35,13 @@ Requires Python 3.10+ and
 
 ## Usage
 
+### TUI
+
 Launch with `sesh`. The TUI loads sessions in the background and
 populates a project tree on the left. Select a session to view its
 messages on the right.
 
-### Keybindings
+#### Keybindings
 
 | Key      | Action                                          |
 | -------- | ----------------------------------------------- |
@@ -47,14 +52,14 @@ messages on the right.
 | `d`      | Delete the selected session (with confirmation) |
 | `q`      | Quit                                            |
 
-### Search
+#### Search
 
 -   **Filter-as-you-type**: Typing in the search bar instantly filters
     the tree by project name and session summary.
 -   **Full-text search**: Press `Enter` to run a ripgrep search across
     all session JSONL files. Results appear in the tree.
 
-### Provider badges
+#### Provider badges
 
 Each project in the tree shows which providers have sessions for it:
 
@@ -63,6 +68,25 @@ Each project in the tree shows which providers have sessions for it:
 -   `U` -- Cursor
 
 Example: `myproject [C,X:12]` means 12 sessions from Claude and Codex.
+
+### CLI
+
+All subcommands output JSON to stdout. Run `sesh refresh` first to build
+an index, then query it.
+
+```
+sesh refresh                              # discover sessions, build index
+sesh projects                             # list all projects
+sesh sessions                             # list all sessions
+sesh sessions --project /path/to/project  # filter by project
+sesh sessions --provider claude           # filter by provider
+sesh messages <session-id>                # read messages
+sesh messages <session-id> --summary      # user messages only
+sesh messages <session-id> --limit 10     # first 10 messages
+sesh search "some query"                  # full-text search via ripgrep
+```
+
+Run `sesh --help` or `sesh <command> --help` for full details.
 
 ## Providers
 
@@ -93,7 +117,8 @@ exist.
 ## Cache
 
 Parsed session metadata is cached at `~/.cache/sesh/sessions.json`,
-keyed by file path with mtime/size for invalidation.
+keyed by file path with mtime/size for invalidation. The CLI index is
+stored at `~/.cache/sesh/index.json`.
 
 ## Project structure
 
@@ -101,9 +126,11 @@ keyed by file path with mtime/size for invalidation.
 src/sesh/
   __init__.py        # version
   __main__.py        # python -m sesh
-  app.py             # Textual app, layout, keybindings
+  cli.py             # argparse CLI with JSON subcommands
+  app.py             # Textual TUI, layout, keybindings
+  discovery.py       # shared discovery logic (used by TUI and CLI)
   models.py          # Project, SessionMeta, Message, SearchResult
-  cache.py           # JSON metadata cache
+  cache.py           # JSON metadata cache + index
   search.py          # ripgrep full-text search
   providers/
     __init__.py      # SessionProvider base class

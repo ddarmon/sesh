@@ -1,6 +1,6 @@
 # sesh
 
-A Python + Textual TUI for browsing AI coding sessions. Installed via
+A Python + Textual TUI for browsing LLM coding sessions. Installed via
 `uv tool install`.
 
 ## Build and run
@@ -53,7 +53,7 @@ The app has three layers:
 1.  Create `src/sesh/providers/yourprovider.py`.
 2.  Subclass `SessionProvider` and implement `discover_projects`,
     `get_sessions`, `get_messages`.
-3.  Import and instantiate it in `SeshApp._discover_all`.
+3.  Import and instantiate it in `discovery.discover_all()`.
 
 ## Session resume
 
@@ -75,6 +75,22 @@ the session is deleted via the provider's `delete_session` method:
 -   **Claude**: removes matching `sessionId` lines from JSONL files
 -   **Codex**: deletes the session JSONL file
 -   **Cursor**: removes the session directory (parent of `store.db`)
+
+## CLI subcommands (JSON output)
+
+All subcommands output JSON to stdout. Run `sesh refresh` first to build
+the index, then query it.
+
+| Command                                                   | Description                             |
+| --------------------------------------------------------- | --------------------------------------- |
+| `sesh`                                                    | Launch the TUI (default, no subcommand) |
+| `sesh refresh`                                            | Discover sessions and rebuild the index |
+| `sesh projects`                                           | List projects from the index            |
+| `sesh sessions [--project PATH] [--provider NAME]`        | List sessions with optional filters     |
+| `sesh messages <id> [--limit N] [--offset N] [--summary]` | Load messages for a session             |
+| `sesh search <query>`                                     | Full-text search via ripgrep            |
+
+The index is stored at `~/.cache/sesh/index.json`.
 
 ## Dependencies
 
