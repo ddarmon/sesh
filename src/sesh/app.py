@@ -8,8 +8,9 @@ from datetime import datetime, timezone
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
-from textual.widgets import Header, Input, RichLog, Static, Tree
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Button, Header, Input, Label, RichLog, Static, Tree
 
 from sesh.models import Message, Project, Provider, SessionMeta
 
@@ -26,6 +27,49 @@ class MessageView(RichLog):
     """Right pane: message viewer."""
 
     BORDER_TITLE = "Messages"
+
+
+class ConfirmDeleteScreen(ModalScreen[bool]):
+    """Modal dialog to confirm session deletion."""
+
+    CSS = """
+    ConfirmDeleteScreen {
+        align: center middle;
+    }
+
+    #confirm-dialog {
+        width: 50;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #confirm-buttons {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+
+    #confirm-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(self, summary: str) -> None:
+        super().__init__()
+        self.summary = summary
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm-dialog"):
+            yield Label("Delete this session?")
+            yield Label(f"[dim]{self.summary[:60]}[/dim]")
+            with Horizontal(id="confirm-buttons"):
+                yield Button("Delete", variant="error", id="confirm-yes")
+                yield Button("Cancel", variant="default", id="confirm-no")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "confirm-yes")
 
 
 class SeshApp(App):
@@ -84,6 +128,7 @@ class SeshApp(App):
         Binding("escape", "clear_search", "Clear", show=False),
         Binding("f", "cycle_filter", "Filter"),
         Binding("o", "open_session", "Open"),
+        Binding("d", "delete_session", "Delete"),
     ]
 
     def __init__(self) -> None:
@@ -231,7 +276,7 @@ class SeshApp(App):
         filter_name = provider_filter.value.title() if provider_filter else "All"
         status.update(
             f"{shown_projects} projects · {total_sessions} sessions · "
-            f"[{filter_name}] · q:Quit /:Search f:Filter o:Open"
+            f"[{filter_name}] · q:Quit /:Search f:Filter o:Open d:Delete"
         )
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
@@ -386,6 +431,64 @@ class SeshApp(App):
         if shutil.which(binary) is None:
             return None
         return args, session.project_path
+
+    def action_delete_session(self) -> None:
+        """Prompt to delete the selected session."""
+        tree = self.query_one("#session-tree", SessionTree)
+        node = tree.cursor_node
+        if node is not None and isinstance(node.data, SessionMeta):
+            session = node.data
+            self.push_screen(
+                ConfirmDeleteScreen(session.summary),
+                lambda confirmed: self._delete_session(session) if confirmed else None,
+            )
+
+    def _delete_session(self, session: SessionMeta) -> None:
+        """Delete a session via its provider and refresh the tree."""
+        from sesh.providers.claude import ClaudeProvider
+        from sesh.providers.codex import CodexProvider
+        from sesh.providers.cursor import CursorProvider
+
+        providers_map: dict[Provider, type] = {
+            Provider.CLAUDE: ClaudeProvider,
+            Provider.CODEX: CodexProvider,
+            Provider.CURSOR: CursorProvider,
+        }
+
+        provider_cls = providers_map.get(session.provider)
+        if provider_cls is None:
+            return
+
+        try:
+            provider_cls().delete_session(session)
+        except Exception:
+            status = self.query_one("#status-bar", Static)
+            status.update(f"Error deleting session")
+            return
+
+        # Remove from in-memory session list
+        sess_list = self.sessions.get(session.project_path, [])
+        self.sessions[session.project_path] = [
+            s for s in sess_list if s.id != session.id
+        ]
+
+        # Update project metadata
+        proj = self.projects.get(session.project_path)
+        if proj:
+            remaining = self.sessions[session.project_path]
+            proj.session_count = len(remaining)
+            if not remaining:
+                del self.sessions[session.project_path]
+                del self.projects[session.project_path]
+            else:
+                proj.providers = {s.provider for s in remaining}
+                proj.latest_activity = max(s.timestamp for s in remaining)
+
+        search_text = self.query_one("#search-input", Input).value
+        self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
+
+        status = self.query_one("#status-bar", Static)
+        status.update("Session deleted")
 
 
 def main() -> None:

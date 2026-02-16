@@ -44,6 +44,7 @@ messages on the right.
 | `Escape` | Clear search and return to full tree            |
 | `f`      | Cycle provider filter (All/Claude/Codex/Cursor) |
 | `o`      | Open/resume the selected session in its CLI     |
+| `d`      | Delete the selected session (with confirmation) |
 | `q`      | Quit                                            |
 
 ### Search

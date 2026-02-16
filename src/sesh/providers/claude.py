@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -206,6 +207,52 @@ class ClaudeProvider(SessionProvider):
 
         messages.sort(key=lambda m: m.timestamp or datetime.min.replace(tzinfo=timezone.utc))
         return messages
+
+    def delete_session(self, session: SessionMeta) -> None:
+        """Delete a Claude session by removing its lines from JSONL files."""
+        source_dir = Path(session.source_path)
+        if not source_dir.is_dir():
+            return
+
+        for jsonl_file in source_dir.glob("*.jsonl"):
+            if jsonl_file.name.startswith("agent-"):
+                continue
+            try:
+                kept: list[str] = []
+                removed_any = False
+                with open(jsonl_file) as f:
+                    for line in f:
+                        stripped = line.strip()
+                        if not stripped:
+                            kept.append(line)
+                            continue
+                        try:
+                            entry = json.loads(stripped)
+                            if entry.get("sessionId") == session.id:
+                                removed_any = True
+                                continue
+                        except json.JSONDecodeError:
+                            pass
+                        kept.append(line)
+
+                if not removed_any:
+                    continue
+
+                if not any(l.strip() for l in kept):
+                    jsonl_file.unlink()
+                else:
+                    fd, tmp = tempfile.mkstemp(
+                        dir=str(source_dir), suffix=".jsonl.tmp"
+                    )
+                    try:
+                        with os.fdopen(fd, "w") as f:
+                            f.writelines(kept)
+                        os.replace(tmp, str(jsonl_file))
+                    except BaseException:
+                        os.unlink(tmp)
+                        raise
+            except OSError:
+                continue
 
     def _find_project_dir(self, project_path: str) -> Path | None:
         """Find the Claude project directory for a given project path."""

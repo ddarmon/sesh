@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -112,6 +113,13 @@ class CursorProvider(SessionProvider):
             pass
 
         return messages
+
+    def delete_session(self, session: SessionMeta) -> None:
+        """Delete a Cursor session by removing its directory."""
+        if session.source_path:
+            session_dir = Path(session.source_path).parent
+            if session_dir.is_dir():
+                shutil.rmtree(session_dir)
 
     def _read_session_meta(self, store_db: Path) -> dict | None:
         """Read metadata from a Cursor session's store.db."""
