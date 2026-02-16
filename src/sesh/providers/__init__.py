@@ -23,6 +23,10 @@ class SessionProvider(ABC):
     def get_messages(self, session: SessionMeta) -> list[Message]:
         """Load messages for a session on demand."""
 
+    def delete_session(self, session: SessionMeta) -> None:
+        """Delete a session's stored data. Override per provider."""
+        raise NotImplementedError
+
 
 _providers: list[SessionProvider] = []
 

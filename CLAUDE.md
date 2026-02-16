@@ -67,6 +67,15 @@ CLI to resume the session. Per-provider commands:
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
+## Session deletion
+
+Pressing `d` on a session node shows a confirmation dialog. On confirm,
+the session is deleted via the provider's `delete_session` method:
+
+-   **Claude**: removes matching `sessionId` lines from JSONL files
+-   **Codex**: deletes the session JSONL file
+-   **Cursor**: removes the session directory (parent of `store.db`)
+
 ## Dependencies
 
 -   `textual` -- TUI framework (the only runtime dependency)

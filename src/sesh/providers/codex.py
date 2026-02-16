@@ -130,6 +130,11 @@ class CodexProvider(SessionProvider):
 
         return messages
 
+    def delete_session(self, session: SessionMeta) -> None:
+        """Delete a Codex session by removing its JSONL file."""
+        if session.source_path:
+            Path(session.source_path).unlink(missing_ok=True)
+
     def _build_index(self) -> dict[str, list[dict]]:
         """Build index of project_path -> [{session data}]."""
         if self._index is not None:
