@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from datetime import datetime, timezone
 
@@ -251,6 +253,60 @@ def cmd_clean(args: argparse.Namespace) -> None:
     _json_out(out)
 
 
+def cmd_resume(args: argparse.Namespace) -> None:
+    """Resume a session in its provider's CLI."""
+    index = _require_index()
+
+    matches = [s for s in index["sessions"] if s["id"] == args.session_id]
+    if args.provider:
+        matches = [s for s in matches if s["provider"] == args.provider]
+
+    if not matches:
+        print(
+            f"Session '{args.session_id}' not found. "
+            "Run 'sesh refresh' to update the index.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    session_data = matches[0]
+
+    from sesh.cache import _dict_to_session
+    session = _dict_to_session(session_data)
+
+    # Cursor IDE sessions (txt transcripts) can't be resumed from CLI
+    from sesh.models import Provider
+    if (
+        session.provider == Provider.CURSOR
+        and session.source_path
+        and session.source_path.endswith(".txt")
+    ):
+        print(
+            "Cursor IDE sessions cannot be resumed from the CLI.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    commands: dict[Provider, tuple[str, list[str]]] = {
+        Provider.CLAUDE: ("claude", ["claude", "--resume", session.id]),
+        Provider.CODEX: ("codex", ["codex", "resume", session.id]),
+        Provider.CURSOR: ("agent", ["agent", f"--resume={session.id}"]),
+    }
+
+    binary, cmd_args = commands[session.provider]
+    binary_path = shutil.which(binary)
+    if binary_path is None:
+        print(
+            f"'{binary}' not found on PATH. "
+            f"Install it to resume {session.provider.value} sessions.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    os.chdir(session.project_path)
+    os.execvp(binary_path, cmd_args)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sesh",
@@ -264,7 +320,8 @@ def main() -> None:
             "  sesh sessions           # list all sessions\n"
             "  sesh messages <id>      # read a session's messages\n"
             "  sesh search <query>     # full-text search across sessions\n"
-            "  sesh clean <query>      # delete sessions matching a query"
+            "  sesh clean <query>      # delete sessions matching a query\n"
+            "  sesh resume <id>        # resume a session in its provider's CLI"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -382,6 +439,26 @@ def main() -> None:
         help="Show what would be deleted without actually deleting",
     )
 
+    # resume
+    p_resume = sub.add_parser(
+        "resume",
+        help="Resume a session in its provider's CLI",
+        description=(
+            "Look up a session by ID and launch the provider's CLI to resume it. "
+            "Replaces the sesh process with the provider CLI (claude, codex, or agent)."
+        ),
+    )
+    p_resume.add_argument(
+        "session_id",
+        help="The session ID to resume",
+    )
+    p_resume.add_argument(
+        "--provider",
+        metavar="NAME",
+        choices=["claude", "codex", "cursor"],
+        help="Disambiguate if the same ID exists in multiple providers",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -400,6 +477,8 @@ def main() -> None:
         cmd_search(args)
     elif args.command == "clean":
         cmd_clean(args)
+    elif args.command == "resume":
+        cmd_resume(args)
 
 
 if __name__ == "__main__":
