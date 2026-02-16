@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -15,6 +16,37 @@ from textual.widgets import Button, Header, Input, Label, RichLog, Static, Tree
 from sesh.models import Message, Project, Provider, SearchResult, SessionMeta
 
 _DATETIME_MIN = datetime.min.replace(tzinfo=timezone.utc)
+
+# Short display names for common model identifiers.
+_MODEL_SHORT: dict[str, str] = {}
+
+
+def _short_model_name(model: str) -> str:
+    """Return a compact display name for a model identifier."""
+    if model in _MODEL_SHORT:
+        return _MODEL_SHORT[model]
+    low = model.lower()
+    # Claude models: claude-opus-4-..., claude-sonnet-4-5-..., claude-haiku-...
+    for family in ("opus", "sonnet", "haiku"):
+        if family in low:
+            # Extract version digits after the family name
+            idx = low.index(family)
+            rest = low[idx + len(family):]
+            # Strip leading separators, grab digit segments
+            parts = rest.lstrip("-").split("-")
+            digits = [p for p in parts if p.isdigit()]
+            ver = ".".join(digits[:2]) if digits else ""
+            short = f"{family}-{ver}" if ver else family
+            _MODEL_SHORT[model] = short
+            return short
+    # Codex / GPT / other: take last meaningful segment
+    parts = model.rsplit("-", 1)
+    short = parts[-1] if len(parts) > 1 else model
+    # If it's just a date stamp, use the first part instead
+    if short.isdigit() and len(short) == 8:
+        short = model.split("-")[0]
+    _MODEL_SHORT[model] = short
+    return short
 
 
 class SessionTree(Tree):
@@ -108,6 +140,21 @@ class SeshApp(App):
         border: solid $accent;
     }
 
+    #message-pane {
+        width: 1fr;
+    }
+
+    #message-search {
+        display: none;
+        dock: top;
+        height: 3;
+        padding: 0 1;
+    }
+
+    #message-search.visible {
+        display: block;
+    }
+
     #message-view {
         width: 1fr;
         border: solid $accent;
@@ -129,6 +176,12 @@ class SeshApp(App):
         Binding("f", "cycle_filter", "Filter"),
         Binding("o", "open_session", "Open"),
         Binding("d", "delete_session", "Delete"),
+        Binding("r", "refresh", "Refresh"),
+        Binding("y", "copy_session_id", "Copy ID"),
+        Binding("s", "cycle_sort", "Sort"),
+        Binding("J", "next_project", "Next Proj", key_display="J"),
+        Binding("K", "prev_project", "Prev Proj", key_display="K"),
+        Binding("n", "search_messages", "Find"),
     ]
 
     def __init__(self) -> None:
@@ -138,6 +191,10 @@ class SeshApp(App):
         self.current_filter: Provider | None = None
         self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR]
         self.filter_index = 0
+        self.sort_options = ["date", "name", "messages", "timeline"]
+        self.sort_index = 0
+        self._current_messages: list[Message] = []
+        self._current_session: SessionMeta | None = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -146,7 +203,9 @@ class SeshApp(App):
             yield Static("All", id="provider-filter")
         with Horizontal(id="main"):
             yield SessionTree("Sessions", id="session-tree")
-            yield MessageView(id="message-view", wrap=True, markup=True)
+            with Vertical(id="message-pane"):
+                yield Input(placeholder="Find in messages...", id="message-search")
+                yield MessageView(id="message-view", wrap=True, markup=True)
         yield Static("Loading...", id="status-bar")
 
     def on_mount(self) -> None:
@@ -155,10 +214,19 @@ class SeshApp(App):
         tree.show_root = False
         self.run_worker(self._discover_all, thread=True, exclusive=True)
 
+    def action_refresh(self) -> None:
+        """Re-discover all sessions."""
+        status = self.query_one("#status-bar", Static)
+        status.update("Discovering sessions...")
+        self.run_worker(self._discover_all, thread=True, exclusive=True)
+
     def _discover_all(self) -> None:
         """Background threaded worker: discover projects and sessions."""
         from sesh.discovery import discover_all
 
+        self.call_from_thread(
+            self.query_one("#status-bar", Static).update, "Discovering sessions..."
+        )
         projects, sessions = discover_all()
         self.projects = projects
         self.sessions = sessions
@@ -177,8 +245,77 @@ class SeshApp(App):
 
         self.call_from_thread(self._populate_tree)
 
+    def _sort_sessions(self, sessions: list[SessionMeta]) -> list[SessionMeta]:
+        """Sort sessions based on current sort option."""
+        sort_key = self.sort_options[self.sort_index]
+        if sort_key == "name":
+            return sorted(sessions, key=lambda s: s.summary.lower())
+        if sort_key == "messages":
+            return sorted(sessions, key=lambda s: s.message_count, reverse=True)
+        # Default: date descending
+        return sorted(sessions, key=lambda s: s.timestamp, reverse=True)
+
+    def _session_label(self, session: SessionMeta, show_project: bool = False) -> str:
+        """Build a display label for a session tree node."""
+        ts = session.timestamp.strftime("%m-%d %H:%M")
+        count = f"({session.message_count}) " if session.message_count else ""
+        summary = session.summary[:50]
+        model = f" [{_short_model_name(session.model)}]" if session.model else ""
+        if show_project:
+            proj = self.projects.get(session.project_path)
+            proj_name = proj.display_name if proj else session.project_path.rsplit("/", 1)[-1]
+            return f"{ts}  {count}{proj_name} — {summary}{model}"
+        return f"{ts}  {count}{summary}{model}"
+
     def _populate_tree(self, filter_text: str = "", provider_filter: Provider | None = None) -> None:
         """Populate tree with projects and sessions."""
+        sort_name = self.sort_options[self.sort_index]
+
+        if sort_name == "timeline":
+            self._populate_tree_timeline(filter_text, provider_filter)
+        else:
+            self._populate_tree_grouped(filter_text, provider_filter)
+
+    def _populate_tree_timeline(self, filter_text: str, provider_filter: Provider | None) -> None:
+        """Flat timeline view: all sessions sorted by date, no project grouping."""
+        tree = self.query_one("#session-tree", SessionTree)
+        tree.clear()
+
+        filter_lower = filter_text.lower()
+        all_sessions: list[SessionMeta] = []
+
+        for proj_path, sessions in self.sessions.items():
+            proj = self.projects.get(proj_path)
+            for s in sessions:
+                if provider_filter and s.provider != provider_filter:
+                    continue
+                if filter_lower:
+                    proj_name = proj.display_name if proj else ""
+                    if not (
+                        filter_lower in proj_name.lower()
+                        or filter_lower in proj_path.lower()
+                        or filter_lower in s.summary.lower()
+                    ):
+                        continue
+                all_sessions.append(s)
+
+        all_sessions.sort(key=lambda s: s.timestamp, reverse=True)
+
+        for session in all_sessions:
+            label = self._session_label(session, show_project=True)
+            child = tree.root.add_leaf(label)
+            child.data = session
+
+        status = self.query_one("#status-bar", Static)
+        filter_name = provider_filter.value.title() if provider_filter else "All"
+        status.update(
+            f"{len(all_sessions)} sessions · "
+            f"[{filter_name}] · [Sort: timeline] · "
+            f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete r:Refresh"
+        )
+
+    def _populate_tree_grouped(self, filter_text: str, provider_filter: Provider | None) -> None:
+        """Project-grouped view: sessions nested under projects."""
         tree = self.query_one("#session-tree", SessionTree)
         tree.clear()
 
@@ -232,19 +369,18 @@ class SeshApp(App):
             project_node.data = proj
             shown_projects += 1
 
-            for session in sessions:
-                ts = session.timestamp.strftime("%m-%d %H:%M")
-                summary = session.summary[:50]
-                session_label = f"{ts}  {summary}"
-                child = project_node.add_leaf(session_label)
+            for session in self._sort_sessions(sessions):
+                child = project_node.add_leaf(self._session_label(session))
                 child.data = session
                 total_sessions += 1
 
         status = self.query_one("#status-bar", Static)
         filter_name = provider_filter.value.title() if provider_filter else "All"
+        sort_name = self.sort_options[self.sort_index]
         status.update(
             f"{shown_projects} projects · {total_sessions} sessions · "
-            f"[{filter_name}] · q:Quit /:Search f:Filter o:Open d:Delete"
+            f"[{filter_name}] · [Sort: {sort_name}] · "
+            f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete r:Refresh"
         )
 
     @staticmethod
@@ -313,14 +449,21 @@ class SeshApp(App):
         self.call_from_thread(self._render_messages, messages, session)
         return messages
 
-    def _render_messages(self, messages: list[Message], session: SessionMeta) -> None:
+    def _render_messages(
+        self, messages: list[Message], session: SessionMeta, highlight: str = ""
+    ) -> None:
         """Render messages in the right pane."""
+        self._current_messages = messages
+        self._current_session = session
+
         view = self.query_one("#message-view", MessageView)
         view.clear()
 
         if not messages:
             view.write("[dim]No messages found.[/dim]")
             return
+
+        hl = highlight.lower()
 
         for msg in messages:
             if msg.is_system:
@@ -330,27 +473,63 @@ class SeshApp(App):
 
             if msg.role == "user":
                 view.write(f"\n[bold cyan]User[/bold cyan]{ts}:")
-                view.write(f"  {msg.content[:2000]}")
+                content = msg.content[:2000]
+                view.write(f"  {self._highlight_text(content, hl)}")
             elif msg.role == "assistant":
                 view.write(f"\n[bold green]Assistant[/bold green]{ts}:")
-                try:
-                    from rich.markdown import Markdown
-                    md = Markdown(msg.content[:5000])
-                    view.write(md)
-                except Exception:
-                    view.write(f"  {msg.content[:2000]}")
+                if hl:
+                    # Plain text with highlights instead of Markdown
+                    content = msg.content[:5000]
+                    view.write(f"  {self._highlight_text(content, hl)}")
+                else:
+                    try:
+                        from rich.markdown import Markdown
+                        md = Markdown(msg.content[:5000])
+                        view.write(md)
+                    except Exception:
+                        view.write(f"  {msg.content[:2000]}")
             elif msg.role == "tool":
                 tool = msg.tool_name or "tool"
                 view.write(f"\n[bold yellow]{tool}[/bold yellow] [dim]({ts})[/dim]:")
-                view.write(f"  {msg.content[:500]}")
+                content = msg.content[:500]
+                view.write(f"  {self._highlight_text(content, hl)}")
+
+    @staticmethod
+    def _highlight_text(text: str, term: str) -> str:
+        """Wrap case-insensitive matches of *term* in reverse markup."""
+        if not term:
+            return text
+        # Escape Rich markup in the term, then do case-insensitive replace
+        escaped = re.escape(term)
+        def _repl(m: re.Match) -> str:
+            return f"[reverse]{m.group()}[/reverse]"
+        return re.sub(escaped, _repl, text, flags=re.IGNORECASE)
+
+    def action_search_messages(self) -> None:
+        """Toggle the message search input."""
+        search = self.query_one("#message-search", Input)
+        if search.has_class("visible"):
+            search.remove_class("visible")
+            search.value = ""
+            # Re-render without highlights
+            if self._current_messages and self._current_session:
+                self._render_messages(self._current_messages, self._current_session)
+        else:
+            search.add_class("visible")
+            search.focus()
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Filter sessions as user types."""
+        """Filter sessions as user types, or highlight in messages."""
         if event.input.id == "search-input":
             self._populate_tree(
                 filter_text=event.value,
                 provider_filter=self.current_filter,
             )
+        elif event.input.id == "message-search":
+            if self._current_messages and self._current_session:
+                self._render_messages(
+                    self._current_messages, self._current_session, highlight=event.value
+                )
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Full-text search on Enter."""
@@ -396,6 +575,14 @@ class SeshApp(App):
         self.query_one("#search-input", Input).focus()
 
     def action_clear_search(self) -> None:
+        # If message search is active, close it first
+        msg_search = self.query_one("#message-search", Input)
+        if msg_search.has_class("visible"):
+            msg_search.remove_class("visible")
+            msg_search.value = ""
+            if self._current_messages and self._current_session:
+                self._render_messages(self._current_messages, self._current_session)
+            return
         search = self.query_one("#search-input", Input)
         search.value = ""
         search.blur()
@@ -408,6 +595,83 @@ class SeshApp(App):
         self.query_one("#provider-filter", Static).update(label)
         search_text = self.query_one("#search-input", Input).value
         self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
+
+    def action_copy_session_id(self) -> None:
+        """Copy the resume command for the selected session to the clipboard."""
+        tree = self.query_one("#session-tree", SessionTree)
+        node = tree.cursor_node
+        if node is None:
+            return
+        data = node.data
+        if isinstance(data, SearchResult):
+            session = self._session_from_search_result(data)
+        elif isinstance(data, SessionMeta):
+            session = data
+        else:
+            return
+        if session is None:
+            return
+        result = self._resume_command(session)
+        if result is None:
+            status = self.query_one("#status-bar", Static)
+            status.update(f"No resume command for {session.provider.value} session")
+            return
+        cmd_args, _cwd = result
+        cmd_str = " ".join(cmd_args)
+        self.copy_to_clipboard(cmd_str)
+        status = self.query_one("#status-bar", Static)
+        status.update(f"Copied: {cmd_str}")
+
+    def action_cycle_sort(self) -> None:
+        """Cycle session sort order."""
+        self.sort_index = (self.sort_index + 1) % len(self.sort_options)
+        search_text = self.query_one("#search-input", Input).value
+        self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
+
+    def action_next_project(self) -> None:
+        """Jump to the next project node in the tree."""
+        tree = self.query_one("#session-tree", SessionTree)
+        current = tree.cursor_node
+        # Collect all project-level nodes (direct children of root)
+        project_nodes = list(tree.root.children)
+        if not project_nodes:
+            return
+        if current is None:
+            tree.select_node(project_nodes[0])
+            return
+        # Find which project the cursor is in or on
+        target = current
+        while target.parent is not None and target.parent is not tree.root:
+            target = target.parent
+        # target is now a project node (or root if something went wrong)
+        try:
+            idx = project_nodes.index(target)
+            next_idx = (idx + 1) % len(project_nodes)
+        except ValueError:
+            next_idx = 0
+        tree.select_node(project_nodes[next_idx])
+        project_nodes[next_idx].expand()
+
+    def action_prev_project(self) -> None:
+        """Jump to the previous project node in the tree."""
+        tree = self.query_one("#session-tree", SessionTree)
+        current = tree.cursor_node
+        project_nodes = list(tree.root.children)
+        if not project_nodes:
+            return
+        if current is None:
+            tree.select_node(project_nodes[-1])
+            return
+        target = current
+        while target.parent is not None and target.parent is not tree.root:
+            target = target.parent
+        try:
+            idx = project_nodes.index(target)
+            prev_idx = (idx - 1) % len(project_nodes)
+        except ValueError:
+            prev_idx = len(project_nodes) - 1
+        tree.select_node(project_nodes[prev_idx])
+        project_nodes[prev_idx].expand()
 
     def action_open_session(self) -> None:
         """Open/resume the selected session in its CLI."""
