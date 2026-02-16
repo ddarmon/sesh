@@ -12,6 +12,8 @@ history programmatically.
 
 Inspired by [Claude Code UI](https://github.com/siteboon/claudecodeui).
 
+![sesh screenshot](assets/screenshot.jpg)
+
 ## Install
 
 Install directly from GitHub:
