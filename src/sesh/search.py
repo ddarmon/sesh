@@ -109,7 +109,7 @@ def _extract_codex_session_id(file_path: str) -> str:
     return matches[-1] if matches else stem
 
 
-def ripgrep_search(query: str, max_results: int = 100) -> list[SearchResult]:
+def ripgrep_search(query: str) -> list[SearchResult]:
     """Run ripgrep across session files and return search results."""
     rg = shutil.which("rg")
     if not rg:
@@ -127,7 +127,6 @@ def ripgrep_search(query: str, max_results: int = 100) -> list[SearchResult]:
     cmd = [
         rg, "--json", "-i",
         "--glob", "*.jsonl",
-        "-m", str(max_results),
         query,
         *search_paths,
     ]
@@ -227,8 +226,5 @@ def ripgrep_search(query: str, max_results: int = 100) -> list[SearchResult]:
             matched_line=display_text,
             file_path=file_path,
         ))
-
-        if len(results) >= max_results:
-            break
 
     return results
