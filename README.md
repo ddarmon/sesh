@@ -88,6 +88,47 @@ sesh search "some query"                  # full-text search via ripgrep
 
 Run `sesh --help` or `sesh <command> --help` for full details.
 
+### Using with LLM agents
+
+The CLI is designed so that an LLM agent (like Claude Code or Codex) can
+explore your session history via Bash. The agent can run `sesh --help`
+to learn the commands, then query as needed. Some things to try:
+
+**"What was I working on last week?"**
+
+The agent can list recent sessions across all projects and read their
+summaries:
+
+```
+sesh refresh
+sesh sessions | jq '[.[] | select(.timestamp > "2026-02-09")] | sort_by(.timestamp) | reverse'
+sesh messages <session-id> --summary
+```
+
+**"Find all sessions where I worked on authentication"**
+
+Full-text search returns matching sessions with context:
+
+```
+sesh search "authentication"
+sesh messages <session-id> --limit 20
+```
+
+**"Summarize what I did in a specific project"**
+
+Filter sessions by project, then read through them:
+
+```
+sesh sessions --project /path/to/project
+sesh messages <session-id> --summary   # repeat for each session
+```
+
+**"Which providers did I use for a topic?"**
+
+Search returns the provider for each match, so the agent can group
+results by provider to compare how different tools were used for the
+same topic.
+
 ## Providers
 
 ### Claude Code
