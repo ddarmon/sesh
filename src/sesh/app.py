@@ -436,6 +436,14 @@ class SeshApp(App):
     @staticmethod
     def _resume_command(session: SessionMeta) -> tuple[list[str], str] | None:
         """Return (cmd_args, cwd) to resume a session, or None if the CLI is missing."""
+        # Cursor IDE sessions (txt transcripts) can't be resumed from CLI
+        if (
+            session.provider == Provider.CURSOR
+            and session.source_path
+            and session.source_path.endswith(".txt")
+        ):
+            return None
+
         commands: dict[Provider, tuple[str, list[str]]] = {
             Provider.CLAUDE: ("claude", ["claude", "--resume", session.id]),
             Provider.CODEX: ("codex", ["codex", "resume", session.id]),
