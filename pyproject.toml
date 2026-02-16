@@ -2,11 +2,17 @@
 name = "sesh"
 version = "0.1.0"
 description = "Browse and search Claude Code, Codex, and Cursor sessions in the terminal"
+license = "MIT"
+readme = "README.md"
+authors = [{ name = "David Darmon" }]
 requires-python = ">=3.10"
 dependencies = ["textual>=0.89.0"]
 
 [project.scripts]
 sesh = "sesh.cli:main"
+
+[project.urls]
+Repository = "https://github.com/ddarmon/sesh"
 
 [build-system]
 requires = ["hatchling"]
