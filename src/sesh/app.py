@@ -326,13 +326,13 @@ class SeshApp(App):
             if msg.is_system:
                 continue
 
-            ts = msg.timestamp.strftime("%H:%M") if msg.timestamp else ""
+            ts = f" [dim]({msg.timestamp.strftime('%H:%M')})[/dim]" if msg.timestamp else ""
 
             if msg.role == "user":
-                view.write(f"\n[bold cyan]User[/bold cyan] [dim]({ts})[/dim]:")
+                view.write(f"\n[bold cyan]User[/bold cyan]{ts}:")
                 view.write(f"  {msg.content[:2000]}")
             elif msg.role == "assistant":
-                view.write(f"\n[bold green]Assistant[/bold green] [dim]({ts})[/dim]:")
+                view.write(f"\n[bold green]Assistant[/bold green]{ts}:")
                 try:
                     from rich.markdown import Markdown
                     md = Markdown(msg.content[:5000])
