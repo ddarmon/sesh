@@ -102,6 +102,70 @@ class SessionCache:
             "sessions": [_session_to_dict(s) for s in sessions],
         }
 
+    def get_sessions_for_dir(self, dir_path: str) -> list[SessionMeta] | None:
+        """Return cached sessions if no files in the directory have changed."""
+        entry = self._cache.get(f"dir:{dir_path}")
+        if not entry:
+            return None
+
+        current_fp = self._dir_fingerprint(dir_path)
+        if current_fp is None or current_fp != entry.get("fingerprint"):
+            return None
+
+        try:
+            return [_dict_to_session(d) for d in entry["sessions"]]
+        except (KeyError, ValueError):
+            return None
+
+    def put_sessions_for_dir(self, dir_path: str, sessions: list[SessionMeta]) -> None:
+        """Cache sessions for a directory with a fingerprint of its files."""
+        fp = self._dir_fingerprint(dir_path)
+        if fp is None:
+            return
+
+        self._cache[f"dir:{dir_path}"] = {
+            "fingerprint": fp,
+            "sessions": [_session_to_dict(s) for s in sessions],
+        }
+
+    @staticmethod
+    def _dir_fingerprint(dir_path: str) -> list | None:
+        """Return a fingerprint based on JSONL file mtimes and sizes."""
+        try:
+            entries = []
+            for f in sorted(Path(dir_path).glob("*.jsonl")):
+                if f.name.startswith("agent-"):
+                    continue
+                stat = f.stat()
+                entries.append([f.name, stat.st_mtime, stat.st_size])
+            return entries
+        except OSError:
+            return None
+
+
+PROJECT_PATHS_FILE = CACHE_DIR / "project_paths.json"
+
+
+def load_project_paths() -> dict[str, dict]:
+    """Load cached {encoded_dir_name: {path, mtime}} mapping."""
+    if not PROJECT_PATHS_FILE.is_file():
+        return {}
+    try:
+        with open(PROJECT_PATHS_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_project_paths(mapping: dict[str, dict]) -> None:
+    """Save the project path mapping to disk."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(PROJECT_PATHS_FILE, "w") as f:
+            json.dump(mapping, f)
+    except OSError:
+        pass
+
 
 def save_index(
     projects: dict[str, "Project"],

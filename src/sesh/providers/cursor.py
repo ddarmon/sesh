@@ -135,7 +135,7 @@ class CursorProvider(SessionProvider):
                 display_name = Path(project_path).name or project_path
                 yield project_path, display_name
 
-    def get_sessions(self, project_path: str) -> list[SessionMeta]:
+    def get_sessions(self, project_path: str, cache=None) -> list[SessionMeta]:
         """Return Cursor sessions for a project path."""
         sessions: list[SessionMeta] = []
         seen_ids: set[str] = set()
@@ -150,10 +150,19 @@ class CursorProvider(SessionProvider):
                 store_db = session_dir / "store.db"
                 if not store_db.is_file():
                     continue
+
+                if cache:
+                    cached = cache.get_sessions(str(store_db))
+                    if cached:
+                        for s in cached:
+                            seen_ids.add(s.id)
+                            sessions.append(s)
+                        continue
+
                 meta = self._read_session_meta(store_db)
                 if meta:
                     seen_ids.add(session_dir.name)
-                    sessions.append(SessionMeta(
+                    session = SessionMeta(
                         id=session_dir.name,
                         project_path=project_path,
                         provider=Provider.CURSOR,
@@ -162,7 +171,10 @@ class CursorProvider(SessionProvider):
                         message_count=meta.get("message_count", 0),
                         model=meta.get("model"),
                         source_path=str(store_db),
-                    ))
+                    )
+                    sessions.append(session)
+                    if cache:
+                        cache.put_sessions(str(store_db), [session])
 
         # 2. IDE sessions from workspaceStorage + agent-transcripts
         ide_sessions = self._get_ide_sessions(project_path)

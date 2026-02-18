@@ -16,7 +16,7 @@ class SessionProvider(ABC):
         """Yield (project_path, display_name) pairs."""
 
     @abstractmethod
-    def get_sessions(self, project_id: str) -> list[SessionMeta]:
+    def get_sessions(self, project_id: str, cache=None) -> list[SessionMeta]:
         """Return sessions for a given project identifier."""
 
     @abstractmethod

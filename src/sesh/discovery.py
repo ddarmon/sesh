@@ -9,11 +9,14 @@ from sesh.models import Project, SessionMeta
 _DATETIME_MIN = datetime.min.replace(tzinfo=timezone.utc)
 
 
-def discover_all() -> tuple[dict[str, Project], dict[str, list[SessionMeta]]]:
+def discover_all(cache=None) -> tuple[dict[str, Project], dict[str, list[SessionMeta]]]:
     """Discover all projects and sessions across providers.
 
     Returns (projects, sessions) where projects is keyed by project path
     and sessions is a dict of project_path -> list of SessionMeta.
+
+    If *cache* is a SessionCache instance, providers will use it to skip
+    re-parsing unchanged files.
     """
     from sesh.providers.claude import ClaudeProvider
 
@@ -21,7 +24,7 @@ def discover_all() -> tuple[dict[str, Project], dict[str, list[SessionMeta]]]:
 
     try:
         from sesh.providers.codex import CodexProvider
-        providers_list.append(CodexProvider())
+        providers_list.append(CodexProvider(cache=cache))
     except Exception:
         pass
 
@@ -43,7 +46,7 @@ def discover_all() -> tuple[dict[str, Project], dict[str, list[SessionMeta]]]:
                         display_name=display_name,
                     )
                 proj = projects[project_path]
-                sess = provider.get_sessions(project_path)
+                sess = provider.get_sessions(project_path, cache=cache)
                 if sess:
                     proj.providers.add(sess[0].provider)
                     existing = sessions.get(project_path, [])
