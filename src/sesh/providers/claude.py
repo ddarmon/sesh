@@ -123,27 +123,61 @@ def _display_name_from_path(project_path: str) -> str:
 class ClaudeProvider(SessionProvider):
     """Provider for Claude Code sessions."""
 
+    def __init__(self) -> None:
+        self._path_to_dir: dict[str, Path] = {}
+
     def discover_projects(self) -> Iterator[tuple[str, str]]:
         """Yield (project_path, display_name) for each Claude project."""
         if not PROJECTS_DIR.is_dir():
             return
 
+        from sesh.cache import load_project_paths, save_project_paths
+
+        cached_paths = load_project_paths()
+        updated = False
+
         for entry in sorted(PROJECTS_DIR.iterdir()):
             if not entry.is_dir():
                 continue
             project_name = entry.name
-            project_path = _extract_project_path(project_name, entry)
+
+            try:
+                dir_mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+
+            cached = cached_paths.get(project_name)
+            if cached and cached.get("mtime") == dir_mtime:
+                project_path = cached["path"]
+            else:
+                project_path = _extract_project_path(project_name, entry)
+                cached_paths[project_name] = {"path": project_path, "mtime": dir_mtime}
+                updated = True
+
+            self._path_to_dir[project_path] = entry
             display_name = _display_name_from_path(project_path)
             yield project_path, display_name
 
-    def get_sessions(self, project_path: str) -> list[SessionMeta]:
+        if updated:
+            save_project_paths(cached_paths)
+
+    def get_sessions(self, project_path: str, cache=None) -> list[SessionMeta]:
         """Return sessions for a project, grouped by first user message."""
-        # Find the project directory that maps to this path
         project_dir = self._find_project_dir(project_path)
         if not project_dir:
             return []
 
-        return self._parse_sessions(project_dir, project_path)
+        if cache:
+            cached = cache.get_sessions_for_dir(str(project_dir))
+            if cached is not None:
+                return cached
+
+        sessions = self._parse_sessions(project_dir, project_path)
+
+        if cache:
+            cache.put_sessions_for_dir(str(project_dir), sessions)
+
+        return sessions
 
     def get_messages(self, session: SessionMeta) -> list[Message]:
         """Load all messages for a session from its source JSONL file."""
@@ -256,6 +290,9 @@ class ClaudeProvider(SessionProvider):
 
     def _find_project_dir(self, project_path: str) -> Path | None:
         """Find the Claude project directory for a given project path."""
+        if project_path in self._path_to_dir:
+            return self._path_to_dir[project_path]
+
         if not PROJECTS_DIR.is_dir():
             return None
 
@@ -264,6 +301,7 @@ class ClaudeProvider(SessionProvider):
                 continue
             resolved = _extract_project_path(entry.name, entry)
             if resolved == project_path:
+                self._path_to_dir[project_path] = entry
                 return entry
 
         return None

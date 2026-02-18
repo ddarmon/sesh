@@ -41,10 +41,12 @@ def _json_out(obj) -> None:
 
 def cmd_refresh(args: argparse.Namespace) -> None:
     """Run full discovery and save the index."""
-    from sesh.cache import save_index
+    from sesh.cache import SessionCache, save_index
     from sesh.discovery import discover_all
 
-    projects, sessions = discover_all()
+    cache = SessionCache()
+    projects, sessions = discover_all(cache=cache)
+    cache.save()
     save_index(projects, sessions)
 
     total_sessions = sum(len(s) for s in sessions.values())

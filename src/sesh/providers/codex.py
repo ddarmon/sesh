@@ -38,8 +38,9 @@ def _extract_text_from_content(content: list) -> str:
 class CodexProvider(SessionProvider):
     """Provider for OpenAI Codex CLI sessions."""
 
-    def __init__(self) -> None:
+    def __init__(self, cache=None) -> None:
         self._index: dict[str, list[dict]] | None = None
+        self._cache = cache
 
     def discover_projects(self) -> Iterator[tuple[str, str]]:
         """Yield (project_path, display_name) for each Codex project."""
@@ -54,7 +55,7 @@ class CodexProvider(SessionProvider):
             display_name = Path(project_path).name or project_path
             yield project_path, display_name
 
-    def get_sessions(self, project_path: str) -> list[SessionMeta]:
+    def get_sessions(self, project_path: str, cache=None) -> list[SessionMeta]:
         """Return sessions for a given project path."""
         index = self._build_index()
         sessions_data = index.get(project_path, [])
@@ -144,13 +145,49 @@ class CodexProvider(SessionProvider):
         if not CODEX_DIR.is_dir():
             return self._index
 
+        cache = self._cache
+
         for jsonl_file in CODEX_DIR.rglob("*.jsonl"):
+            file_str = str(jsonl_file)
+
+            # Check per-file cache first
+            if cache:
+                cached_sessions = cache.get_sessions(file_str)
+                if cached_sessions:
+                    for s in cached_sessions:
+                        cwd = s.project_path
+                        if cwd not in self._index:
+                            self._index[cwd] = []
+                        self._index[cwd].append({
+                            "id": s.id,
+                            "cwd": s.project_path,
+                            "model": s.model,
+                            "timestamp": s.timestamp,
+                            "summary": s.summary,
+                            "message_count": s.message_count,
+                            "file_path": s.source_path or file_str,
+                        })
+                    continue
+
             data = self._parse_session_file(jsonl_file)
             if data and data.get("cwd"):
                 cwd = data["cwd"]
                 if cwd not in self._index:
                     self._index[cwd] = []
                 self._index[cwd].append(data)
+
+                # Store in cache for next time
+                if cache:
+                    cache.put_sessions(file_str, [SessionMeta(
+                        id=data["id"],
+                        project_path=data["cwd"],
+                        provider=Provider.CODEX,
+                        summary=data.get("summary", ""),
+                        timestamp=data["timestamp"],
+                        message_count=data.get("message_count", 0),
+                        model=data.get("model"),
+                        source_path=data.get("file_path"),
+                    )])
 
         return self._index
 

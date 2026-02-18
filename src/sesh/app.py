@@ -217,7 +217,52 @@ class SeshApp(App):
         tree = self.query_one("#session-tree", SessionTree)
         tree.root.expand()
         tree.show_root = False
+
+        # Tier 1: instant display from cached index
+        if self._load_from_index():
+            self._populate_tree()
+            self.query_one("#status-bar", Static).update("(refreshing...)")
+
+        # Tier 2: background refresh
         self.run_worker(self._discover_all, thread=True, exclusive=True)
+
+    def _load_from_index(self) -> bool:
+        """Load projects and sessions from the cached index for instant display."""
+        from sesh.cache import _dict_to_session, load_index
+
+        data = load_index()
+        if not data:
+            return False
+
+        try:
+            projects: dict[str, Project] = {}
+            for p in data.get("projects", []):
+                la = p.get("latest_activity")
+                if la and isinstance(la, str):
+                    la = la.replace("Z", "+00:00")
+                    la = datetime.fromisoformat(la)
+                else:
+                    la = None
+                projects[p["path"]] = Project(
+                    path=p["path"],
+                    display_name=p["display_name"],
+                    providers={Provider(v) for v in p.get("providers", [])},
+                    session_count=p.get("session_count", 0),
+                    latest_activity=la,
+                )
+
+            sessions: dict[str, list[SessionMeta]] = {}
+            for s_dict in data.get("sessions", []):
+                s = _dict_to_session(s_dict)
+                if s.project_path not in sessions:
+                    sessions[s.project_path] = []
+                sessions[s.project_path].append(s)
+
+            self.projects = projects
+            self.sessions = sessions
+            return True
+        except (KeyError, ValueError):
+            return False
 
     def action_refresh(self) -> None:
         """Re-discover all sessions."""
@@ -227,28 +272,60 @@ class SeshApp(App):
 
     def _discover_all(self) -> None:
         """Background threaded worker: discover projects and sessions."""
+        from sesh.cache import SessionCache, save_index
         from sesh.discovery import discover_all
 
         self.call_from_thread(
             self.query_one("#status-bar", Static).update, "Discovering sessions..."
         )
-        projects, sessions = discover_all()
+
+        cache = SessionCache()
+        projects, sessions = discover_all(cache=cache)
         self.projects = projects
         self.sessions = sessions
 
-        # Persist cache
+        # Persist per-file cache entries for all sessions
+        for path, sess_list in self.sessions.items():
+            for s in sess_list:
+                if s.source_path:
+                    cache.put_sessions(s.source_path, [s])
+        cache.save()
+
+        # Save index for Tier 1 instant display on next launch
         try:
-            from sesh.cache import SessionCache
-            cache = SessionCache()
-            for path, sess_list in self.sessions.items():
-                for s in sess_list:
-                    if s.source_path:
-                        cache.put_sessions(s.source_path, [s])
-            cache.save()
+            save_index(projects, sessions)
         except Exception:
             pass
 
-        self.call_from_thread(self._populate_tree)
+        self.call_from_thread(self._refresh_tree)
+
+    def _refresh_tree(self) -> None:
+        """Re-populate the tree after background discovery, preserving cursor."""
+        tree = self.query_one("#session-tree", SessionTree)
+        selected_key = None
+        if tree.cursor_node and isinstance(tree.cursor_node.data, SessionMeta):
+            s = tree.cursor_node.data
+            selected_key = (s.provider.value, s.id)
+
+        search_text = self.query_one("#search-input", Input).value
+        self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
+
+        if selected_key:
+            self._reselect_node(tree, selected_key)
+
+    def _reselect_node(self, tree: SessionTree, key: tuple[str, str]) -> None:
+        """Find and re-select a session node by (provider, id) key."""
+        def _walk(node):
+            if isinstance(node.data, SessionMeta):
+                if (node.data.provider.value, node.data.id) == key:
+                    tree.select_node(node)
+                    return True
+            for child in node.children:
+                if _walk(child):
+                    return True
+            return False
+
+        _walk(tree.root)
 
     def _sort_sessions(self, sessions: list[SessionMeta]) -> list[SessionMeta]:
         """Sort sessions based on current sort option."""
