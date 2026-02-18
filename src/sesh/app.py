@@ -680,8 +680,10 @@ class SeshApp(App):
         badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U"}
         for r in results[:100]:
             badge = badge_map.get(r.provider, "?")
+            proj = self.projects.get(r.project_path)
+            proj_name = proj.display_name if proj else r.project_path.rsplit("/", 1)[-1]
             snippet = r.matched_line.replace("\n", " ")[:80]
-            label = f"[{badge}] {snippet}"
+            label = f"[{badge}] {proj_name} — {snippet}"
             child = node.add_leaf(label)
             child.data = r
 

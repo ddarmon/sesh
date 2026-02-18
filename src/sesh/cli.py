@@ -179,6 +179,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         out.append({
             "session_id": r.session_id,
             "provider": r.provider.value,
+            "project_path": r.project_path,
             "matched_line": r.matched_line,
             "file_path": r.file_path,
         })
