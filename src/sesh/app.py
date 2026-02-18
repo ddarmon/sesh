@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import re
 import shutil
 import subprocess
@@ -639,6 +640,19 @@ class SeshApp(App):
         search_text = self.query_one("#search-input", Input).value
         self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
 
+    def _copy_text(self, text: str) -> None:
+        """Copy text to the system clipboard.
+
+        Uses pbcopy on macOS (works in Terminal.app), falling back to
+        Textual's OSC 52 method for other platforms/terminals.
+        """
+        if platform.system() == "Darwin" and shutil.which("pbcopy"):
+            subprocess.run(
+                ["pbcopy"], input=text.encode("utf-8"), check=True
+            )
+        else:
+            self.copy_to_clipboard(text)
+
     def action_copy_session_id(self) -> None:
         """Copy the resume command for the selected session to the clipboard."""
         tree = self.query_one("#session-tree", SessionTree)
@@ -661,7 +675,7 @@ class SeshApp(App):
             return
         cmd_args, _cwd = result
         cmd_str = " ".join(cmd_args)
-        self.copy_to_clipboard(cmd_str)
+        self._copy_text(cmd_str)
         status = self.query_one("#status-bar", Static)
         status.update(f"Copied: {cmd_str}")
 
