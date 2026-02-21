@@ -83,6 +83,20 @@ the session is deleted via the provider's `delete_session` method:
 -   **Codex**: deletes the session JSONL file
 -   **Cursor**: removes the session directory (parent of `store.db`)
 
+## Project move
+
+Press `m` on a project or session node to move a project path. The move
+dialog supports:
+
+-   **Full Move**: move files on disk and rewrite provider metadata
+-   **Metadata Only**: rewrite provider metadata only (for already-moved files)
+
+CLI equivalent:
+
+-   `sesh move <old-path> <new-path>`
+-   `sesh move <old-path> <new-path> --metadata-only`
+-   `sesh move <old-path> <new-path> --dry-run`
+
 ## CLI subcommands (JSON output)
 
 All subcommands output JSON to stdout. Run `sesh refresh` first to build
@@ -99,6 +113,7 @@ the index, then query it.
 | `sesh clean <query> [--dry-run]`                          | Delete sessions matching a search query  |
 | `sesh resume <id> [--provider NAME]`                      | Resume a session in its provider's CLI   |
 | `sesh export <id> [--provider NAME] [--format md/json]`   | Export a session to Markdown or JSON     |
+| `sesh move <old> <new> [--metadata-only] [--dry-run]`     | Move project path and update metadata    |
 
 The index is stored at `~/.cache/sesh/index.json`.
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 
-from sesh.models import Message, Project, SessionMeta
+from sesh.models import Message, MoveReport, Project, SessionMeta
 
 
 class SessionProvider(ABC):
@@ -25,6 +25,10 @@ class SessionProvider(ABC):
 
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a session's stored data. Override per provider."""
+        raise NotImplementedError
+
+    def move_project(self, old_path: str, new_path: str) -> MoveReport:
+        """Update metadata when a project moves. Override per provider."""
         raise NotImplementedError
 
 

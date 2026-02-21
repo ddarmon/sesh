@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sesh.models import Message, Provider, SessionMeta
+from sesh.models import Message, MoveReport, Provider, SessionMeta, encode_project_path
 from sesh.providers import SessionProvider
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -118,6 +118,43 @@ def _extract_project_path(project_name: str, project_dir: Path) -> str:
 def _display_name_from_path(project_path: str) -> str:
     """Generate a short display name from a project path."""
     return Path(project_path).name or project_path
+
+
+def _rewrite_cwd_in_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> bool:
+    """Rewrite exact cwd matches in a Claude JSONL file. Returns True if modified."""
+    output: list[str] = []
+    modified = False
+
+    with open(jsonl_file) as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped:
+                output.append(line)
+                continue
+            try:
+                entry = json.loads(stripped)
+            except json.JSONDecodeError:
+                output.append(line)
+                continue
+
+            if entry.get("cwd") == old_path:
+                entry["cwd"] = new_path
+                line = json.dumps(entry) + "\n"
+                modified = True
+            output.append(line)
+
+    if not modified:
+        return False
+
+    fd, tmp = tempfile.mkstemp(dir=str(jsonl_file.parent), suffix=".jsonl.tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.writelines(output)
+        os.replace(tmp, str(jsonl_file))
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    return True
 
 
 class ClaudeProvider(SessionProvider):
@@ -287,6 +324,64 @@ class ClaudeProvider(SessionProvider):
                         raise
             except OSError:
                 continue
+
+    def move_project(self, old_path: str, new_path: str) -> MoveReport:
+        """Update Claude metadata when a project path changes."""
+        old_encoded = encode_project_path(old_path)
+        new_encoded = encode_project_path(new_path)
+        old_dir = PROJECTS_DIR / old_encoded
+        new_dir = PROJECTS_DIR / new_encoded
+
+        files_modified = 0
+        dirs_renamed = 0
+        target_dir: Path | None = None
+
+        if old_dir.is_dir():
+            if new_dir.exists():
+                return MoveReport(
+                    provider=Provider.CLAUDE,
+                    success=False,
+                    error=f"Target Claude project directory already exists: {new_dir}",
+                )
+            try:
+                old_dir.rename(new_dir)
+                dirs_renamed = 1
+            except OSError as exc:
+                return MoveReport(
+                    provider=Provider.CLAUDE,
+                    success=False,
+                    error=f"Failed to rename Claude project directory: {exc}",
+                )
+            target_dir = new_dir
+        elif new_dir.is_dir():
+            target_dir = new_dir
+        else:
+            return MoveReport(provider=Provider.CLAUDE, success=True)
+
+        try:
+            for jsonl_file in target_dir.glob("*.jsonl"):
+                if jsonl_file.name.startswith("agent-"):
+                    continue
+                if _rewrite_cwd_in_jsonl(jsonl_file, old_path, new_path):
+                    files_modified += 1
+        except OSError as exc:
+            return MoveReport(
+                provider=Provider.CLAUDE,
+                success=False,
+                files_modified=files_modified,
+                dirs_renamed=dirs_renamed,
+                error=f"Failed updating Claude JSONL metadata: {exc}",
+            )
+
+        self._path_to_dir.pop(old_path, None)
+        self._path_to_dir[new_path] = target_dir
+
+        return MoveReport(
+            provider=Provider.CLAUDE,
+            success=True,
+            files_modified=files_modified,
+            dirs_renamed=dirs_renamed,
+        )
 
     def _find_project_dir(self, project_path: str) -> Path | None:
         """Find the Claude project directory for a given project path."""

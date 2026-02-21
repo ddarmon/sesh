@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sesh.models import Message, Provider, SessionMeta
+from sesh.models import Message, MoveReport, Provider, SessionMeta
 from sesh.providers import SessionProvider
 
 CODEX_DIR = Path.home() / ".codex" / "sessions"
@@ -33,6 +35,96 @@ def _extract_text_from_content(content: list) -> str:
             if text:
                 parts.append(text)
     return "\n".join(parts)
+
+
+def _rewrite_codex_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> bool:
+    """Rewrite Codex cwd references in a JSONL file. Returns True if modified."""
+    old_cwd_tag = f"<cwd>{old_path}</cwd>"
+    new_cwd_tag = f"<cwd>{new_path}</cwd>"
+    output: list[str] = []
+    modified = False
+
+    with open(jsonl_file) as f:
+        for idx, line in enumerate(f):
+            stripped = line.strip()
+            if not stripped:
+                output.append(line)
+                continue
+
+            try:
+                entry = json.loads(stripped)
+            except json.JSONDecodeError:
+                replaced = line.replace(old_cwd_tag, new_cwd_tag)
+                if replaced != line:
+                    modified = True
+                output.append(replaced)
+                continue
+
+            # New format: update cwd in the session_meta first entry.
+            if idx == 0 and entry.get("type") == "session_meta":
+                payload = entry.get("payload")
+                if isinstance(payload, dict) and payload.get("cwd") == old_path:
+                    payload = payload.copy()
+                    payload["cwd"] = new_path
+                    entry = entry.copy()
+                    entry["payload"] = payload
+                    line = json.dumps(entry) + "\n"
+                    output.append(line)
+                    modified = True
+                    continue
+
+            # Legacy format: replace <cwd>...</cwd> in content text blocks.
+            entry_changed = False
+            payload = entry.get("payload")
+            if isinstance(payload, dict):
+                content = payload.get("content")
+                if isinstance(content, list):
+                    new_content = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            new_item = item.copy()
+                            item_changed = False
+                            for key in ("text", "input_text", "output_text"):
+                                value = new_item.get(key)
+                                if isinstance(value, str) and old_cwd_tag in value:
+                                    new_item[key] = value.replace(old_cwd_tag, new_cwd_tag)
+                                    item_changed = True
+                            if item_changed:
+                                entry_changed = True
+                            new_content.append(new_item)
+                        else:
+                            new_content.append(item)
+                    if entry_changed:
+                        payload = payload.copy()
+                        payload["content"] = new_content
+                        entry = entry.copy()
+                        entry["payload"] = payload
+
+            if entry_changed:
+                line = json.dumps(entry) + "\n"
+                output.append(line)
+                modified = True
+                continue
+
+            replaced = line.replace(old_cwd_tag, new_cwd_tag)
+            if replaced != line:
+                modified = True
+                output.append(replaced)
+            else:
+                output.append(line)
+
+    if not modified:
+        return False
+
+    fd, tmp = tempfile.mkstemp(dir=str(jsonl_file.parent), suffix=".jsonl.tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.writelines(output)
+        os.replace(tmp, str(jsonl_file))
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    return True
 
 
 class CodexProvider(SessionProvider):
@@ -135,6 +227,31 @@ class CodexProvider(SessionProvider):
         """Delete a Codex session by removing its JSONL file."""
         if session.source_path:
             Path(session.source_path).unlink(missing_ok=True)
+
+    def move_project(self, old_path: str, new_path: str) -> MoveReport:
+        """Update Codex metadata when a project path changes."""
+        if not CODEX_DIR.is_dir():
+            return MoveReport(provider=Provider.CODEX, success=True)
+
+        files_modified = 0
+        try:
+            for jsonl_file in CODEX_DIR.rglob("*.jsonl"):
+                if _rewrite_codex_jsonl(jsonl_file, old_path, new_path):
+                    files_modified += 1
+        except OSError as exc:
+            return MoveReport(
+                provider=Provider.CODEX,
+                success=False,
+                files_modified=files_modified,
+                error=f"Failed updating Codex session metadata: {exc}",
+            )
+
+        self._index = None
+        return MoveReport(
+            provider=Provider.CODEX,
+            success=True,
+            files_modified=files_modified,
+        )
 
     def _build_index(self) -> dict[str, list[dict]]:
         """Build index of project_path -> [{session data}]."""

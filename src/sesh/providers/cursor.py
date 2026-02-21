@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sesh.models import Message, Provider, SessionMeta
+from sesh.models import Message, MoveReport, Provider, SessionMeta, encode_project_path, workspace_uri
 from sesh.providers import SessionProvider
 
 CURSOR_CHATS_DIR = Path.home() / ".cursor" / "chats"
@@ -61,6 +63,59 @@ def _extract_tool_name(content) -> str | None:
     return None
 
 
+def _rewrite_workspace_json(workspace_json: Path, old_uri: str, new_uri: str) -> bool:
+    """Rewrite a workspace.json folder URI atomically. Returns True if modified."""
+    data = json.loads(workspace_json.read_text())
+    if data.get("folder") != old_uri:
+        return False
+
+    data["folder"] = new_uri
+    fd, tmp = tempfile.mkstemp(dir=str(workspace_json.parent), suffix=".json.tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, str(workspace_json))
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    return True
+
+
+def _rewrite_store_db_blobs(store_db: Path, old_path: str, new_path: str) -> bool:
+    """Rewrite old_path references in a store.db blobs table."""
+    conn = sqlite3.connect(store_db, timeout=5)
+    modified = False
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT rowid, data FROM blobs")
+        updates = []
+        for rowid, blob_data in cur.fetchall():
+            if not blob_data:
+                continue
+            if isinstance(blob_data, bytes):
+                try:
+                    text = blob_data.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+                new_text = text.replace(old_path, new_path)
+                if new_text != text:
+                    updates.append((new_text.encode("utf-8"), rowid))
+            else:
+                text = str(blob_data)
+                new_text = text.replace(old_path, new_path)
+                if new_text != text:
+                    updates.append((new_text, rowid))
+
+        if updates:
+            cur.executemany("UPDATE blobs SET data = ? WHERE rowid = ?", updates)
+            conn.commit()
+            modified = True
+    finally:
+        conn.close()
+    return modified
+
+
 class CursorProvider(SessionProvider):
     """Provider for Cursor IDE sessions."""
 
@@ -99,7 +154,7 @@ class CursorProvider(SessionProvider):
         workspace_map = self._build_workspace_map()
         # Build reverse: encoded_name -> project_path from workspace_map
         for project_path in workspace_map:
-            encoded = project_path.lstrip("/").replace("/", "-")
+            encoded = encode_project_path(project_path)
             candidate = CURSOR_PROJECTS_DIR / encoded
             if candidate.is_dir():
                 self._projects_dir_map[project_path] = candidate
@@ -439,6 +494,100 @@ class CursorProvider(SessionProvider):
             session_dir = source.parent
             if session_dir.is_dir():
                 shutil.rmtree(session_dir)
+
+    def move_project(self, old_path: str, new_path: str) -> MoveReport:
+        """Update Cursor metadata when a project path changes."""
+        old_md5 = hashlib.md5(old_path.encode()).hexdigest()
+        new_md5 = hashlib.md5(new_path.encode()).hexdigest()
+        old_chats_dir = CURSOR_CHATS_DIR / old_md5
+        new_chats_dir = CURSOR_CHATS_DIR / new_md5
+
+        old_encoded = encode_project_path(old_path)
+        new_encoded = encode_project_path(new_path)
+        old_projects_dir = CURSOR_PROJECTS_DIR / old_encoded
+        new_projects_dir = CURSOR_PROJECTS_DIR / new_encoded
+
+        conflicts = []
+        if old_chats_dir.is_dir() and new_chats_dir.exists():
+            conflicts.append(f"target chats directory exists: {new_chats_dir}")
+        if old_projects_dir.is_dir() and new_projects_dir.exists():
+            conflicts.append(f"target projects directory exists: {new_projects_dir}")
+        if conflicts:
+            return MoveReport(
+                provider=Provider.CURSOR,
+                success=False,
+                error="; ".join(conflicts),
+            )
+
+        files_modified = 0
+        dirs_renamed = 0
+        warnings: list[str] = []
+
+        chats_dir: Path | None = None
+        if old_chats_dir.is_dir():
+            try:
+                old_chats_dir.rename(new_chats_dir)
+            except OSError as exc:
+                return MoveReport(
+                    provider=Provider.CURSOR,
+                    success=False,
+                    error=f"Failed to rename Cursor chats directory: {exc}",
+                )
+            dirs_renamed += 1
+            chats_dir = new_chats_dir
+        elif new_chats_dir.is_dir():
+            chats_dir = new_chats_dir
+
+        if old_projects_dir.is_dir():
+            try:
+                old_projects_dir.rename(new_projects_dir)
+            except OSError as exc:
+                return MoveReport(
+                    provider=Provider.CURSOR,
+                    success=False,
+                    dirs_renamed=dirs_renamed,
+                    error=f"Failed to rename Cursor projects directory: {exc}",
+                )
+            dirs_renamed += 1
+
+        old_uri = workspace_uri(old_path)
+        new_uri = workspace_uri(new_path)
+        if WORKSPACE_STORAGE.is_dir():
+            for ws_dir in WORKSPACE_STORAGE.iterdir():
+                workspace_json = ws_dir / "workspace.json"
+                if not workspace_json.is_file():
+                    continue
+                try:
+                    if _rewrite_workspace_json(workspace_json, old_uri, new_uri):
+                        files_modified += 1
+                except (json.JSONDecodeError, OSError):
+                    continue
+
+        if chats_dir and chats_dir.is_dir():
+            for store_db in chats_dir.rglob("store.db"):
+                try:
+                    if _rewrite_store_db_blobs(store_db, old_path, new_path):
+                        files_modified += 1
+                except (sqlite3.Error, OSError) as exc:
+                    warnings.append(f"{store_db}: {exc}")
+
+        self._workspace_map = None
+        self._projects_dir_map = None
+
+        warning_msg = None
+        if warnings:
+            snippet = "; ".join(warnings[:3])
+            if len(warnings) > 3:
+                snippet += "; ..."
+            warning_msg = f"Best-effort store.db update had errors: {snippet}"
+
+        return MoveReport(
+            provider=Provider.CURSOR,
+            success=True,
+            files_modified=files_modified,
+            dirs_renamed=dirs_renamed,
+            error=warning_msg,
+        )
 
     def _read_session_meta(self, store_db: Path) -> dict | None:
         """Read metadata from a Cursor session's store.db."""

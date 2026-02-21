@@ -384,6 +384,50 @@ def cmd_export(args: argparse.Namespace) -> None:
             print()
 
 
+def cmd_move(args: argparse.Namespace) -> None:
+    """Move a project and rewrite provider metadata."""
+    from sesh.move import move_project
+
+    old_path = os.path.abspath(os.path.expanduser(args.old_path))
+    new_path = os.path.abspath(os.path.expanduser(args.new_path))
+
+    try:
+        reports = move_project(
+            old_path=old_path,
+            new_path=new_path,
+            full_move=not args.metadata_only,
+            dry_run=args.dry_run,
+        )
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+
+    out_reports = []
+    had_errors = False
+    for report in reports:
+        if not report.success:
+            had_errors = True
+        out_reports.append({
+            "provider": report.provider.value,
+            "success": report.success,
+            "files_modified": report.files_modified,
+            "dirs_renamed": report.dirs_renamed,
+            "error": report.error,
+        })
+
+    _json_out({
+        "old_path": old_path,
+        "new_path": new_path,
+        "full_move": not args.metadata_only,
+        "dry_run": args.dry_run,
+        "reports": out_reports,
+    })
+
+    if had_errors:
+        print("One or more providers reported move errors.", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sesh",
@@ -399,7 +443,8 @@ def main() -> None:
             "  sesh search <query>     # full-text search across sessions\n"
             "  sesh clean <query>      # delete sessions matching a query\n"
             "  sesh resume <id>        # resume a session in its provider's CLI\n"
-            "  sesh export <id>        # export a session to Markdown or JSON"
+            "  sesh export <id>        # export a session to Markdown or JSON\n"
+            "  sesh move <old> <new>   # move project path + update metadata"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -565,6 +610,35 @@ def main() -> None:
         help="Output format: md (Markdown, default) or json",
     )
 
+    # move
+    p_move = sub.add_parser(
+        "move",
+        help="Move a project and update provider metadata",
+        description=(
+            "Move a project directory and update Claude, Codex, and Cursor metadata "
+            "to point to the new path. Use --metadata-only if files were moved manually. "
+            "Use --dry-run to preview changes without writing anything."
+        ),
+    )
+    p_move.add_argument(
+        "old_path",
+        help="Project path before the move",
+    )
+    p_move.add_argument(
+        "new_path",
+        help="Project path after the move",
+    )
+    p_move.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Only rewrite metadata (do not move files on disk)",
+    )
+    p_move.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without modifying anything",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -587,6 +661,8 @@ def main() -> None:
         cmd_resume(args)
     elif args.command == "export":
         cmd_export(args)
+    elif args.command == "move":
+        cmd_move(args)
 
 
 if __name__ == "__main__":
