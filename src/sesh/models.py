@@ -14,6 +14,15 @@ class Provider(Enum):
 
 
 @dataclass
+class MoveReport:
+    provider: Provider
+    success: bool
+    files_modified: int = 0
+    dirs_renamed: int = 0
+    error: str | None = None
+
+
+@dataclass
 class Project:
     path: str
     display_name: str
@@ -52,3 +61,13 @@ class SearchResult:
     provider: Provider
     matched_line: str
     file_path: str
+
+
+def encode_project_path(path: str) -> str:
+    """Encode a filesystem path as a provider project directory name."""
+    return path.lstrip("/").replace("/", "-")
+
+
+def workspace_uri(path: str) -> str:
+    """Convert an absolute path to a Cursor workspace file URI."""
+    return f"file://{path}"

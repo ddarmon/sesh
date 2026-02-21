@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import re
 import shutil
@@ -106,6 +107,74 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "confirm-yes")
 
 
+class MoveProjectScreen(ModalScreen[tuple[str, bool] | None]):
+    """Modal dialog for moving a project path."""
+
+    CSS = """
+    MoveProjectScreen {
+        align: center middle;
+    }
+
+    #move-dialog {
+        width: 80;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #move-path {
+        margin-top: 1;
+    }
+
+    #move-error {
+        color: $error;
+        height: 1;
+        margin-top: 1;
+    }
+
+    #move-buttons {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+
+    #move-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    def __init__(self, current_path: str) -> None:
+        super().__init__()
+        self.current_path = current_path
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="move-dialog"):
+            yield Label("Move project to:")
+            yield Input(value=self.current_path, id="move-path")
+            yield Label("", id="move-error")
+            with Horizontal(id="move-buttons"):
+                yield Button("Full Move", variant="primary", id="move-full")
+                yield Button("Metadata Only", variant="default", id="move-meta")
+                yield Button("Cancel", variant="default", id="move-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#move-path", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "move-cancel":
+            self.dismiss(None)
+            return
+
+        new_path = self.query_one("#move-path", Input).value.strip()
+        if not new_path:
+            self.query_one("#move-error", Label).update("Path is required")
+            return
+
+        full_move = event.button.id == "move-full"
+        self.dismiss((new_path, full_move))
+
+
 class SeshApp(App):
     """Main application."""
 
@@ -178,6 +247,7 @@ class SeshApp(App):
         Binding("f", "cycle_filter", "Filter"),
         Binding("o", "open_session", "Open"),
         Binding("d", "delete_session", "Delete"),
+        Binding("m", "move_project", "Move"),
         Binding("r", "refresh", "Refresh"),
         Binding("y", "copy_session_id", "Copy ID"),
         Binding("s", "cycle_sort", "Sort"),
@@ -406,7 +476,7 @@ class SeshApp(App):
         status.update(
             f"{len(all_sessions)} sessions · "
             f"[{filter_name}] · [Sort: timeline] · "
-            f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete r:Refresh"
+            f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete m:Move r:Refresh"
         )
 
     def _populate_tree_grouped(self, filter_text: str, provider_filter: Provider | None) -> None:
@@ -501,7 +571,7 @@ class SeshApp(App):
         status.update(
             f"{shown_projects} projects · {total_sessions} sessions · "
             f"[{filter_name}] · [Sort: {sort_name}] · "
-            f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete r:Refresh"
+            f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete m:Move r:Refresh"
         )
 
     @staticmethod
@@ -882,6 +952,125 @@ class SeshApp(App):
         if shutil.which(binary) is None:
             return None
         return args, session.project_path
+
+    def action_move_project(self) -> None:
+        """Prompt to move the selected project and rewrite metadata."""
+        tree = self.query_one("#session-tree", SessionTree)
+        node = tree.cursor_node
+        if node is None:
+            return
+
+        project_path = self._project_path_from_node(node)
+        if not project_path:
+            status = self.query_one("#status-bar", Static)
+            status.update("Select a project or session to move")
+            return
+
+        self.push_screen(
+            MoveProjectScreen(project_path),
+            lambda result: self._handle_move_result(project_path, result),
+        )
+
+    def _project_path_from_node(self, node) -> str | None:
+        """Resolve a project path from the selected node or its ancestors."""
+        current = node
+        while current is not None:
+            data = current.data
+            if isinstance(data, Project):
+                return data.path
+            if isinstance(data, SessionMeta):
+                return data.project_path
+            if isinstance(data, SearchResult):
+                return data.project_path
+            current = current.parent
+        return None
+
+    def _handle_move_result(
+        self,
+        old_path: str,
+        result: tuple[str, bool] | None,
+    ) -> None:
+        """Handle modal output and enqueue move work."""
+        if result is None:
+            return
+
+        new_path, full_move = result
+        old_abs = os.path.abspath(os.path.expanduser(old_path))
+        new_abs = os.path.abspath(os.path.expanduser(new_path))
+
+        if old_abs == new_abs:
+            status = self.query_one("#status-bar", Static)
+            status.update("New path must be different from current path")
+            return
+
+        self.run_worker(
+            lambda: self._execute_move(old_abs, new_abs, full_move),
+            thread=True,
+            exclusive=True,
+            group="move",
+        )
+
+    def _execute_move(self, old_path: str, new_path: str, full_move: bool) -> None:
+        """Run project move + metadata updates and refresh discovery."""
+        from sesh.move import move_project
+
+        self.call_from_thread(
+            self.query_one("#status-bar", Static).update,
+            "Moving project...",
+        )
+
+        try:
+            reports = move_project(
+                old_path=old_path,
+                new_path=new_path,
+                full_move=full_move,
+                dry_run=False,
+            )
+        except Exception as exc:
+            self.call_from_thread(
+                self.query_one("#status-bar", Static).update,
+                f"Move failed: {exc}",
+            )
+            return
+
+        # Rebuild in-memory state and tree after metadata updates.
+        self._discover_all()
+
+        self.call_from_thread(
+            self.query_one("#status-bar", Static).update,
+            self._format_move_status(new_path, reports),
+        )
+
+    @staticmethod
+    def _format_move_status(new_path: str, reports) -> str:
+        """Build a concise status message from provider move reports."""
+        failures = []
+        warnings = []
+        details = []
+        for report in reports:
+            change_bits = []
+            if report.dirs_renamed:
+                change_bits.append(f"{report.dirs_renamed} dirs")
+            if report.files_modified:
+                change_bits.append(f"{report.files_modified} files")
+            change_summary = ", ".join(change_bits) if change_bits else "no changes"
+
+            if report.success:
+                details.append(f"{report.provider.value}: {change_summary}")
+                if report.error:
+                    warnings.append(f"{report.provider.value}: {report.error}")
+            else:
+                reason = report.error or "unknown error"
+                failures.append(f"{report.provider.value}: {reason}")
+
+        if failures:
+            return f"Move completed with errors: {'; '.join(failures)}"
+        if warnings:
+            return (
+                f"Move complete -> {new_path} "
+                f"({'; '.join(details)}; warnings: {'; '.join(warnings)})"
+            )
+        return f"Move complete -> {new_path} ({'; '.join(details)})"
 
     def action_delete_session(self) -> None:
         """Prompt to delete the selected session."""
