@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 from sesh.cache import CACHE_FILE, INDEX_FILE, PROJECT_PATHS_FILE
-from sesh.models import MoveReport, Provider, encode_project_path, workspace_uri
+from sesh.models import MoveReport, Provider, encode_claude_path, encode_cursor_path, workspace_uri
 from sesh.providers.claude import ClaudeProvider, PROJECTS_DIR
 from sesh.providers.codex import CODEX_DIR, CodexProvider
 from sesh.providers.cursor import (
@@ -119,8 +119,8 @@ def _cursor_store_db_needs_rewrite(store_db: Path, old_path: str) -> bool:
 
 
 def _dry_run_claude(old_path: str, new_path: str) -> MoveReport:
-    old_encoded = encode_project_path(old_path)
-    new_encoded = encode_project_path(new_path)
+    old_encoded = encode_claude_path(old_path)
+    new_encoded = encode_claude_path(new_path)
     old_dir = PROJECTS_DIR / old_encoded
     new_dir = PROJECTS_DIR / new_encoded
 
@@ -176,8 +176,8 @@ def _dry_run_cursor(old_path: str, new_path: str) -> MoveReport:
     old_chats_dir = CURSOR_CHATS_DIR / old_md5
     new_chats_dir = CURSOR_CHATS_DIR / new_md5
 
-    old_encoded = encode_project_path(old_path)
-    new_encoded = encode_project_path(new_path)
+    old_encoded = encode_cursor_path(old_path)
+    new_encoded = encode_cursor_path(new_path)
     old_projects_dir = CURSOR_PROJECTS_DIR / old_encoded
     new_projects_dir = CURSOR_PROJECTS_DIR / new_encoded
 

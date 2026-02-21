@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -929,6 +930,13 @@ class SeshApp(App):
             status.update(f"CLI not found for {session.provider.value}")
             return
         cmd_args, cwd = result
+        # The project directory may no longer exist if files were moved
+        # without updating provider metadata (or if a move only partially
+        # completed).  Show a status-bar message instead of crashing.
+        if not Path(cwd).is_dir():
+            status = self.query_one("#status-bar", Static)
+            status.update(f"Project directory not found: {cwd}")
+            return
         with self.suspend():
             subprocess.run(cmd_args, cwd=cwd)
 
