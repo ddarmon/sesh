@@ -76,6 +76,7 @@ messages on the right.
 | `f`      | Cycle provider filter (All/Claude/Codex/Cursor) |
 | `o`      | Open/resume the selected session in its CLI     |
 | `d`      | Delete the selected session (with confirmation) |
+| `m`      | Move selected project path (full or metadata-only) |
 | `q`      | Quit                                            |
 
 #### Search
@@ -110,9 +111,31 @@ sesh messages <session-id>                # read messages
 sesh messages <session-id> --summary      # user messages only
 sesh messages <session-id> --limit 10     # first 10 messages
 sesh search "some query"                  # full-text search via ripgrep
+sesh clean "some query" --dry-run         # preview matching sessions to delete
+sesh resume <session-id>                  # resume in provider CLI
+sesh export <session-id> --format json    # export session transcript
+sesh move /old/path /new/path --dry-run   # preview project move changes
+sesh move /old/path /new/path             # full move + metadata rewrite
+sesh move /old/path /new/path --metadata-only  # metadata rewrite only
 ```
 
 Run `sesh --help` or `sesh <command> --help` for full details.
+
+### Move project paths
+
+Use `m` in the TUI on a project or session node to move that project's path.
+The dialog supports:
+
+-   **Full Move**: moves files on disk and updates provider metadata.
+-   **Metadata Only**: updates provider metadata only, for projects already moved manually.
+
+CLI equivalent:
+
+```
+sesh move <old-path> <new-path>
+sesh move <old-path> <new-path> --metadata-only
+sesh move <old-path> <new-path> --dry-run
+```
 
 ### Using with LLM agents
 
@@ -196,7 +219,8 @@ src/sesh/
   cli.py             # argparse CLI with JSON subcommands
   app.py             # Textual TUI, layout, keybindings
   discovery.py       # shared discovery logic (used by TUI and CLI)
-  models.py          # Project, SessionMeta, Message, SearchResult
+  models.py          # Project, SessionMeta, Message, SearchResult, MoveReport
+  move.py            # project move orchestration across providers
   cache.py           # JSON metadata cache + index
   search.py          # ripgrep full-text search
   providers/
@@ -205,4 +229,3 @@ src/sesh/
     codex.py         # Codex JSONL parser
     cursor.py        # Cursor SQLite parser
 ```
-
