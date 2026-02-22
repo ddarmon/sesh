@@ -19,24 +19,83 @@ CURSOR_CHATS = Path.home() / ".cursor" / "chats"
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
-def _extract_content_text(entry: dict) -> str:
-    """Extract readable message text from a JSONL entry (Claude or Codex)."""
+def _stringify_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value)
+    except TypeError:
+        return str(value)
+
+
+def _extract_content_text(entry: dict, query: str | None = None) -> str:
+    """Extract readable message text from a JSONL entry (Claude or Codex).
+
+    Aggregates text from relevant block types and prefers candidates that
+    contain the search query so snippets reflect the matched content.
+    """
+    candidates: list[str] = []
+
     # Claude format: message.content (list of parts or string)
     msg = entry.get("message", {})
     if msg:
         content = msg.get("content", "")
         if isinstance(content, list):
             for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
+                if not isinstance(part, dict):
+                    continue
+                ptype = part.get("type", "")
+                if ptype == "text":
                     text = part.get("text", "")
                     if text:
-                        return text
+                        candidates.append(text)
+                elif ptype == "thinking":
+                    text = part.get("thinking", "")
+                    if text:
+                        candidates.append(text)
+                elif ptype == "tool_use":
+                    inp = part.get("input", {})
+                    if inp:
+                        candidates.append(json.dumps(inp))
+                elif ptype == "tool_result":
+                    rc = part.get("content", "")
+                    if isinstance(rc, list):
+                        for rp in rc:
+                            if isinstance(rp, dict) and rp.get("type") == "text":
+                                t = rp.get("text", "")
+                                if t:
+                                    candidates.append(t)
+                    elif rc:
+                        candidates.append(_stringify_value(rc))
         elif isinstance(content, str) and content:
-            return content
+            candidates.append(content)
 
-    # Codex response_item: payload.content (list with output_text/input_text/text)
+    # Codex payload
     payload = entry.get("payload", {})
     if isinstance(payload, dict):
+        ptype = payload.get("type", "")
+
+        # Codex function_call
+        if ptype == "function_call":
+            args = payload.get("arguments", "")
+            if args:
+                candidates.append(args)
+
+        # Codex function_call_output
+        elif ptype == "function_call_output":
+            output = payload.get("output", "")
+            if output:
+                candidates.append(_stringify_value(output))
+
+        # Codex agent_reasoning
+        elif ptype == "agent_reasoning":
+            text = payload.get("text", "")
+            if text:
+                candidates.append(text)
+
+        # Codex response_item: payload.content (list with output_text/input_text/text)
         pcontent = payload.get("content", [])
         if isinstance(pcontent, list):
             for item in pcontent:
@@ -48,12 +107,12 @@ def _extract_content_text(entry: dict) -> str:
                         or ""
                     )
                     if text:
-                        return text
+                        candidates.append(text)
 
         # Codex event_msg: payload.message
         pmsg = payload.get("message", "")
         if isinstance(pmsg, str) and pmsg:
-            return pmsg
+            candidates.append(pmsg)
 
     # Codex reasoning: summary list with summary_text parts
     summary = entry.get("summary", [])
@@ -62,22 +121,28 @@ def _extract_content_text(entry: dict) -> str:
             if isinstance(item, dict) and item.get("type") == "summary_text":
                 text = item.get("text", "")
                 if text:
-                    return text
+                    candidates.append(text)
 
     # Codex function_call_output: output field (often JSON-encoded)
     output = entry.get("output", "")
     if isinstance(output, str) and output:
-        # Try to extract readable text from the JSON-encoded output
         try:
             inner = json.loads(output)
             if isinstance(inner, dict):
                 inner_out = inner.get("output", "")
                 if isinstance(inner_out, str) and inner_out:
-                    return inner_out
+                    candidates.append(inner_out)
         except (json.JSONDecodeError, AttributeError):
             pass
-        return output
+        candidates.append(output)
 
+    if candidates:
+        if query:
+            q = query.lower()
+            query_matches = [c for c in candidates if q in c.lower()]
+            if query_matches:
+                return max(query_matches, key=len)
+        return max(candidates, key=len)
     return ""
 
 
@@ -239,9 +304,19 @@ def _search_cursor_stores(query: str) -> list[SearchResult]:
                             parts = []
                             for item in content:
                                 if isinstance(item, dict):
-                                    t = item.get("text", "")
-                                    if t:
-                                        parts.append(t)
+                                    bt = item.get("type", "")
+                                    if bt in ("text", "reasoning"):
+                                        t = item.get("text", "")
+                                        if t:
+                                            parts.append(t)
+                                    elif bt == "tool-call":
+                                        args = item.get("args", {})
+                                        if args:
+                                            parts.append(json.dumps(args))
+                                    elif bt == "tool-result":
+                                        r = item.get("result", "")
+                                        if r:
+                                            parts.append(_stringify_value(r))
                             content_text = "\n".join(parts)
                         else:
                             content_text = ""
@@ -365,7 +440,7 @@ def ripgrep_search(query: str) -> list[SearchResult]:
                 pass
 
         # Extract readable display text
-        content_text = _extract_content_text(entry) if entry else ""
+        content_text = _extract_content_text(entry, query) if entry else ""
         display_text = _extract_display_text(content_text, query)
         if not display_text or query.lower() not in display_text.lower():
             # Content didn't contain the query (match was in metadata/paths);
