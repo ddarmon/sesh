@@ -85,6 +85,7 @@ def test_get_ide_sessions_matches_composer_and_orphans(tmp_cursor_dirs) -> None:
 
     comp1 = transcripts / "comp1.txt"
     comp1.write_text("user:\nhello\nassistant:\nhi\n")
+    os.utime(comp1, (1_735_689_660, 1_735_689_660))
     orphan = transcripts / "orphan.txt"
     orphan.write_text("user:\n<user_query>\norphan prompt\n</user_query>\nassistant:\nok\n")
     os.utime(orphan, (1_735_689_700, 1_735_689_700))
@@ -95,13 +96,15 @@ def test_get_ide_sessions_matches_composer_and_orphans(tmp_cursor_dirs) -> None:
     assert set(by_id) == {"comp1", "orphan"}
     assert by_id["comp1"].summary == "Named Session"
     assert by_id["comp1"].model == "gpt-4.1"
-    assert by_id["comp1"].timestamp == datetime(2025, 1, 1, tzinfo=timezone.utc)
+    assert by_id["comp1"].timestamp == datetime(2025, 1, 1, 0, 1, 0, tzinfo=timezone.utc)
+    assert by_id["comp1"].start_timestamp == datetime(2025, 1, 1, tzinfo=timezone.utc)
     assert by_id["comp1"].message_count == 2
     assert by_id["comp1"].source_path.endswith("comp1.txt")
 
     assert by_id["orphan"].summary == "orphan prompt"
     assert by_id["orphan"].message_count == 2
     assert by_id["orphan"].timestamp == datetime(2025, 1, 1, 0, 1, 40, tzinfo=timezone.utc)
+    assert by_id["orphan"].start_timestamp is None
 
 
 def test_discover_projects_dedups_cli_and_ide(tmp_cursor_dirs) -> None:
@@ -138,11 +141,13 @@ def test_get_sessions_dedups_cli_and_ide_ids(tmp_cursor_dirs, monkeypatch) -> No
     """When CLI and IDE have the same session ID, the CLI version wins (richer metadata)."""
     project_path = "/Users/me/repo"
     md5 = hashlib.md5(project_path.encode()).hexdigest()
+    store_db = tmp_cursor_dirs["chats"] / md5 / "sameid" / "store.db"
     create_store_db(
-        tmp_cursor_dirs["chats"] / md5 / "sameid" / "store.db",
+        store_db,
         blobs=[{"role": "user", "content": "hi"}],
         meta={"0": json.dumps({"name": "CLI", "createdAt": 1_735_689_600_000}).encode().hex()},
     )
+    os.utime(store_db, (1_735_689_600, 1_735_689_600))
 
     provider = cursor.CursorProvider()
     ide_same = make_session(

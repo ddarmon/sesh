@@ -56,13 +56,15 @@ def test_read_session_meta_from_store_db(tmp_path: Path, tmp_cursor_dirs) -> Non
         ],
         meta={"0": json.dumps(meta_payload).encode("utf-8").hex()},
     )
+    os.utime(db_path, (1_735_689_700, 1_735_689_700))
 
     meta = cursor.CursorProvider()._read_session_meta(db_path)
     assert meta is not None
     assert meta["title"] == "Debug session"
     assert meta["model"] == "gpt-4.1"
     assert meta["message_count"] == 2
-    assert meta["timestamp"] == datetime(2025, 1, 1, tzinfo=timezone.utc)
+    assert meta["start_timestamp"] == datetime(2025, 1, 1, tzinfo=timezone.utc)
+    assert meta["timestamp"] == datetime(2025, 1, 1, 0, 1, 40, tzinfo=timezone.utc)
 
 
 def test_read_session_meta_falls_back_to_mtime(tmp_path: Path, tmp_cursor_dirs) -> None:
@@ -75,6 +77,7 @@ def test_read_session_meta_falls_back_to_mtime(tmp_path: Path, tmp_cursor_dirs) 
     assert meta is not None
     assert meta["title"] == "Untitled Session"
     assert meta["message_count"] == 1
+    assert meta["start_timestamp"] is None
     assert meta["timestamp"] == datetime(2025, 1, 1, tzinfo=timezone.utc)
 
 
