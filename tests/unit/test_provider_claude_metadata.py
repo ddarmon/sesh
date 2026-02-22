@@ -216,9 +216,11 @@ def test_get_sessions_parses_and_groups_by_first_user_uuid(
     assert new_session.model == "claude-opus"
     assert new_session.provider is Provider.CLAUDE
     assert new_session.source_path == str(project_dir)
+    assert new_session.start_timestamp == datetime(2025, 1, 2, 0, 0, tzinfo=timezone.utc)
 
     fallback_session = next(s for s in sessions if s.id == "fallback")
     assert fallback_session.summary == (long_text[:80] + "...")
+    assert fallback_session.start_timestamp == datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
 
 
 def test_get_sessions_uses_directory_cache(tmp_claude_dir) -> None:

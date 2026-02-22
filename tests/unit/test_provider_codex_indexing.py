@@ -66,6 +66,7 @@ def test_parse_session_file_new_format(tmp_path: Path) -> None:
     assert data["cwd"] == "/repo"
     assert data["model"] == "gpt-4.1"
     assert data["timestamp"] == datetime(2025, 2, 1, 0, 0, 2, tzinfo=timezone.utc)
+    assert data["start_timestamp"] == datetime(2025, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
     assert data["message_count"] == 2
     assert data["summary"] == first_prompt[:80] + "..."
     assert data["file_path"] == str(file_path)
@@ -95,6 +96,7 @@ def test_parse_session_file_legacy_format(tmp_path: Path) -> None:
     assert data["id"] == "legacy"
     assert data["cwd"] == "/legacy/repo"
     assert data["model"] == ""
+    assert data["start_timestamp"] == datetime(2025, 2, 1, 0, 0, 0, tzinfo=timezone.utc)
     assert data["message_count"] == 1
     assert data["summary"] == "Hello world"
 
@@ -162,6 +164,10 @@ def test_discover_projects_skips_invalid_paths_and_get_sessions_sorted(tmp_codex
     sessions = provider.get_sessions("/repo")
     assert [s.id for s in sessions] == ["b", "a"]
     assert all(s.provider is Provider.CODEX for s in sessions)
+    assert [s.start_timestamp for s in sessions] == [
+        datetime(2025, 2, 2, 0, 0, 0, tzinfo=timezone.utc),
+        datetime(2025, 2, 1, 0, 0, 0, tzinfo=timezone.utc),
+    ]
 
 
 def test_build_index_uses_cached_sessions(tmp_codex_dir) -> None:
@@ -175,6 +181,7 @@ def test_build_index_uses_cached_sessions(tmp_codex_dir) -> None:
         provider=Provider.CODEX,
         source_path=str(file_path),
         timestamp=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        start_timestamp=datetime(2025, 2, 1, 0, 0, 0, tzinfo=timezone.utc),
     )
 
     class FakeCache:
@@ -191,6 +198,7 @@ def test_build_index_uses_cached_sessions(tmp_codex_dir) -> None:
 
     assert "/cached-repo" in index
     assert index["/cached-repo"][0]["id"] == "cached"
+    assert index["/cached-repo"][0]["start_timestamp"] == datetime(2025, 2, 1, tzinfo=timezone.utc)
 
 
 def test_delete_session_unlinks_source_file(tmp_path: Path) -> None:
