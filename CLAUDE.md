@@ -131,6 +131,24 @@ the index, then query it.
 
 The index is stored at `~/.cache/sesh/index.json`.
 
+## Plans
+
+Lightweight execution plans live in `.plans/` to capture the logic of
+features, bugfixes, and rollouts. See `.plans/README.md` for full
+conventions.
+
+-   `.plans/active/` -- current or paused work
+-   `.plans/done/` -- completed work kept for reference
+-   Files use sortable names: `YYYY-MM-DD-short-topic.md`
+-   Plans include scope, rationale, rollout order, risks, and validation
+    commands
+-   Put metadata (Status / Type / Owner / Branch / Created / Updated) in
+    YAML front matter
+-   Prefer importing and normalizing Claude Code plans over hand-writing
+    from scratch
+-   Update the plan file as decisions change; move to `.plans/done/`
+    when complete
+
 ## Dependencies
 
 -   `textual` -- TUI framework (the only runtime dependency)
