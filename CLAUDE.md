@@ -149,7 +149,59 @@ conventions.
 -   Update the plan file as decisions change; move to `.plans/done/`
     when complete
 
+## Testing
+
+Tests live in `tests/` and use pytest. Install dev dependencies first:
+
+```bash
+uv sync --extra dev
+```
+
+Run the full suite:
+
+```bash
+uv run pytest -q tests
+```
+
+Run only unit tests or integration tests:
+
+```bash
+uv run pytest tests/unit
+uv run pytest tests/integration
+```
+
+**When to run tests:** Run the full suite after any change to source
+files under `src/sesh/`. Integration tests marked `requires_rg` need
+`rg` on PATH; the Textual smoke tests need a working terminal
+environment.
+
+### Test layout
+
+-   `tests/conftest.py` -- shared fixtures that redirect all
+    provider/cache paths to `tmp_path` so tests never touch real user
+    data
+-   `tests/helpers.py` -- JSONL/SQLite fixture factories and model
+    constructors (`write_jsonl`, `create_store_db`, `make_session`,
+    `make_message`, `make_index`)
+-   `tests/unit/` -- fast, isolated tests for models, cache, providers,
+    search, CLI commands, app helpers, and move orchestration
+-   `tests/integration/` -- tests that exercise CLI JSON endpoints
+    end-to-end, run real `rg` searches, or use Textual's pilot API
+
+### Conventions
+
+-   All path-dependent modules are monkeypatched via `conftest.py`
+    fixtures (`tmp_cache_dir`, `tmp_claude_dir`, `tmp_codex_dir`,
+    `tmp_cursor_dirs`, `tmp_search_dirs`, `tmp_move_dirs`). Always use
+    these instead of touching real home-directory paths.
+-   Prefer deterministic synthetic fixtures over real user data.
+-   When adding a new provider, add corresponding test files under
+    `tests/unit/` following the existing naming pattern
+    (`test_provider_{name}_metadata.py`, `test_provider_{name}_move.py`,
+    etc.).
+
 ## Dependencies
 
 -   `textual` -- TUI framework (the only runtime dependency)
 -   `ripgrep` (`rg`) -- for full-text search (must be on PATH)
+-   `pytest`, `pytest-asyncio` -- test framework (dev dependency only)
