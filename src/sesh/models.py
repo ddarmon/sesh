@@ -40,6 +40,7 @@ class SessionMeta:
     provider: Provider
     summary: str
     timestamp: datetime
+    start_timestamp: datetime | None = None
     message_count: int = 0
     model: str | None = None
     source_path: str | None = None  # File path for on-demand message loading

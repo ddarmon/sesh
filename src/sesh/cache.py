@@ -21,6 +21,7 @@ def _session_to_dict(s: SessionMeta) -> dict:
         "provider": s.provider.value,
         "summary": s.summary,
         "timestamp": s.timestamp.isoformat(),
+        "start_timestamp": s.start_timestamp.isoformat() if s.start_timestamp else None,
         "message_count": s.message_count,
         "model": s.model,
         "source_path": s.source_path,
@@ -28,12 +29,21 @@ def _session_to_dict(s: SessionMeta) -> dict:
 
 
 def _dict_to_session(d: dict) -> SessionMeta:
+    def _parse_dt(value, *, default: datetime | None) -> datetime | None:
+        if isinstance(value, str):
+            value = value.replace("Z", "+00:00")
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return default
+        return default
+
     ts = d["timestamp"]
-    if isinstance(ts, str):
-        ts = ts.replace("Z", "+00:00")
-        timestamp = datetime.fromisoformat(ts)
-    else:
+    timestamp = _parse_dt(ts, default=datetime.now(tz=timezone.utc))
+    if timestamp is None:
         timestamp = datetime.now(tz=timezone.utc)
+
+    start_timestamp = _parse_dt(d.get("start_timestamp"), default=None)
 
     return SessionMeta(
         id=d["id"],
@@ -41,6 +51,7 @@ def _dict_to_session(d: dict) -> SessionMeta:
         provider=Provider(d["provider"]),
         summary=d["summary"],
         timestamp=timestamp,
+        start_timestamp=start_timestamp,
         message_count=d.get("message_count", 0),
         model=d.get("model"),
         source_path=d.get("source_path"),

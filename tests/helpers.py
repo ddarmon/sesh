@@ -45,6 +45,7 @@ def make_session(**overrides) -> SessionMeta:
         "provider": Provider.CLAUDE,
         "summary": "summary",
         "timestamp": datetime(2025, 1, 1, tzinfo=timezone.utc),
+        "start_timestamp": None,
         "message_count": 1,
         "model": None,
         "source_path": None,
