@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sesh.models import Message, MoveReport, Provider, SessionMeta, encode_project_path, workspace_uri
+from sesh.models import Message, MoveReport, Provider, SessionMeta, encode_cursor_path, workspace_uri
 from sesh.providers import SessionProvider
 
 CURSOR_CHATS_DIR = Path.home() / ".cursor" / "chats"
@@ -131,7 +131,7 @@ class CursorProvider(SessionProvider):
         workspace_map = self._build_workspace_map()
         # Build reverse: encoded_name -> project_path from workspace_map
         for project_path in workspace_map:
-            encoded = encode_project_path(project_path)
+            encoded = encode_cursor_path(project_path)
             candidate = CURSOR_PROJECTS_DIR / encoded
             if candidate.is_dir():
                 self._projects_dir_map[project_path] = candidate
@@ -535,8 +535,8 @@ class CursorProvider(SessionProvider):
         old_chats_dir = CURSOR_CHATS_DIR / old_md5
         new_chats_dir = CURSOR_CHATS_DIR / new_md5
 
-        old_encoded = encode_project_path(old_path)
-        new_encoded = encode_project_path(new_path)
+        old_encoded = encode_cursor_path(old_path)
+        new_encoded = encode_cursor_path(new_path)
         old_projects_dir = CURSOR_PROJECTS_DIR / old_encoded
         new_projects_dir = CURSOR_PROJECTS_DIR / new_encoded
 

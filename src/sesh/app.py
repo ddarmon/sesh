@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -808,8 +809,10 @@ class SeshApp(App):
         badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U"}
         for r in results[:100]:
             badge = badge_map.get(r.provider, "?")
+            proj = self.projects.get(r.project_path)
+            proj_name = proj.display_name if proj else r.project_path.rsplit("/", 1)[-1]
             snippet = r.matched_line.replace("\n", " ")[:80]
-            label = f"[{badge}] {snippet}"
+            label = f"[{badge}] {proj_name} — {snippet}"
             child = node.add_leaf(label)
             child.data = r
 
@@ -979,6 +982,13 @@ class SeshApp(App):
             self._set_status(f"CLI not found for {session.provider.value}")
             return
         cmd_args, cwd = result
+        # The project directory may no longer exist if files were moved
+        # without updating provider metadata (or if a move only partially
+        # completed).  Show a status-bar message instead of crashing.
+        if not Path(cwd).is_dir():
+            status = self.query_one("#status-bar", Static)
+            status.update(f"Project directory not found: {cwd}")
+            return
         with self.suspend():
             subprocess.run(cmd_args, cwd=cwd)
 

@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sesh.models import Message, MoveReport, Provider, SessionMeta, encode_project_path
+from sesh.models import Message, MoveReport, Provider, SessionMeta, encode_claude_path
 from sesh.providers import SessionProvider
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -389,8 +389,8 @@ class ClaudeProvider(SessionProvider):
 
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Update Claude metadata when a project path changes."""
-        old_encoded = encode_project_path(old_path)
-        new_encoded = encode_project_path(new_path)
+        old_encoded = encode_claude_path(old_path)
+        new_encoded = encode_claude_path(new_path)
         old_dir = PROJECTS_DIR / old_encoded
         new_dir = PROJECTS_DIR / new_encoded
 

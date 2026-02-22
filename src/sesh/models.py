@@ -92,6 +92,28 @@ def encode_project_path(path: str) -> str:
     return path.lstrip("/").replace("/", "-")
 
 
+def encode_cursor_path(path: str) -> str:
+    """Encode a path the way Cursor does for ``~/.cursor/projects/``.
+
+    Cursor strips the leading ``/`` then replaces ``/`` and spaces with
+    ``-``::
+
+        /Users/me/My Project  ->  Users-me-My-Project
+    """
+    return path.lstrip("/").replace("/", "-").replace(" ", "-")
+
+
+def encode_claude_path(path: str) -> str:
+    """Encode a path the way Claude Code does for ``~/.claude/projects/``.
+
+    Claude keeps the leading ``/`` (which becomes a leading ``-``) and
+    also replaces spaces with ``-``::
+
+        /Users/me/My Project  ->  -Users-me-My-Project
+    """
+    return path.replace("/", "-").replace(" ", "-")
+
+
 def workspace_uri(path: str) -> str:
     """Convert an absolute path to a Cursor workspace file URI."""
     return f"file://{path}"
