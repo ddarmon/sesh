@@ -66,8 +66,9 @@ on Windows). Claude Code and Codex path resolution should work via
 Launch with `sesh`. The TUI loads sessions in the background and
 populates a project tree on the left. Select a session to view its
 messages on the right. Session labels show relative timestamps ("2h
-ago", "yesterday") for recent sessions. View preferences -- provider
-filter, sort mode, and visibility toggles -- persist across launches.
+ago", "yesterday") and session durations ("\~45m", "\~2h") for recent
+sessions. View preferences -- provider filter, sort mode, and visibility
+toggles -- persist across launches.
 
 #### Keybindings
 

@@ -171,6 +171,7 @@ class CodexProvider(SessionProvider):
                 provider=Provider.CODEX,
                 summary=s.get("summary", "Codex Session"),
                 timestamp=s["timestamp"],
+                start_timestamp=s.get("start_timestamp"),
                 message_count=s.get("message_count", 0),
                 model=s.get("model"),
                 source_path=s.get("file_path"),
@@ -334,6 +335,7 @@ class CodexProvider(SessionProvider):
                             "cwd": s.project_path,
                             "model": s.model,
                             "timestamp": s.timestamp,
+                            "start_timestamp": s.start_timestamp,
                             "summary": s.summary,
                             "message_count": s.message_count,
                             "file_path": s.source_path or file_str,
@@ -355,6 +357,7 @@ class CodexProvider(SessionProvider):
                         provider=Provider.CODEX,
                         summary=data.get("summary", ""),
                         timestamp=data["timestamp"],
+                        start_timestamp=data.get("start_timestamp"),
                         message_count=data.get("message_count", 0),
                         model=data.get("model"),
                         source_path=data.get("file_path"),
@@ -378,9 +381,10 @@ class CodexProvider(SessionProvider):
                     session_id = payload.get("id", file_path.stem)
                     cwd = payload.get("cwd", "")
                     model = payload.get("model") or payload.get("model_provider", "")
+                    first_ts = first_entry.get("timestamp")
 
                     # Scan rest for last timestamp and user messages
-                    last_ts = first_entry.get("timestamp")
+                    last_ts = first_ts
                     first_user_msg = None
                     msg_count = 0
 
@@ -414,6 +418,7 @@ class CodexProvider(SessionProvider):
                         "cwd": cwd,
                         "model": model,
                         "timestamp": _parse_timestamp(last_ts),
+                        "start_timestamp": _parse_timestamp(first_ts),
                         "summary": summary,
                         "message_count": msg_count,
                         "file_path": str(file_path),
@@ -423,7 +428,8 @@ class CodexProvider(SessionProvider):
                 else:
                     cwd = ""
                     session_id = file_path.stem
-                    last_ts = first_entry.get("timestamp")
+                    first_ts = first_entry.get("timestamp")
+                    last_ts = first_ts
                     first_user_msg = None
                     msg_count = 0
 
@@ -470,6 +476,7 @@ class CodexProvider(SessionProvider):
                         "cwd": cwd,
                         "model": "",
                         "timestamp": _parse_timestamp(last_ts),
+                        "start_timestamp": _parse_timestamp(first_ts),
                         "summary": summary,
                         "message_count": msg_count,
                         "file_path": str(file_path),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sesh.app import SeshApp, _MODEL_SHORT, _relative_time, _short_model_name
+from sesh.app import SeshApp, _MODEL_SHORT, _format_duration, _relative_time, _short_model_name
 from sesh.models import MoveReport, Provider, SearchResult
 from tests.helpers import make_session
 
@@ -71,6 +71,39 @@ def test_relative_time_future_timestamp_clamped_to_now() -> None:
     future = datetime(2025, 2, 22, 15, 0, 30, tzinfo=timezone.utc)
 
     assert _relative_time(future, now=now) == "now"
+
+
+def test_format_duration_boundaries() -> None:
+    """Duration formatter uses minute/hour/day buckets and hides sub-minute spans."""
+    start = datetime(2025, 2, 22, 12, 0, 0, tzinfo=timezone.utc)
+
+    assert _format_duration(start, start) == ""
+    assert _format_duration(start, datetime(2025, 2, 22, 12, 0, 59, tzinfo=timezone.utc)) == ""
+    assert _format_duration(start, datetime(2025, 2, 22, 12, 1, 0, tzinfo=timezone.utc)) == "1m"
+    assert _format_duration(start, datetime(2025, 2, 22, 12, 59, 59, tzinfo=timezone.utc)) == "59m"
+    assert _format_duration(start, datetime(2025, 2, 22, 13, 0, 0, tzinfo=timezone.utc)) == "1h"
+    assert _format_duration(start, datetime(2025, 2, 23, 11, 59, 59, tzinfo=timezone.utc)) == "23h"
+    assert _format_duration(start, datetime(2025, 2, 23, 12, 0, 0, tzinfo=timezone.utc)) == "1d"
+
+
+def test_format_duration_naive_and_negative_inputs() -> None:
+    """Naive datetimes are treated as UTC and negative spans are clamped empty."""
+    start = datetime(2025, 2, 22, 12, 0, 0)
+    end = datetime(2025, 2, 22, 12, 45, 0)
+
+    assert _format_duration(start, end) == "45m"
+    assert _format_duration(end, start) == ""
+    assert _format_duration(None, end) == ""
+    assert _format_duration(start, None) == ""
+
+
+def test_format_duration_mixed_naive_and_aware() -> None:
+    """Mixed naive/aware inputs are both normalized to UTC before computing duration."""
+    naive = datetime(2025, 2, 22, 12, 0, 0)
+    aware = datetime(2025, 2, 22, 12, 45, 0, tzinfo=timezone.utc)
+
+    assert _format_duration(naive, aware) == "45m"
+    assert _format_duration(aware, naive) == ""
 
 
 def test_session_from_search_result_claude_source_path() -> None:

@@ -20,6 +20,7 @@ def test_session_serialization_roundtrip(tmp_cache_dir) -> None:
         project_path="/repo",
         provider=Provider.CODEX,
         summary="hello",
+        start_timestamp=datetime(2025, 1, 2, 3, 0, 0, tzinfo=timezone.utc),
         message_count=5,
         model="gpt-4.1",
         source_path="/tmp/session.jsonl",
@@ -55,9 +56,25 @@ def test_dict_to_session_missing_optional_fields(tmp_cache_dir) -> None:
             "timestamp": "2025-01-01T00:00:00+00:00",
         }
     )
+    assert session.start_timestamp is None
     assert session.model is None
     assert session.source_path is None
     assert session.message_count == 0
+
+
+def test_dict_to_session_parses_optional_start_timestamp(tmp_cache_dir) -> None:
+    """Optional start_timestamp field is parsed like timestamp when present."""
+    session = cache._dict_to_session(
+        {
+            "id": "s1",
+            "project_path": "/p",
+            "provider": "claude",
+            "summary": "x",
+            "timestamp": "2025-01-01T12:00:00Z",
+            "start_timestamp": "2025-01-01T11:30:00Z",
+        }
+    )
+    assert session.start_timestamp == datetime(2025, 1, 1, 11, 30, tzinfo=timezone.utc)
 
 
 def test_dict_to_session_invalid_timestamp(tmp_cache_dir) -> None:

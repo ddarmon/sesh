@@ -504,6 +504,7 @@ class ClaudeProvider(SessionProvider):
                                 "id": session_id,
                                 "summary": None,
                                 "timestamp": None,
+                                "start_timestamp": None,
                                 "message_count": 0,
                                 "model": None,
                                 "last_user_message": None,
@@ -518,6 +519,8 @@ class ClaudeProvider(SessionProvider):
                             parsed = _parse_timestamp(ts)
                             if s["timestamp"] is None or parsed > s["timestamp"]:
                                 s["timestamp"] = parsed
+                            if s["start_timestamp"] is None or parsed < s["start_timestamp"]:
+                                s["start_timestamp"] = parsed
 
                         # Apply pending summary
                         parent_uuid = entry.get("parentUuid")
@@ -596,6 +599,7 @@ class ClaudeProvider(SessionProvider):
                 provider=Provider.CLAUDE,
                 summary=summary,
                 timestamp=ts,
+                start_timestamp=s["start_timestamp"],
                 message_count=s["message_count"],
                 model=s["model"],
                 source_path=str(project_dir),

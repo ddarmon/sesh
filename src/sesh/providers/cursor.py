@@ -200,6 +200,7 @@ class CursorProvider(SessionProvider):
                         provider=Provider.CURSOR,
                         summary=meta.get("title", "Untitled Session"),
                         timestamp=meta.get("timestamp", datetime.now(tz=timezone.utc)),
+                        start_timestamp=meta.get("start_timestamp"),
                         message_count=meta.get("message_count", 0),
                         model=meta.get("model"),
                         source_path=str(store_db),
@@ -252,13 +253,24 @@ class CursorProvider(SessionProvider):
                 if not name:
                     name = self._first_user_message(transcript_path) or "Untitled Session"
 
-                timestamp = datetime.now(tz=timezone.utc)
+                start_timestamp = None
                 created = entry.get("createdAt")
                 if isinstance(created, (int, float)):
                     try:
-                        timestamp = datetime.fromtimestamp(created / 1000, tz=timezone.utc)
+                        start_timestamp = datetime.fromtimestamp(created / 1000, tz=timezone.utc)
                     except (ValueError, OSError):
                         pass
+                elif isinstance(created, str):
+                    try:
+                        start_timestamp = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    except ValueError:
+                        pass
+
+                try:
+                    mtime = transcript_path.stat().st_mtime
+                    timestamp = datetime.fromtimestamp(mtime, tz=timezone.utc)
+                except OSError:
+                    timestamp = datetime.now(tz=timezone.utc)
 
                 model = entry.get("lastUsedModel")
                 msg_count = self._count_transcript_messages(transcript_path)
@@ -269,6 +281,7 @@ class CursorProvider(SessionProvider):
                     provider=Provider.CURSOR,
                     summary=name,
                     timestamp=timestamp,
+                    start_timestamp=start_timestamp,
                     message_count=msg_count,
                     model=model,
                     source_path=str(transcript_path),
@@ -290,6 +303,7 @@ class CursorProvider(SessionProvider):
                 provider=Provider.CURSOR,
                 summary=name,
                 timestamp=timestamp,
+                start_timestamp=None,
                 message_count=self._count_transcript_messages(path),
                 source_path=str(path),
             ))
@@ -684,28 +698,30 @@ class CursorProvider(SessionProvider):
             # Extract model
             model = metadata.get("lastUsedModel")
 
-            # Extract timestamp
-            timestamp = datetime.now(tz=timezone.utc)
+            # Extract createdAt as session start time (if available)
+            start_timestamp = None
             created = metadata.get("createdAt")
             if created:
                 try:
                     if isinstance(created, str):
-                        timestamp = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                        start_timestamp = datetime.fromisoformat(created.replace("Z", "+00:00"))
                     elif isinstance(created, (int, float)):
-                        timestamp = datetime.fromtimestamp(created / 1000, tz=timezone.utc)
+                        start_timestamp = datetime.fromtimestamp(created / 1000, tz=timezone.utc)
                 except (ValueError, OSError):
                     pass
-            else:
-                # Fall back to file mtime
-                try:
-                    stat = store_db.stat()
-                    timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-                except OSError:
-                    pass
+
+            # Use file mtime for last activity / sort timestamp
+            timestamp = datetime.now(tz=timezone.utc)
+            try:
+                stat = store_db.stat()
+                timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            except OSError:
+                pass
 
             return {
                 "title": title,
                 "timestamp": timestamp,
+                "start_timestamp": start_timestamp,
                 "message_count": msg_count,
                 "model": model,
             }

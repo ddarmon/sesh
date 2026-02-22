@@ -85,6 +85,33 @@ def _relative_time(dt: datetime, now: datetime | None = None) -> str:
     return dt.strftime("%m-%d %H:%M")
 
 
+def _format_duration(start: datetime | None, end: datetime | None) -> str:
+    """Return a compact duration for a session span, or empty string if unavailable."""
+    if start is None or end is None:
+        return ""
+
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
+
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    else:
+        end = end.astimezone(timezone.utc)
+
+    delta_seconds = (end - start).total_seconds()
+    if delta_seconds <= 0:
+        return ""
+    if delta_seconds < 60:
+        return ""
+    if delta_seconds < 3600:
+        return f"{int(delta_seconds // 60)}m"
+    if delta_seconds < 86400:
+        return f"{int(delta_seconds // 3600)}h"
+    return f"{int(delta_seconds // 86400)}d"
+
+
 class SessionTree(Tree):
     """Left pane: project/session tree."""
 
@@ -580,13 +607,15 @@ class SeshApp(App):
         star = "\u2605 " if (session.provider.value, session.id) in self._bookmarks else ""
         ts = _relative_time(session.timestamp)
         count = f"({session.message_count}) " if session.message_count else ""
+        duration = _format_duration(session.start_timestamp, session.timestamp)
+        dur = f"~{duration} " if duration else ""
         summary = session.summary[:50]
         model = f" [{_short_model_name(session.model)}]" if session.model else ""
         if show_project:
             proj = self.projects.get(session.project_path)
             proj_name = proj.display_name if proj else session.project_path.rsplit("/", 1)[-1]
-            return f"{star}{ts}  {count}{proj_name} — {summary}{model}"
-        return f"{star}{ts}  {count}{summary}{model}"
+            return f"{star}{ts}  {count}{dur}{proj_name} — {summary}{model}"
+        return f"{star}{ts}  {count}{dur}{summary}{model}"
 
     def _populate_tree(self, filter_text: str = "", provider_filter: Provider | None = None) -> None:
         """Populate tree with projects and sessions."""
