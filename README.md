@@ -69,15 +69,17 @@ messages on the right.
 
 #### Keybindings
 
-| Key      | Action                                          |
-| -------- | ----------------------------------------------- |
-| `/`      | Focus the search bar                            |
-| `Escape` | Clear search and return to full tree            |
-| `f`      | Cycle provider filter (All/Claude/Codex/Cursor) |
-| `o`      | Open/resume the selected session in its CLI     |
-| `d`      | Delete the selected session (with confirmation) |
+| Key      | Action                                             |
+| -------- | -------------------------------------------------- |
+| `/`      | Focus the search bar                               |
+| `Escape` | Clear search and return to full tree               |
+| `f`      | Cycle provider filter (All/Claude/Codex/Cursor)    |
+| `o`      | Open/resume the selected session in its CLI        |
+| `d`      | Delete the selected session (with confirmation)    |
 | `m`      | Move selected project path (full or metadata-only) |
-| `q`      | Quit                                            |
+| `t`      | Toggle tool call/result visibility                 |
+| `T`      | Toggle thinking/reasoning visibility               |
+| `q`      | Quit                                               |
 
 #### Search
 
@@ -110,10 +112,13 @@ sesh sessions --provider claude           # filter by provider
 sesh messages <session-id>                # read messages
 sesh messages <session-id> --summary      # user messages only
 sesh messages <session-id> --limit 10     # first 10 messages
+sesh messages <session-id> --include-tools  # include tool calls/results
+sesh messages <session-id> --full         # include tools + thinking
 sesh search "some query"                  # full-text search via ripgrep
 sesh clean "some query" --dry-run         # preview matching sessions to delete
 sesh resume <session-id>                  # resume in provider CLI
 sesh export <session-id> --format json    # export session transcript
+sesh export <session-id> --full           # export with tools + thinking
 sesh move /old/path /new/path --dry-run   # preview project move changes
 sesh move /old/path /new/path             # full move + metadata rewrite
 sesh move /old/path /new/path --metadata-only  # metadata rewrite only
@@ -123,11 +128,12 @@ Run `sesh --help` or `sesh <command> --help` for full details.
 
 ### Move project paths
 
-Use `m` in the TUI on a project or session node to move that project's path.
-The dialog supports:
+Use `m` in the TUI on a project or session node to move that project's
+path. The dialog supports:
 
 -   **Full Move**: moves files on disk and updates provider metadata.
--   **Metadata Only**: updates provider metadata only, for projects already moved manually.
+-   **Metadata Only**: updates provider metadata only, for projects
+    already moved manually.
 
 CLI equivalent:
 
@@ -229,3 +235,4 @@ src/sesh/
     codex.py         # Codex JSONL parser
     cursor.py        # Cursor SQLite parser
 ```
+

@@ -135,14 +135,22 @@ def cmd_messages(args: argparse.Namespace) -> None:
         )
         raise SystemExit(1)
 
+    from sesh.models import filter_messages
+
     _session, messages = _load_session_messages(matches[0])
 
-    # Filter system messages
-    messages = [m for m in messages if not m.is_system]
+    include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
+    include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
 
-    # --summary: only user messages
+    # --summary: only user text messages
     if args.summary:
-        messages = [m for m in messages if m.role == "user"]
+        messages = [m for m in messages if not m.is_system and m.role == "user" and m.content_type == "text"]
+    else:
+        messages = filter_messages(
+            messages,
+            include_tools=include_tools,
+            include_thinking=include_thinking,
+        )
 
     total = len(messages)
 
@@ -154,10 +162,17 @@ def cmd_messages(args: argparse.Namespace) -> None:
         entry = {
             "role": m.role,
             "content": m.content,
+            "content_type": m.content_type,
             "timestamp": m.timestamp.isoformat() if m.timestamp else None,
         }
         if m.tool_name:
             entry["tool_name"] = m.tool_name
+        if m.tool_input:
+            entry["tool_input"] = m.tool_input
+        if m.tool_output:
+            entry["tool_output"] = m.tool_output
+        if m.thinking:
+            entry["thinking"] = m.thinking
         out_messages.append(entry)
 
     _json_out({
@@ -335,20 +350,36 @@ def cmd_export(args: argparse.Namespace) -> None:
         )
         raise SystemExit(1)
 
+    from sesh.models import filter_messages
+
     session, messages = _load_session_messages(matches[0])
 
-    # Filter system messages
-    messages = [m for m in messages if not m.is_system]
+    include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
+    include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
+
+    messages = filter_messages(
+        messages,
+        include_tools=include_tools,
+        include_thinking=include_thinking,
+    )
 
     if args.output_format == "json":
         out_messages = []
         for m in messages:
-            out_messages.append({
+            entry = {
                 "role": m.role,
                 "content": m.content,
+                "content_type": m.content_type,
                 "timestamp": m.timestamp.isoformat() if m.timestamp else None,
                 "tool_name": m.tool_name,
-            })
+            }
+            if m.tool_input:
+                entry["tool_input"] = m.tool_input
+            if m.tool_output:
+                entry["tool_output"] = m.tool_output
+            if m.thinking:
+                entry["thinking"] = m.thinking
+            out_messages.append(entry)
 
         _json_out({
             "session_id": session.id,
@@ -371,18 +402,51 @@ def cmd_export(args: argparse.Namespace) -> None:
 
         for m in messages:
             ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
-            if m.role == "user":
+
+            if m.content_type == "thinking":
+                print(f"### Thinking{ts}")
+                print()
+                for line in (m.thinking or "").splitlines():
+                    print(f"> {line}")
+                print()
+
+            elif m.content_type == "tool_use":
+                tool = m.tool_name or "tool"
+                print(f"### {tool} (call){ts}")
+                print()
+                print("```json")
+                print(m.tool_input or "")
+                print("```")
+                print()
+
+            elif m.content_type == "tool_result":
+                tool = m.tool_name or "tool"
+                print(f"### {tool} (result){ts}")
+                print()
+                print(m.tool_output or "")
+                print()
+
+            elif m.role == "user":
                 print(f"## User{ts}")
+                print()
+                print(m.content)
+                print()
             elif m.role == "assistant":
                 print(f"## Assistant{ts}")
+                print()
+                print(m.content)
+                print()
             elif m.role == "tool":
                 tool = m.tool_name or "tool"
                 print(f"### {tool}{ts}")
+                print()
+                print(m.content)
+                print()
             else:
                 print(f"## {m.role}{ts}")
-            print()
-            print(m.content)
-            print()
+                print()
+                print(m.content)
+                print()
 
 
 def cmd_move(args: argparse.Namespace) -> None:
@@ -528,6 +592,21 @@ def main() -> None:
         action="store_true",
         help="Only return user messages (skip assistant and tool messages)",
     )
+    p_messages.add_argument(
+        "--include-tools",
+        action="store_true",
+        help="Include tool call and result messages",
+    )
+    p_messages.add_argument(
+        "--include-thinking",
+        action="store_true",
+        help="Include thinking/reasoning messages",
+    )
+    p_messages.add_argument(
+        "--full",
+        action="store_true",
+        help="Include all message types (tools + thinking)",
+    )
 
     # search
     p_search = sub.add_parser(
@@ -609,6 +688,21 @@ def main() -> None:
         choices=["md", "json"],
         default="md",
         help="Output format: md (Markdown, default) or json",
+    )
+    p_export.add_argument(
+        "--include-tools",
+        action="store_true",
+        help="Include tool call and result messages",
+    )
+    p_export.add_argument(
+        "--include-thinking",
+        action="store_true",
+        help="Include thinking/reasoning messages",
+    )
+    p_export.add_argument(
+        "--full",
+        action="store_true",
+        help="Include all message types (tools + thinking)",
     )
 
     # move

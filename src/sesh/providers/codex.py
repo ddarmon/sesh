@@ -37,6 +37,17 @@ def _extract_text_from_content(content: list) -> str:
     return "\n".join(parts)
 
 
+def _stringify_tool_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, indent=2)
+    except TypeError:
+        return str(value)
+
+
 def _rewrite_codex_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> bool:
     """Rewrite Codex cwd references in a JSONL file. Returns True if modified."""
     old_cwd_tag = f"<cwd>{old_path}</cwd>"
@@ -178,6 +189,7 @@ class CodexProvider(SessionProvider):
             return []
 
         messages = []
+        call_id_map: dict[str, str] = {}  # call_id -> function name
         try:
             with open(file_path) as f:
                 for line in f:
@@ -202,6 +214,48 @@ class CodexProvider(SessionProvider):
                                 content=text,
                                 timestamp=ts,
                             ))
+
+                    # Agent reasoning
+                    elif entry_type == "event_msg" and payload.get("type") == "agent_reasoning":
+                        text = payload.get("text", "")
+                        if text.strip():
+                            messages.append(Message(
+                                role="assistant",
+                                content="",
+                                timestamp=ts,
+                                thinking=text,
+                                content_type="thinking",
+                            ))
+
+                    # Function calls
+                    elif entry_type == "response_item" and payload.get("type") == "function_call":
+                        name = payload.get("name", "")
+                        call_id = payload.get("call_id", "")
+                        if call_id and name:
+                            call_id_map[call_id] = name
+                        args = _stringify_tool_value(payload.get("arguments", ""))
+                        messages.append(Message(
+                            role="assistant",
+                            content="",
+                            timestamp=ts,
+                            tool_name=name,
+                            tool_input=args,
+                            content_type="tool_use",
+                        ))
+
+                    # Function call output
+                    elif entry_type == "response_item" and payload.get("type") == "function_call_output":
+                        call_id = payload.get("call_id", "")
+                        resolved_name = call_id_map.get(call_id, "")
+                        output = _stringify_tool_value(payload.get("output", ""))
+                        messages.append(Message(
+                            role="tool",
+                            content="",
+                            timestamp=ts,
+                            tool_name=resolved_name,
+                            tool_output=output,
+                            content_type="tool_result",
+                        ))
 
                     # Assistant messages
                     elif entry_type == "response_item" and payload.get("role") == "assistant":

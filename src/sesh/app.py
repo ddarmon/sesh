@@ -17,7 +17,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Header, Input, Label, RichLog, Static, Tree
 
 from sesh.bookmarks import load_bookmarks, save_bookmarks
-from sesh.models import Message, Project, Provider, SearchResult, SessionMeta
+from sesh.models import Message, Project, Provider, SearchResult, SessionMeta, filter_messages
 
 _DATETIME_MIN = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -256,6 +256,8 @@ class SeshApp(App):
         Binding("K", "prev_project", "Prev Proj", key_display="K"),
         Binding("b", "toggle_bookmark", "Bookmark"),
         Binding("n", "search_messages", "Find"),
+        Binding("t", "toggle_tools", "Tools"),
+        Binding("T", "toggle_thinking", "Thinking", key_display="T"),
     ]
 
     def __init__(self) -> None:
@@ -270,6 +272,9 @@ class SeshApp(App):
         self._current_messages: list[Message] = []
         self._current_session: SessionMeta | None = None
         self._bookmarks: set[tuple[str, str]] = set()
+        self._show_tools: bool = False
+        self._show_thinking: bool = False
+        self._status_base: str = "Loading..."
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -292,7 +297,7 @@ class SeshApp(App):
         # Tier 1: instant display from cached index
         if self._load_from_index():
             self._populate_tree()
-            self.query_one("#status-bar", Static).update("(refreshing...)")
+            self._set_status("(refreshing...)")
 
         # Tier 2: background refresh
         self.run_worker(self._discover_all, thread=True, exclusive=True)
@@ -337,8 +342,7 @@ class SeshApp(App):
 
     def action_refresh(self) -> None:
         """Re-discover all sessions."""
-        status = self.query_one("#status-bar", Static)
-        status.update("Discovering sessions...")
+        self._set_status("Discovering sessions...")
         self.run_worker(self._discover_all, thread=True, exclusive=True)
 
     def _discover_all(self) -> None:
@@ -346,9 +350,7 @@ class SeshApp(App):
         from sesh.cache import SessionCache, save_index
         from sesh.discovery import discover_all
 
-        self.call_from_thread(
-            self.query_one("#status-bar", Static).update, "Discovering sessions..."
-        )
+        self.call_from_thread(self._set_status, "Discovering sessions...")
 
         cache = SessionCache()
         projects, sessions = discover_all(cache=cache)
@@ -472,9 +474,8 @@ class SeshApp(App):
             child = tree.root.add_leaf(label)
             child.data = session
 
-        status = self.query_one("#status-bar", Static)
         filter_name = provider_filter.value.title() if provider_filter else "All"
-        status.update(
+        self._set_status(
             f"{len(all_sessions)} sessions · "
             f"[{filter_name}] · [Sort: timeline] · "
             f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete m:Move r:Refresh"
@@ -566,10 +567,9 @@ class SeshApp(App):
                 child.data = session
                 total_sessions += 1
 
-        status = self.query_one("#status-bar", Static)
         filter_name = provider_filter.value.title() if provider_filter else "All"
         sort_name = self.sort_options[self.sort_index]
-        status.update(
+        self._set_status(
             f"{shown_projects} projects · {total_sessions} sessions · "
             f"[{filter_name}] · [Sort: {sort_name}] · "
             f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete m:Move r:Refresh"
@@ -602,6 +602,37 @@ class SeshApp(App):
             timestamp=_DATETIME_MIN,
             source_path=source_path,
         )
+
+    def _format_status_suffix(self) -> str:
+        parts = []
+        if self._show_tools:
+            parts.append("Tools:ON")
+        if self._show_thinking:
+            parts.append("Think:ON")
+        return (" \u00b7 " + " ".join(parts)) if parts else ""
+
+    def _set_status(self, text: str) -> None:
+        self._status_base = text
+        self.query_one("#status-bar", Static).update(text + self._format_status_suffix())
+
+    def _refresh_status(self) -> None:
+        self.query_one("#status-bar", Static).update(
+            self._status_base + self._format_status_suffix()
+        )
+
+    def action_toggle_tools(self) -> None:
+        """Toggle visibility of tool call messages."""
+        self._show_tools = not self._show_tools
+        if self._current_messages and self._current_session:
+            self._render_messages(self._current_messages, self._current_session)
+        self._refresh_status()
+
+    def action_toggle_thinking(self) -> None:
+        """Toggle visibility of thinking/reasoning messages."""
+        self._show_thinking = not self._show_thinking
+        if self._current_messages and self._current_session:
+            self._render_messages(self._current_messages, self._current_session)
+        self._refresh_status()
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         """Load messages when a session or search result node is selected."""
@@ -655,22 +686,49 @@ class SeshApp(App):
             view.write("[dim]No messages found.[/dim]")
             return
 
+        visible = filter_messages(
+            messages,
+            include_tools=self._show_tools,
+            include_thinking=self._show_thinking,
+        )
+
+        if not visible and messages:
+            view.write("[dim]No visible messages. Press t for tool calls, T for thinking.[/dim]")
+            return
+
+        if not visible:
+            view.write("[dim]No messages found.[/dim]")
+            return
+
         hl = highlight.lower()
 
-        for msg in messages:
-            if msg.is_system:
-                continue
-
+        for msg in visible:
             ts = f" [dim]({msg.timestamp.strftime('%H:%M')})[/dim]" if msg.timestamp else ""
 
-            if msg.role == "user":
+            if msg.content_type == "thinking":
+                view.write(f"\n[dim magenta]Thinking[/dim magenta]{ts}:")
+                thinking_text = (msg.thinking or "")[:3000]
+                view.write(f"  [dim]{self._highlight_text(thinking_text, hl)}[/dim]")
+
+            elif msg.content_type == "tool_use":
+                tool = msg.tool_name or "tool"
+                view.write(f"\n[bold yellow]{tool}[/bold yellow] [dim](call)[/dim]{ts}:")
+                inp = (msg.tool_input or "")[:1000]
+                view.write(f"  {self._highlight_text(inp, hl)}")
+
+            elif msg.content_type == "tool_result":
+                tool = msg.tool_name or "tool"
+                view.write(f"\n[bold yellow]{tool}[/bold yellow] [dim](result)[/dim]{ts}:")
+                out = (msg.tool_output or "")[:2000]
+                view.write(f"  {self._highlight_text(out, hl)}")
+
+            elif msg.role == "user":
                 view.write(f"\n[bold cyan]User[/bold cyan]{ts}:")
                 content = msg.content[:2000]
                 view.write(f"  {self._highlight_text(content, hl)}")
             elif msg.role == "assistant":
                 view.write(f"\n[bold green]Assistant[/bold green]{ts}:")
                 if hl:
-                    # Plain text with highlights instead of Markdown
                     content = msg.content[:5000]
                     view.write(f"  {self._highlight_text(content, hl)}")
                 else:
@@ -682,7 +740,7 @@ class SeshApp(App):
                         view.write(f"  {msg.content[:2000]}")
             elif msg.role == "tool":
                 tool = msg.tool_name or "tool"
-                view.write(f"\n[bold yellow]{tool}[/bold yellow] [dim]({ts})[/dim]:")
+                view.write(f"\n[bold yellow]{tool}[/bold yellow]{ts}:")
                 content = msg.content[:500]
                 view.write(f"  {self._highlight_text(content, hl)}")
 
@@ -758,12 +816,10 @@ class SeshApp(App):
             child = node.add_leaf(label)
             child.data = r
 
-        status = self.query_one("#status-bar", Static)
-        status.update(f"Search: {len(results)} matches for '{query}' · Escape to clear")
+        self._set_status(f"Search: {len(results)} matches for '{query}' · Escape to clear")
 
     def _show_no_results(self, query: str) -> None:
-        status = self.query_one("#status-bar", Static)
-        status.update(f"No results for '{query}'")
+        self._set_status(f"No results for '{query}'")
 
     def action_focus_search(self) -> None:
         self.query_one("#search-input", Input).focus()
@@ -820,14 +876,12 @@ class SeshApp(App):
             return
         result = self._resume_command(session)
         if result is None:
-            status = self.query_one("#status-bar", Static)
-            status.update(f"No resume command for {session.provider.value} session")
+            self._set_status(f"No resume command for {session.provider.value} session")
             return
         cmd_args, _cwd = result
         cmd_str = " ".join(cmd_args)
         self._copy_text(cmd_str)
-        status = self.query_one("#status-bar", Static)
-        status.update(f"Copied: {cmd_str}")
+        self._set_status(f"Copied: {cmd_str}")
 
     def action_toggle_bookmark(self) -> None:
         """Toggle bookmark on the selected session."""
@@ -846,13 +900,12 @@ class SeshApp(App):
             return
 
         key = (session.provider.value, session.id)
-        status = self.query_one("#status-bar", Static)
         if key in self._bookmarks:
             self._bookmarks.discard(key)
-            status.update("Bookmark removed")
+            self._set_status("Bookmark removed")
         else:
             self._bookmarks.add(key)
-            status.update("Bookmark added")
+            self._set_status("Bookmark added")
         save_bookmarks(self._bookmarks)
 
         search_text = self.query_one("#search-input", Input).value
@@ -926,8 +979,7 @@ class SeshApp(App):
         """Suspend sesh and launch the provider's CLI to resume the session."""
         result = self._resume_command(session)
         if result is None:
-            status = self.query_one("#status-bar", Static)
-            status.update(f"CLI not found for {session.provider.value}")
+            self._set_status(f"CLI not found for {session.provider.value}")
             return
         cmd_args, cwd = result
         # The project directory may no longer exist if files were moved
@@ -970,8 +1022,7 @@ class SeshApp(App):
 
         project_path = self._project_path_from_node(node)
         if not project_path:
-            status = self.query_one("#status-bar", Static)
-            status.update("Select a project or session to move")
+            self._set_status("Select a project or session to move")
             return
 
         self.push_screen(
@@ -1007,8 +1058,7 @@ class SeshApp(App):
         new_abs = os.path.abspath(os.path.expanduser(new_path))
 
         if old_abs == new_abs:
-            status = self.query_one("#status-bar", Static)
-            status.update("New path must be different from current path")
+            self._set_status("New path must be different from current path")
             return
 
         self.run_worker(
@@ -1022,10 +1072,7 @@ class SeshApp(App):
         """Run project move + metadata updates and refresh discovery."""
         from sesh.move import move_project
 
-        self.call_from_thread(
-            self.query_one("#status-bar", Static).update,
-            "Moving project...",
-        )
+        self.call_from_thread(self._set_status, "Moving project...")
 
         try:
             reports = move_project(
@@ -1035,19 +1082,13 @@ class SeshApp(App):
                 dry_run=False,
             )
         except Exception as exc:
-            self.call_from_thread(
-                self.query_one("#status-bar", Static).update,
-                f"Move failed: {exc}",
-            )
+            self.call_from_thread(self._set_status, f"Move failed: {exc}")
             return
 
         # Rebuild in-memory state and tree after metadata updates.
         self._discover_all()
 
-        self.call_from_thread(
-            self.query_one("#status-bar", Static).update,
-            self._format_move_status(new_path, reports),
-        )
+        self.call_from_thread(self._set_status, self._format_move_status(new_path, reports))
 
     @staticmethod
     def _format_move_status(new_path: str, reports) -> str:
@@ -1110,8 +1151,7 @@ class SeshApp(App):
         try:
             provider_cls().delete_session(session)
         except Exception:
-            status = self.query_one("#status-bar", Static)
-            status.update(f"Error deleting session")
+            self._set_status("Error deleting session")
             return
 
         # Remove from in-memory session list
@@ -1141,8 +1181,7 @@ class SeshApp(App):
         search_text = self.query_one("#search-input", Input).value
         self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
 
-        status = self.query_one("#status-bar", Static)
-        status.update("Session deleted")
+        self._set_status("Session deleted")
 
 
 def tui_main() -> None:

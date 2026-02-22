@@ -221,8 +221,9 @@ class ClaudeProvider(SessionProvider):
         if not session.source_path:
             return []
 
-        messages = []
+        messages: list[Message] = []
         source_dir = Path(session.source_path)
+        tool_id_map: dict[str, str] = {}  # tool_use_id -> tool_name
 
         # source_path points to the project directory; scan all JSONL files
         if source_dir.is_dir():
@@ -252,27 +253,88 @@ class ClaudeProvider(SessionProvider):
                             continue
 
                         role = msg.get("role", "")
-                        content = _extract_text(msg.get("content", ""))
-                        if not content.strip():
-                            continue
-
                         ts = _parse_timestamp(entry.get("timestamp"))
-                        is_sys = role == "user" and _is_system_message(content)
+                        raw_content = msg.get("content", "")
 
-                        # Extract tool use info
-                        tool_name = None
-                        if isinstance(msg.get("content"), list):
-                            for part in msg["content"]:
-                                if isinstance(part, dict) and part.get("type") == "tool_use":
-                                    tool_name = part.get("name")
+                        if isinstance(raw_content, str):
+                            # Plain string content — single text message
+                            if not raw_content.strip():
+                                continue
+                            is_sys = role == "user" and _is_system_message(raw_content)
+                            messages.append(Message(
+                                role=role,
+                                content=raw_content,
+                                timestamp=ts,
+                                is_system=is_sys,
+                                content_type="text",
+                            ))
+                        elif isinstance(raw_content, list):
+                            # Content array — emit one Message per block
+                            for block in raw_content:
+                                if not isinstance(block, dict):
+                                    continue
+                                btype = block.get("type", "")
 
-                        messages.append(Message(
-                            role=role,
-                            content=content,
-                            timestamp=ts,
-                            tool_name=tool_name,
-                            is_system=is_sys,
-                        ))
+                                if btype == "text":
+                                    text = block.get("text", "")
+                                    if not text.strip():
+                                        continue
+                                    is_sys = role == "user" and _is_system_message(text)
+                                    messages.append(Message(
+                                        role=role,
+                                        content=text,
+                                        timestamp=ts,
+                                        is_system=is_sys,
+                                        content_type="text",
+                                    ))
+
+                                elif btype == "thinking":
+                                    thinking_text = block.get("thinking", "")
+                                    if not thinking_text.strip():
+                                        continue
+                                    messages.append(Message(
+                                        role="assistant",
+                                        content="",
+                                        timestamp=ts,
+                                        thinking=thinking_text,
+                                        content_type="thinking",
+                                    ))
+
+                                elif btype == "tool_use":
+                                    name = block.get("name", "")
+                                    tool_id = block.get("id", "")
+                                    if tool_id and name:
+                                        tool_id_map[tool_id] = name
+                                    inp = block.get("input", {})
+                                    messages.append(Message(
+                                        role="assistant",
+                                        content="",
+                                        timestamp=ts,
+                                        tool_name=name,
+                                        tool_input=json.dumps(inp, indent=2),
+                                        content_type="tool_use",
+                                    ))
+
+                                elif btype == "tool_result":
+                                    tool_id = block.get("tool_use_id", "")
+                                    resolved_name = tool_id_map.get(tool_id, "")
+                                    result_content = block.get("content", "")
+                                    if isinstance(result_content, list):
+                                        parts = []
+                                        for part in result_content:
+                                            if isinstance(part, dict) and part.get("type") == "text":
+                                                parts.append(part.get("text", ""))
+                                        result_str = "\n".join(parts)
+                                    else:
+                                        result_str = str(result_content) if result_content else ""
+                                    messages.append(Message(
+                                        role="tool",
+                                        content="",
+                                        timestamp=ts,
+                                        tool_name=resolved_name,
+                                        tool_output=result_str,
+                                        content_type="tool_result",
+                                    ))
             except OSError:
                 continue
 

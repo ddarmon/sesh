@@ -39,6 +39,10 @@ The app has three layers:
     JSONL entries, not from the encoded folder name.
 -   System messages (commands, reminders, warmup) are tagged
     `is_system=True` and hidden in the message viewer.
+-   Each content block in a provider response becomes a separate
+    `Message` with a `content_type` field: `"text"`, `"tool_use"`,
+    `"tool_result"`, or `"thinking"`. Tool and thinking messages are
+    hidden by default; the TUI toggles them with `t`/`T`.
 
 ## Data locations
 
@@ -67,6 +71,15 @@ CLI to resume the session. Per-provider commands:
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
+## Tool and thinking visibility
+
+Press `t` to toggle tool call/result messages in the message viewer.
+Press `T` (shift-t) to toggle thinking/reasoning blocks. Both are hidden
+by default. The status bar shows `Tools:ON` / `Think:ON` when active.
+
+CLI equivalents: `--include-tools`, `--include-thinking`, `--full`
+(both) on the `messages` and `export` subcommands.
+
 ## Bookmarks
 
 Pressing `b` on a session node toggles a bookmark. Bookmarked sessions
@@ -89,7 +102,8 @@ Press `m` on a project or session node to move a project path. The move
 dialog supports:
 
 -   **Full Move**: move files on disk and rewrite provider metadata
--   **Metadata Only**: rewrite provider metadata only (for already-moved files)
+-   **Metadata Only**: rewrite provider metadata only (for already-moved
+    files)
 
 CLI equivalent:
 
@@ -102,18 +116,18 @@ CLI equivalent:
 All subcommands output JSON to stdout. Run `sesh refresh` first to build
 the index, then query it.
 
-| Command                                                   | Description                              |
-| --------------------------------------------------------- | ---------------------------------------- |
-| `sesh`                                                    | Launch the TUI (default, no subcommand)  |
-| `sesh refresh`                                            | Discover sessions and rebuild the index  |
-| `sesh projects`                                           | List projects from the index             |
-| `sesh sessions [--project PATH] [--provider NAME]`        | List sessions with optional filters      |
-| `sesh messages <id> [--limit N] [--offset N] [--summary]` | Load messages for a session              |
-| `sesh search <query>`                                     | Full-text search (Claude, Codex, Cursor) |
-| `sesh clean <query> [--dry-run]`                          | Delete sessions matching a search query  |
-| `sesh resume <id> [--provider NAME]`                      | Resume a session in its provider's CLI   |
-| `sesh export <id> [--provider NAME] [--format md/json]`   | Export a session to Markdown or JSON     |
-| `sesh move <old> <new> [--metadata-only] [--dry-run]`     | Move project path and update metadata    |
+| Command                                                                                                   | Description                              |
+| --------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `sesh`                                                                                                    | Launch the TUI (default, no subcommand)  |
+| `sesh refresh`                                                                                            | Discover sessions and rebuild the index  |
+| `sesh projects`                                                                                           | List projects from the index             |
+| `sesh sessions [--project PATH] [--provider NAME]`                                                        | List sessions with optional filters      |
+| `sesh messages <id> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full]` | Load messages for a session              |
+| `sesh search <query>`                                                                                     | Full-text search (Claude, Codex, Cursor) |
+| `sesh clean <query> [--dry-run]`                                                                          | Delete sessions matching a search query  |
+| `sesh resume <id> [--provider NAME]`                                                                      | Resume a session in its provider's CLI   |
+| `sesh export <id> [--provider NAME] [--format md/json] [--include-tools] [--include-thinking] [--full]`   | Export a session to Markdown or JSON     |
+| `sesh move <old> <new> [--metadata-only] [--dry-run]`                                                     | Move project path and update metadata    |
 
 The index is stored at `~/.cache/sesh/index.json`.
 
