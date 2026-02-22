@@ -76,6 +76,9 @@ If the CLI binary isn't on PATH, the status bar shows an error.
 Press `t` to toggle tool call/result messages in the message viewer.
 Press `T` (shift-t) to toggle thinking/reasoning blocks. Both are hidden
 by default. The status bar shows `Tools:ON` / `Think:ON` when active.
+Press `F` (shift-f) to toggle fullscreen mode for the message pane; the
+status bar shows `Full:ON` when active. Press `?` to open the keyboard
+shortcuts help modal (press `?` or Escape again to close).
 
 CLI equivalents: `--include-tools`, `--include-thinking`, `--full`
 (both) on the `messages` and `export` subcommands.

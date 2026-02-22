@@ -170,3 +170,31 @@ def test_format_move_status_zero_changes() -> None:
     reports = [MoveReport(provider=Provider.CODEX, success=True)]
     text = SeshApp._format_move_status("/new/path", reports)
     assert "codex: no changes" in text
+
+
+def test_format_status_suffix_fullscreen_only() -> None:
+    """Fullscreen flag adds the Full:ON suffix."""
+    app = SeshApp()
+    app._fullscreen = True
+
+    assert "Full:ON" in app._format_status_suffix()
+
+
+def test_format_status_suffix_all_flags() -> None:
+    """All visibility flags appear in the status suffix."""
+    app = SeshApp()
+    app._fullscreen = True
+    app._show_tools = True
+    app._show_thinking = True
+
+    suffix = app._format_status_suffix()
+    assert "Full:ON" in suffix
+    assert "Tools:ON" in suffix
+    assert "Think:ON" in suffix
+
+
+def test_format_status_suffix_no_flags() -> None:
+    """No flags enabled yields an empty suffix."""
+    app = SeshApp()
+
+    assert app._format_status_suffix() == ""

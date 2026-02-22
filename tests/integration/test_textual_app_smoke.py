@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 
-from sesh.app import SeshApp, SessionTree
+from sesh.app import HelpScreen, SeshApp, SessionTree
 from sesh.models import Project, Provider
 from tests.helpers import make_session
 
@@ -191,6 +191,86 @@ async def test_tool_toggle_updates_state(app):
 
     await pilot.press("T")
     assert sesh_app._show_thinking is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_fullscreen_toggle_updates_state_and_class(app):
+    """Pressing 'F' toggles fullscreen state and the main container class."""
+    sesh_app, pilot = app
+    main = sesh_app.query_one("#main")
+
+    assert sesh_app._fullscreen is False
+    assert not main.has_class("fullscreen")
+
+    await pilot.press("F")
+    await pilot.pause()
+    assert sesh_app._fullscreen is True
+    assert main.has_class("fullscreen")
+
+    await pilot.press("F")
+    await pilot.pause()
+    assert sesh_app._fullscreen is False
+    assert not main.has_class("fullscreen")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_fullscreen_focus_moves_to_message_view(app):
+    """Entering fullscreen moves focus off the hidden tree to the message view."""
+    sesh_app, pilot = app
+
+    tree = sesh_app.query_one("#session-tree")
+    assert tree.has_focus
+
+    await pilot.press("F")
+    await pilot.pause()
+
+    assert sesh_app.query_one("#message-view").has_focus
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_help_screen_opens_on_question_mark(app):
+    """Pressing '?' opens the help modal screen."""
+    sesh_app, pilot = app
+
+    await pilot.press("question_mark")
+    await pilot.pause()
+
+    assert any(isinstance(screen, HelpScreen) for screen in sesh_app.screen_stack)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_help_screen_dismisses_on_escape(app):
+    """Pressing Escape while help is open dismisses the modal."""
+    sesh_app, pilot = app
+
+    await pilot.press("question_mark")
+    await pilot.pause()
+    assert any(isinstance(screen, HelpScreen) for screen in sesh_app.screen_stack)
+
+    await pilot.press("escape")
+    await pilot.pause()
+
+    assert not any(isinstance(screen, HelpScreen) for screen in sesh_app.screen_stack)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_help_screen_dismisses_on_question_mark(app):
+    """Pressing '?' again while help is open dismisses it instead of nesting modals."""
+    sesh_app, pilot = app
+
+    await pilot.press("question_mark")
+    await pilot.pause()
+    assert any(isinstance(screen, HelpScreen) for screen in sesh_app.screen_stack)
+
+    await pilot.press("question_mark")
+    await pilot.pause()
+
+    assert not any(isinstance(screen, HelpScreen) for screen in sesh_app.screen_stack)
 
 
 @pytest.mark.integration
