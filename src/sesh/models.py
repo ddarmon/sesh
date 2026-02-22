@@ -52,6 +52,10 @@ class Message:
     timestamp: datetime | None = None
     tool_name: str | None = None
     is_system: bool = False
+    tool_input: str | None = None     # JSON-formatted tool arguments
+    tool_output: str | None = None    # Tool result content
+    thinking: str | None = None       # Extended thinking / reasoning text
+    content_type: str = "text"        # "text" | "tool_use" | "tool_result" | "thinking"
 
 
 @dataclass
@@ -61,6 +65,26 @@ class SearchResult:
     provider: Provider
     matched_line: str
     file_path: str
+
+
+def filter_messages(
+    messages: list[Message],
+    *,
+    include_system: bool = False,
+    include_tools: bool = False,
+    include_thinking: bool = False,
+) -> list[Message]:
+    """Filter messages by content_type visibility flags."""
+    out = []
+    for m in messages:
+        if m.is_system and not include_system:
+            continue
+        if m.content_type in ("tool_use", "tool_result") and not include_tools:
+            continue
+        if m.content_type == "thinking" and not include_thinking:
+            continue
+        out.append(m)
+    return out
 
 
 def encode_project_path(path: str) -> str:

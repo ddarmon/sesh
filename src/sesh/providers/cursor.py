@@ -29,38 +29,15 @@ else:
     WORKSPACE_STORAGE = Path.home() / ".config" / "Cursor" / "User" / "workspaceStorage"
 
 
-def _extract_content(content) -> str:
-    """Extract text from string or list-of-blocks content."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            block_type = item.get("type", "")
-            if block_type in ("text", "reasoning"):
-                text = item.get("text", "")
-                if text:
-                    parts.append(text)
-            elif block_type == "tool-result":
-                result = item.get("result", "")
-                if result:
-                    parts.append(result)
-        return "\n".join(parts)
-    return ""
-
-
-def _extract_tool_name(content) -> str | None:
-    """Extract tool name from list-of-blocks content."""
-    if not isinstance(content, list):
-        return None
-    for item in content:
-        if isinstance(item, dict):
-            name = item.get("toolName")
-            if name:
-                return name
-    return None
+def _stringify_tool_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, indent=2)
+    except TypeError:
+        return str(value)
 
 
 def _rewrite_workspace_json(workspace_json: Path, old_uri: str, new_uri: str) -> bool:
@@ -414,18 +391,74 @@ class CursorProvider(SessionProvider):
                             else str(blob_data)
                         )
                         data = json.loads(text)
-                        if isinstance(data, dict):
-                            role = data.get("role", "")
-                            raw_content = data.get("content", "")
-                            extracted = _extract_content(raw_content)
-                            if role and extracted:
+                        if not isinstance(data, dict):
+                            continue
+                        role = data.get("role", "")
+                        if not role:
+                            continue
+                        raw_content = data.get("content", "")
+
+                        if isinstance(raw_content, str):
+                            # Plain string content
+                            if raw_content.strip():
                                 messages.append(Message(
                                     role=role,
-                                    content=extracted,
+                                    content=raw_content,
                                     timestamp=None,
-                                    tool_name=_extract_tool_name(raw_content),
                                     is_system=role == "system",
+                                    content_type="text",
                                 ))
+                        elif isinstance(raw_content, list):
+                            for block in raw_content:
+                                if not isinstance(block, dict):
+                                    continue
+                                btype = block.get("type", "")
+
+                                if btype == "text":
+                                    t = block.get("text", "")
+                                    if t.strip():
+                                        messages.append(Message(
+                                            role=role,
+                                            content=t,
+                                            timestamp=None,
+                                            is_system=role == "system",
+                                            content_type="text",
+                                        ))
+
+                                elif btype == "reasoning":
+                                    t = block.get("text", "")
+                                    if t.strip():
+                                        messages.append(Message(
+                                            role="assistant",
+                                            content="",
+                                            timestamp=None,
+                                            thinking=t,
+                                            content_type="thinking",
+                                        ))
+
+                                elif btype == "tool-call":
+                                    name = block.get("toolName", "")
+                                    args = block.get("args", {})
+                                    messages.append(Message(
+                                        role="assistant",
+                                        content="",
+                                        timestamp=None,
+                                        tool_name=name,
+                                        tool_input=_stringify_tool_value(args),
+                                        content_type="tool_use",
+                                    ))
+
+                                elif btype == "tool-result":
+                                    name = block.get("toolName", "")
+                                    result = _stringify_tool_value(block.get("result", ""))
+                                    messages.append(Message(
+                                        role="tool",
+                                        content="",
+                                        timestamp=None,
+                                        tool_name=name,
+                                        tool_output=result,
+                                        content_type="tool_result",
+                                    ))
                     except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                         continue
             except sqlite3.OperationalError:
