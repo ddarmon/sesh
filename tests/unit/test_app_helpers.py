@@ -97,6 +97,15 @@ def test_format_duration_naive_and_negative_inputs() -> None:
     assert _format_duration(start, None) == ""
 
 
+def test_format_duration_mixed_naive_and_aware() -> None:
+    """Mixed naive/aware inputs are both normalized to UTC before computing duration."""
+    naive = datetime(2025, 2, 22, 12, 0, 0)
+    aware = datetime(2025, 2, 22, 12, 45, 0, tzinfo=timezone.utc)
+
+    assert _format_duration(naive, aware) == "45m"
+    assert _format_duration(aware, naive) == ""
+
+
 def test_session_from_search_result_claude_source_path() -> None:
     """Claude search results use the parent directory of the matched file as source_path."""
     result = SearchResult(
