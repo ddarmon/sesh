@@ -12,7 +12,7 @@ history programmatically.
 
 Inspired by [Claude Code UI](https://github.com/siteboon/claudecodeui).
 
-![sesh screenshot](assets/screenshot.jpg)
+![sesh screenshot](assets/screenshot.png)
 
 ## Install
 
@@ -79,14 +79,30 @@ messages on the right.
 | `m`      | Move selected project path (full or metadata-only) |
 | `t`      | Toggle tool call/result visibility                 |
 | `T`      | Toggle thinking/reasoning visibility               |
+| `F`      | Toggle fullscreen message pane                     |
+| `?`      | Show keyboard shortcuts help                       |
 | `q`      | Quit                                               |
+
+Press `?` at any time to see all keyboard shortcuts:
+
+![Help screen showing keyboard shortcuts](assets/help-screen.png)
+
+Press `F` to toggle fullscreen reading mode, which hides the session
+tree and expands the message pane to fill the terminal:
+
+![Fullscreen message view with Full:ON in the status
+bar](assets/fullscreen-view.png)
 
 #### Search
 
 -   **Filter-as-you-type**: Typing in the search bar instantly filters
     the tree by project name and session summary.
 -   **Full-text search**: Press `Enter` to run a ripgrep search across
-    all session JSONL files. Results appear in the tree.
+    all session JSONL files. Results appear in the tree with provider
+    badges and matched context.
+
+![Search results for "authentication" across
+providers](assets/search-results.png)
 
 #### Provider badges
 
@@ -224,6 +240,7 @@ src/sesh/
   __main__.py        # python -m sesh
   cli.py             # argparse CLI with JSON subcommands
   app.py             # Textual TUI, layout, keybindings
+  bookmarks.py       # bookmark persistence (load/save)
   discovery.py       # shared discovery logic (used by TUI and CLI)
   models.py          # Project, SessionMeta, Message, SearchResult, MoveReport
   move.py            # project move orchestration across providers
