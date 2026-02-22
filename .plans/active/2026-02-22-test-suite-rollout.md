@@ -1,11 +1,13 @@
 ---
-Status: active (paused)
+Status: done
 Type: test
 Owner: David
 Branch: feature/tests-rollout
 Created: 2026-02-22
 Updated: 2026-02-22
 ---
+
+------------------------------------------------------------------------
 
 # Test Suite Rollout for `sesh`
 
@@ -80,10 +82,10 @@ Key choices:
 -   `done` Phase 3: provider metadata/indexing/move/delete coverage
 -   `done` Phase 4--5: discovery/search/move orchestration coverage
 -   `done` Phase 6: CLI commands and `main()` dispatch coverage
--   `partial` Phase 7: app helper/delete tests added, but skipped on
-    local Python 3.9 runtime
--   `partial` Phase 8: CLI + `rg` integration tests added; Textual smoke
-    tests not added yet
+-   `done` Phase 7: app helper/delete tests (version guard removed, runs
+    on Python 3.13)
+-   `done` Phase 8: CLI + `rg` integration tests and Textual pilot smoke
+    tests
 
 ## Implemented Changes (Current Branch)
 
@@ -113,7 +115,7 @@ Key choices:
 -   CLI:
     -   `test_cli_commands.py`
     -   `test_cli_main_dispatch.py`
--   App/TUI helper logic (runtime-gated on Python 3.10+ importability):
+-   App/TUI helper logic:
     -   `test_app_helpers.py`
     -   `test_app_delete_logic.py`
 
@@ -121,6 +123,7 @@ Key choices:
 
 -   `tests/integration/test_cli_json_endpoints.py`
 -   `tests/integration/test_search_with_real_rg.py`
+-   `tests/integration/test_textual_app_smoke.py`
 
 ## Regressions Codified and Fixed
 
@@ -142,8 +145,13 @@ Key choices:
 -   `tests/conftest.py`
     -   Added lightweight `textual` stubs so test modules can import
         app-related code paths when Textual is not installed.
--   App helper tests are skipped on Python \< 3.10 due `src/sesh/app.py`
-    syntax requirements (project targets Python 3.10+).
+-   `pyproject.toml`
+    -   Added `[project.optional-dependencies] dev` group with `pytest`
+        and `pytest-asyncio` so `uv run pytest` uses the project Python
+        (3.13) instead of the system Python (3.9).
+    -   Removed Python 3.10 version guards from `test_app_helpers.py`
+        and `test_app_delete_logic.py` since the dev environment now
+        guarantees Python 3.10+.
 
 ## Validation
 
@@ -155,26 +163,11 @@ uv run pytest -q tests
 
 Result:
 
--   `178 passed, 2 skipped`
-
-Skipped:
-
--   `tests/unit/test_app_helpers.py`
--   `tests/unit/test_app_delete_logic.py`
-
-Reason:
-
--   local test runtime is Python 3.9; `src/sesh/app.py` requires Python
-    3.10+ syntax at import time.
+-   `213 passed` (Python 3.13.5, 0 skipped)
 
 ## Risks / Remaining Work
 
--   Textual pilot smoke coverage
-    (`tests/integration/test_textual_app_smoke.py`) is still missing.
--   App helper/delete tests should be run on Python 3.10+ to validate
-    the new TUI regression coverage.
--   If CI runs Python 3.10+, remove ambiguity by ensuring those tests
-    execute there (not only skip locally).
+-   None. All planned phases are complete.
 
 ## Decision Log
 
@@ -186,6 +179,11 @@ Reason:
     the suite green and executable.
 -   2026-02-22: Deferred Textual pilot smoke tests to a later pass due
     environment/runtime constraints.
+-   2026-02-22: Added `pytest` and `pytest-asyncio` as dev dependencies
+    to fix pytest running under system Python 3.9 instead of project
+    Python 3.13. Removed Python version guards from app tests.
+-   2026-02-22: Added 9 Textual pilot smoke tests covering widget
+    mounting, key bindings, tree population, and bookmark toggling.
 
 ## References
 
