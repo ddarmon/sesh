@@ -48,6 +48,7 @@ def _patch_provider_delete(monkeypatch, provider: Provider, fn):
 
 
 def test_removes_session_from_memory(monkeypatch) -> None:
+    """Deleting a session removes it from the in-memory sessions list."""
     app, calls = _make_app_for_delete()
     target = make_session(id="s1", provider=Provider.CLAUDE, project_path="/repo")
     keep = make_session(id="s2", provider=Provider.CLAUDE, project_path="/repo")
@@ -71,6 +72,7 @@ def test_removes_session_from_memory(monkeypatch) -> None:
 
 
 def test_removes_bookmark_and_saves(monkeypatch) -> None:
+    """Deleting a bookmarked session removes the bookmark and persists to disk."""
     app, _calls = _make_app_for_delete()
     target = make_session(id="s1", provider=Provider.CLAUDE, project_path="/repo")
     app.sessions = {"/repo": [target]}
@@ -91,6 +93,7 @@ def test_removes_bookmark_and_saves(monkeypatch) -> None:
 
 
 def test_updates_project_metadata(monkeypatch) -> None:
+    """After deleting a session, the project's count, providers, and latest_activity update."""
     app, _calls = _make_app_for_delete()
     target = make_session(
         id="old",
@@ -126,6 +129,7 @@ def test_updates_project_metadata(monkeypatch) -> None:
 
 
 def test_deletes_project_when_last_session(monkeypatch) -> None:
+    """Deleting the last session in a project removes the project entirely."""
     app, _calls = _make_app_for_delete()
     target = make_session(id="s1", provider=Provider.CURSOR, project_path="/repo")
     app.sessions = {"/repo": [target]}
@@ -142,6 +146,7 @@ def test_deletes_project_when_last_session(monkeypatch) -> None:
 
 
 def test_provider_exception_sets_error_status(monkeypatch) -> None:
+    """Provider exception during delete sets an error status, leaving session in place."""
     app, calls = _make_app_for_delete()
     target = make_session(id="s1", provider=Provider.CLAUDE, project_path="/repo")
     app.sessions = {"/repo": [target]}
@@ -158,6 +163,11 @@ def test_provider_exception_sets_error_status(monkeypatch) -> None:
 
 
 def test_id_collision_regression_only_removes_matching_provider(monkeypatch) -> None:
+    """Two sessions with the same ID but different providers: only the correct one is removed.
+
+    Regression: _delete_session() previously filtered by s.id only, so a session
+    ID collision across providers within the same project removed the wrong session.
+    """
     app, _calls = _make_app_for_delete()
     claude_session = make_session(id="same", provider=Provider.CLAUDE, project_path="/repo")
     codex_session = make_session(id="same", provider=Provider.CODEX, project_path="/repo")

@@ -33,6 +33,7 @@ def _write_workspace_json(base: Path, ws_hash: str, project_path: str) -> None:
 
 
 def test_build_workspace_map_and_projects_dir_map(tmp_cursor_dirs) -> None:
+    """Workspace JSON files are scanned to build path->hash and path->subdir mappings."""
     project_path = "/Users/me/repo"
     _write_workspace_json(tmp_cursor_dirs["workspace_storage"], "ws1", project_path)
     _write_workspace_json(tmp_cursor_dirs["workspace_storage"], "ws2", "/Users/me/other")
@@ -49,6 +50,7 @@ def test_build_workspace_map_and_projects_dir_map(tmp_cursor_dirs) -> None:
 
 
 def test_read_composer_data_from_state_vscdb(tmp_cursor_dirs) -> None:
+    """Composer data (IDE session metadata) is read from the state.vscdb SQLite file."""
     project_path = "/Users/me/repo"
     _write_workspace_json(tmp_cursor_dirs["workspace_storage"], "ws1", project_path)
     _create_state_vscdb(
@@ -61,6 +63,7 @@ def test_read_composer_data_from_state_vscdb(tmp_cursor_dirs) -> None:
 
 
 def test_get_ide_sessions_matches_composer_and_orphans(tmp_cursor_dirs) -> None:
+    """IDE sessions match transcripts to composer metadata; unmatched transcripts become orphans."""
     project_path = "/Users/me/repo"
     encoded = cursor.encode_cursor_path(project_path)
     proj_dir = tmp_cursor_dirs["projects"] / encoded
@@ -102,6 +105,7 @@ def test_get_ide_sessions_matches_composer_and_orphans(tmp_cursor_dirs) -> None:
 
 
 def test_discover_projects_dedups_cli_and_ide(tmp_cursor_dirs) -> None:
+    """Projects from CLI chats and IDE transcripts are deduped by path."""
     project_path = "/Users/me/repo"
 
     # CLI chats source
@@ -131,6 +135,7 @@ def test_discover_projects_dedups_cli_and_ide(tmp_cursor_dirs) -> None:
 
 
 def test_get_sessions_dedups_cli_and_ide_ids(tmp_cursor_dirs, monkeypatch) -> None:
+    """When CLI and IDE have the same session ID, the CLI version wins (richer metadata)."""
     project_path = "/Users/me/repo"
     md5 = hashlib.md5(project_path.encode()).hexdigest()
     create_store_db(
@@ -165,6 +170,7 @@ def test_get_sessions_dedups_cli_and_ide_ids(tmp_cursor_dirs, monkeypatch) -> No
 
 
 def test_get_sessions_uses_cache_for_cli_store_db(tmp_cursor_dirs) -> None:
+    """Per-file cache hit on a store.db skips SQLite parsing."""
     project_path = "/Users/me/repo"
     md5 = hashlib.md5(project_path.encode()).hexdigest()
     store_db = tmp_cursor_dirs["chats"] / md5 / "sess1" / "store.db"

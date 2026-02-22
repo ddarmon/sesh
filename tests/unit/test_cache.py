@@ -14,6 +14,7 @@ def _write(path: Path, content: str) -> None:
 
 
 def test_session_serialization_roundtrip(tmp_cache_dir) -> None:
+    """All SessionMeta fields survive a dict round-trip through the cache layer."""
     session = make_session(
         id="abc",
         project_path="/repo",
@@ -30,6 +31,7 @@ def test_session_serialization_roundtrip(tmp_cache_dir) -> None:
 
 
 def test_dict_to_session_z_suffix(tmp_cache_dir) -> None:
+    """ISO timestamps ending in 'Z' (common in Claude JSONL) parse as UTC."""
     session = cache._dict_to_session(
         {
             "id": "s1",
@@ -43,6 +45,7 @@ def test_dict_to_session_z_suffix(tmp_cache_dir) -> None:
 
 
 def test_dict_to_session_missing_optional_fields(tmp_cache_dir) -> None:
+    """Missing optional fields (model, source_path, message_count) get safe defaults."""
     session = cache._dict_to_session(
         {
             "id": "s1",
@@ -58,6 +61,7 @@ def test_dict_to_session_missing_optional_fields(tmp_cache_dir) -> None:
 
 
 def test_dict_to_session_invalid_timestamp(tmp_cache_dir) -> None:
+    """Non-string timestamp (e.g. integer) falls back to utcnow rather than crashing."""
     before = datetime.now(tz=timezone.utc)
     session = cache._dict_to_session(
         {
@@ -73,6 +77,7 @@ def test_dict_to_session_invalid_timestamp(tmp_cache_dir) -> None:
 
 
 def test_put_get_roundtrip(tmp_cache_dir, tmp_path: Path) -> None:
+    """Per-file cache: put then get returns the same sessions."""
     file_path = tmp_path / "session.jsonl"
     _write(file_path, "line1\n")
     sc = cache.SessionCache()
@@ -82,6 +87,7 @@ def test_put_get_roundtrip(tmp_cache_dir, tmp_path: Path) -> None:
 
 
 def test_cache_miss_no_entry(tmp_cache_dir, tmp_path: Path) -> None:
+    """Per-file cache: querying an uncached path returns None."""
     file_path = tmp_path / "session.jsonl"
     _write(file_path, "line1\n")
     sc = cache.SessionCache()
@@ -89,6 +95,7 @@ def test_cache_miss_no_entry(tmp_cache_dir, tmp_path: Path) -> None:
 
 
 def test_cache_invalidation_mtime(tmp_cache_dir, tmp_path: Path) -> None:
+    """Per-file cache: changing the file's mtime invalidates the entry."""
     file_path = tmp_path / "session.jsonl"
     _write(file_path, "line1\n")
     sc = cache.SessionCache()
@@ -108,6 +115,7 @@ def test_cache_invalidation_mtime(tmp_cache_dir, tmp_path: Path) -> None:
 
 
 def test_cache_invalidation_size(tmp_cache_dir, tmp_path: Path) -> None:
+    """Per-file cache: changing the file's size invalidates the entry."""
     file_path = tmp_path / "session.jsonl"
     _write(file_path, "line1\n")
     sc = cache.SessionCache()
@@ -117,6 +125,7 @@ def test_cache_invalidation_size(tmp_cache_dir, tmp_path: Path) -> None:
 
 
 def test_cache_miss_file_deleted(tmp_cache_dir, tmp_path: Path) -> None:
+    """Per-file cache: deleting the source file invalidates the entry."""
     file_path = tmp_path / "session.jsonl"
     _write(file_path, "line1\n")
     sc = cache.SessionCache()
@@ -126,6 +135,7 @@ def test_cache_miss_file_deleted(tmp_cache_dir, tmp_path: Path) -> None:
 
 
 def test_dir_put_get_roundtrip(tmp_cache_dir, tmp_path: Path) -> None:
+    """Per-directory cache (used by Claude provider): put then get returns same sessions."""
     dir_path = tmp_path / "claude-project"
     _write(dir_path / "a.jsonl", "{}\n")
     sc = cache.SessionCache()
@@ -135,6 +145,7 @@ def test_dir_put_get_roundtrip(tmp_cache_dir, tmp_path: Path) -> None:
 
 
 def test_dir_invalidation_on_new_file(tmp_cache_dir, tmp_path: Path) -> None:
+    """Per-directory cache: adding a new JSONL file invalidates the entry."""
     dir_path = tmp_path / "claude-project"
     _write(dir_path / "a.jsonl", "{}\n")
     sc = cache.SessionCache()
@@ -144,6 +155,7 @@ def test_dir_invalidation_on_new_file(tmp_cache_dir, tmp_path: Path) -> None:
 
 
 def test_dir_ignores_agent_files(tmp_cache_dir, tmp_path: Path) -> None:
+    """agent-*.jsonl files are excluded from the directory fingerprint (Claude sub-agent noise)."""
     dir_path = tmp_path / "claude-project"
     _write(dir_path / "a.jsonl", "{}\n")
     sc = cache.SessionCache()
@@ -154,10 +166,12 @@ def test_dir_ignores_agent_files(tmp_cache_dir, tmp_path: Path) -> None:
 
 
 def test_dir_fingerprint_none_missing_dir(tmp_cache_dir, tmp_path: Path) -> None:
+    """Fingerprinting a nonexistent directory returns None."""
     assert cache.SessionCache._dir_fingerprint(str(tmp_path / "missing")) is None
 
 
 def test_save_load_roundtrip(tmp_cache_dir, tmp_path: Path) -> None:
+    """Cache persists to disk: save() then a fresh SessionCache() sees the same data."""
     file_path = tmp_path / "session.jsonl"
     _write(file_path, "line1\n")
     sc = cache.SessionCache()
@@ -170,6 +184,7 @@ def test_save_load_roundtrip(tmp_cache_dir, tmp_path: Path) -> None:
 
 
 def test_load_corrupt_file(tmp_cache_dir) -> None:
+    """Corrupt cache file on disk is silently ignored (starts with empty cache)."""
     cache.CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     cache.CACHE_FILE.write_text("{bad")
     sc = cache.SessionCache()
@@ -177,11 +192,13 @@ def test_load_corrupt_file(tmp_cache_dir) -> None:
 
 
 def test_load_missing_file(tmp_cache_dir) -> None:
+    """No cache file on disk starts with an empty cache."""
     sc = cache.SessionCache()
     assert sc._cache == {}
 
 
 def test_save_load_index_roundtrip(tmp_cache_dir) -> None:
+    """Projects and sessions in the index survive a save/load round-trip."""
     project = Project(
         path="/repo",
         display_name="repo",
@@ -204,20 +221,24 @@ def test_save_load_index_roundtrip(tmp_cache_dir) -> None:
 
 
 def test_load_index_missing(tmp_cache_dir) -> None:
+    """Missing index file returns None."""
     assert cache.load_index() is None
 
 
 def test_load_index_corrupt(tmp_cache_dir) -> None:
+    """Corrupt index file returns None rather than crashing."""
     cache.INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
     cache.INDEX_FILE.write_text("{bad")
     assert cache.load_index() is None
 
 
 def test_project_paths_roundtrip(tmp_cache_dir) -> None:
+    """Project path cache (encoded-name -> resolved path) survives a save/load cycle."""
     mapping = {"Users-me-proj": {"path": "/Users/me/proj", "mtime": 123.0}}
     cache.save_project_paths(mapping)
     assert cache.load_project_paths() == mapping
 
 
 def test_project_paths_missing(tmp_cache_dir) -> None:
+    """Missing project paths file returns an empty dict."""
     assert cache.load_project_paths() == {}

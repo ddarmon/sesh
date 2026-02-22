@@ -12,12 +12,14 @@ from tests.helpers import create_store_db, write_jsonl
 
 
 def test_validate_paths_rejects_same_path(tmp_path: Path) -> None:
+    """Old and new paths being identical is rejected."""
     path = str(tmp_path / "repo")
     with pytest.raises(ValueError, match="must be different"):
         move._validate_paths(path, path, full_move=True)
 
 
 def test_validate_paths_full_move_checks_old_and_new(tmp_path: Path) -> None:
+    """Full move requires old to exist and new to not exist."""
     old_path = tmp_path / "old"
     new_path = tmp_path / "new"
 
@@ -31,6 +33,7 @@ def test_validate_paths_full_move_checks_old_and_new(tmp_path: Path) -> None:
 
 
 def test_validate_paths_metadata_only_requires_new_exists(tmp_path: Path) -> None:
+    """Metadata-only move requires the new path to exist (files already moved)."""
     old_path = tmp_path / "old"
     new_path = tmp_path / "new"
     old_path.mkdir()
@@ -42,6 +45,7 @@ def test_validate_paths_metadata_only_requires_new_exists(tmp_path: Path) -> Non
 
 
 def test_invalidate_caches_removes_files(tmp_move_dirs) -> None:
+    """Cache invalidation deletes the index, project paths, and session cache files."""
     for path in (move.CACHE_FILE, move.INDEX_FILE, move.PROJECT_PATHS_FILE):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}")
@@ -55,6 +59,7 @@ def test_invalidate_caches_removes_files(tmp_move_dirs) -> None:
 
 
 def test_claude_file_needs_cwd_rewrite(tmp_path: Path) -> None:
+    """Detects whether a Claude JSONL file contains a cwd field matching the old path."""
     jsonl_file = tmp_path / "a.jsonl"
     write_jsonl(jsonl_file, [{"cwd": "/old"}, {"cwd": "/other"}])
     assert move._claude_file_needs_cwd_rewrite(jsonl_file, "/old") is True
@@ -62,6 +67,7 @@ def test_claude_file_needs_cwd_rewrite(tmp_path: Path) -> None:
 
 
 def test_codex_file_needs_rewrite_for_session_meta_and_legacy(tmp_path: Path) -> None:
+    """Detects both new-format (payload.cwd) and legacy (<cwd> tag) Codex references."""
     new_format = tmp_path / "new.jsonl"
     write_jsonl(
         new_format,
@@ -81,6 +87,7 @@ def test_codex_file_needs_rewrite_for_session_meta_and_legacy(tmp_path: Path) ->
 
 
 def test_cursor_store_db_needs_rewrite(tmp_path: Path) -> None:
+    """Detects whether a Cursor store.db contains blobs referencing the old path."""
     store_db = tmp_path / "store.db"
     create_store_db(store_db, blobs=[{"content": "path /old/repo"}])
     assert move._cursor_store_db_needs_rewrite(store_db, "/old/repo") is True
@@ -88,6 +95,7 @@ def test_cursor_store_db_needs_rewrite(tmp_path: Path) -> None:
 
 
 def test_dry_run_claude_counts_files_and_renames(tmp_move_dirs) -> None:
+    """Claude dry run counts JSONL files needing rewrite and dir renames (agent-* excluded)."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
     old_dir = move.PROJECTS_DIR / move.encode_claude_path(old_path)
@@ -105,6 +113,7 @@ def test_dry_run_claude_counts_files_and_renames(tmp_move_dirs) -> None:
 
 
 def test_dry_run_claude_conflict(tmp_move_dirs) -> None:
+    """Claude dry run reports an error when the target directory already exists."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
     (move.PROJECTS_DIR / move.encode_claude_path(old_path)).mkdir(parents=True)
@@ -117,6 +126,7 @@ def test_dry_run_claude_conflict(tmp_move_dirs) -> None:
 
 
 def test_dry_run_codex_counts_matching_files(tmp_move_dirs) -> None:
+    """Codex dry run counts only JSONL files containing the old path."""
     write_jsonl(
         move.CODEX_DIR / "a.jsonl",
         [{"type": "session_meta", "payload": {"cwd": "/old"}}],
@@ -130,6 +140,7 @@ def test_dry_run_codex_counts_matching_files(tmp_move_dirs) -> None:
 
 
 def test_dry_run_cursor_counts_dirs_and_files(tmp_move_dirs) -> None:
+    """Cursor dry run counts chats/projects dir renames plus workspace.json and store.db rewrites."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
 
@@ -155,6 +166,7 @@ def test_dry_run_cursor_counts_dirs_and_files(tmp_move_dirs) -> None:
 
 
 def test_dry_run_cursor_conflict(tmp_move_dirs) -> None:
+    """Cursor dry run reports an error when the target chats directory already exists."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
     (move.CURSOR_CHATS_DIR / hashlib.md5(old_path.encode()).hexdigest()).mkdir(parents=True)
@@ -168,6 +180,7 @@ def test_dry_run_cursor_conflict(tmp_move_dirs) -> None:
 
 
 def test_move_project_dry_run_does_not_move_files(tmp_path: Path, monkeypatch) -> None:
+    """Dry run produces reports without calling shutil.move or modifying the filesystem."""
     old_path = tmp_path / "old"
     new_path = tmp_path / "new"
     old_path.mkdir()
@@ -188,6 +201,7 @@ def test_move_project_dry_run_does_not_move_files(tmp_path: Path, monkeypatch) -
 def test_move_project_orchestrates_providers_and_invalidates_caches(
     tmp_path: Path, tmp_move_dirs, monkeypatch
 ) -> None:
+    """Full move: relocates directory on disk, calls each provider, then invalidates caches."""
     old_path = tmp_path / "old"
     new_path = tmp_path / "new"
     old_path.mkdir()
@@ -226,6 +240,7 @@ def test_move_project_orchestrates_providers_and_invalidates_caches(
 
 
 def test_move_project_captures_provider_exception(tmp_path: Path, monkeypatch) -> None:
+    """A provider exception is captured in the MoveReport rather than aborting the whole move."""
     old_path = tmp_path / "old"
     new_path = tmp_path / "new"
     old_path.mkdir()
@@ -250,6 +265,7 @@ def test_move_project_captures_provider_exception(tmp_path: Path, monkeypatch) -
 
 
 def test_move_project_wraps_shutil_errors(tmp_path: Path, monkeypatch) -> None:
+    """Filesystem errors during shutil.move are wrapped as ValueError."""
     old_path = tmp_path / "old"
     new_path = tmp_path / "new"
     old_path.mkdir()

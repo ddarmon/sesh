@@ -9,6 +9,7 @@ from tests.helpers import write_jsonl
 
 
 def test_rewrite_cwd_in_jsonl_rewrites_exact_matches(tmp_path: Path) -> None:
+    """Only cwd fields exactly matching old_path are rewritten; others and non-JSON lines are kept."""
     jsonl_file = tmp_path / "session.jsonl"
     jsonl_file.write_text(
         "\n".join(
@@ -31,12 +32,14 @@ def test_rewrite_cwd_in_jsonl_rewrites_exact_matches(tmp_path: Path) -> None:
 
 
 def test_rewrite_cwd_in_jsonl_no_change_returns_false(tmp_path: Path) -> None:
+    """When no cwd fields match, the file is untouched and False is returned."""
     jsonl_file = tmp_path / "session.jsonl"
     write_jsonl(jsonl_file, [{"cwd": "/other"}])
     assert claude._rewrite_cwd_in_jsonl(jsonl_file, "/old", "/new") is False
 
 
 def test_move_project_renames_and_rewrites(tmp_claude_dir) -> None:
+    """Full move renames the encoded project dir and rewrites cwd fields in JSONL files."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
     old_dir = tmp_claude_dir / "projects" / claude.encode_claude_path(old_path)
@@ -66,6 +69,7 @@ def test_move_project_renames_and_rewrites(tmp_claude_dir) -> None:
 
 
 def test_move_project_conflict_when_target_exists(tmp_claude_dir) -> None:
+    """Move fails with an error when the target encoded directory already exists."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
     (tmp_claude_dir / "projects" / claude.encode_claude_path(old_path)).mkdir(parents=True)
@@ -79,6 +83,7 @@ def test_move_project_conflict_when_target_exists(tmp_claude_dir) -> None:
 
 
 def test_move_project_rewrites_metadata_in_existing_target_dir(tmp_claude_dir) -> None:
+    """When the target dir already exists (metadata-only move), cwd fields are rewritten in place."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
     new_dir = tmp_claude_dir / "projects" / claude.encode_claude_path(new_path)

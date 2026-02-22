@@ -11,6 +11,7 @@ from tests.helpers import create_store_db, make_session
 
 
 def test_stringify_tool_value() -> None:
+    """None returns empty string; strings pass through; dicts are JSON-stringified."""
     assert cursor._stringify_tool_value(None) == ""
     assert cursor._stringify_tool_value("x") == "x"
     rendered = cursor._stringify_tool_value({"a": 1})
@@ -19,6 +20,7 @@ def test_stringify_tool_value() -> None:
 
 
 def test_decode_value_hex_encoded_json(tmp_cursor_dirs) -> None:
+    """Hex-encoded JSON in the SQLite meta table is decoded and parsed."""
     provider = cursor.CursorProvider()
     payload = {"name": "Session", "createdAt": 1735689600000}
     value = json.dumps(payload).encode("utf-8").hex()
@@ -26,16 +28,19 @@ def test_decode_value_hex_encoded_json(tmp_cursor_dirs) -> None:
 
 
 def test_decode_value_plain_json(tmp_cursor_dirs) -> None:
+    """Plain JSON string in the meta table is parsed directly."""
     provider = cursor.CursorProvider()
     assert provider._decode_value('{"x":1}') == {"x": 1}
 
 
 def test_decode_value_fallback_text(tmp_cursor_dirs) -> None:
+    """Non-JSON, non-hex values are returned as raw text."""
     provider = cursor.CursorProvider()
     assert provider._decode_value("not json") == "not json"
 
 
 def test_read_session_meta_from_store_db(tmp_path: Path, tmp_cursor_dirs) -> None:
+    """Session metadata (title, model, timestamp, message count) is extracted from store.db."""
     db_path = tmp_path / "store.db"
     meta_payload = {
         "name": "Debug session",
@@ -61,6 +66,7 @@ def test_read_session_meta_from_store_db(tmp_path: Path, tmp_cursor_dirs) -> Non
 
 
 def test_read_session_meta_falls_back_to_mtime(tmp_path: Path, tmp_cursor_dirs) -> None:
+    """Without createdAt in metadata, timestamp falls back to file mtime."""
     db_path = tmp_path / "store.db"
     create_store_db(db_path, blobs=[{"role": "user", "content": "hi"}], meta={"0": "{}"})
     os.utime(db_path, (1_735_689_600, 1_735_689_600))
@@ -73,6 +79,7 @@ def test_read_session_meta_falls_back_to_mtime(tmp_path: Path, tmp_cursor_dirs) 
 
 
 def test_extract_workspace_path_from_chat_hash_dir(tmp_path: Path, tmp_cursor_dirs) -> None:
+    """Workspace path is extracted from the first 'Workspace Path:' line in store.db blobs."""
     hash_dir = tmp_path / "hash"
     create_store_db(
         hash_dir / "sess-1" / "store.db",
@@ -85,6 +92,7 @@ def test_extract_workspace_path_from_chat_hash_dir(tmp_path: Path, tmp_cursor_di
 
 
 def test_first_user_message_parses_transcript(tmp_path: Path) -> None:
+    """First user message is extracted from <user_query> tags in a Cursor transcript."""
     transcript = tmp_path / "t.txt"
     transcript.write_text(
         "\n".join(
@@ -108,6 +116,7 @@ def test_first_user_message_parses_transcript(tmp_path: Path) -> None:
 
 
 def test_count_transcript_messages_counts_user_and_assistant(tmp_path: Path) -> None:
+    """Only 'user:' and 'assistant:' role lines are counted (system: lines excluded)."""
     transcript = tmp_path / "t.txt"
     transcript.write_text(
         "user:\nhello\nassistant:\nhi\nsystem:\nnope\nuser:\nagain\n"
@@ -116,6 +125,7 @@ def test_count_transcript_messages_counts_user_and_assistant(tmp_path: Path) -> 
 
 
 def test_delete_session_txt_removes_file(tmp_path: Path, tmp_cursor_dirs) -> None:
+    """Deleting a .txt transcript session removes the file."""
     transcript = tmp_path / "transcript.txt"
     transcript.write_text("user:\nhi\n")
     session = make_session(
@@ -126,6 +136,7 @@ def test_delete_session_txt_removes_file(tmp_path: Path, tmp_cursor_dirs) -> Non
 
 
 def test_delete_session_store_db_removes_parent_dir(tmp_path: Path, tmp_cursor_dirs) -> None:
+    """Deleting a store.db session removes the parent directory (session container)."""
     db_path = tmp_path / "hash" / "session-1" / "store.db"
     create_store_db(db_path, blobs=[{"role": "user", "content": "hi"}])
     session = make_session(

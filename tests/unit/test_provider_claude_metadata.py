@@ -11,10 +11,12 @@ from tests.helpers import make_session, write_jsonl
 
 
 def test_extract_text_string() -> None:
+    """String content passes through as-is."""
     assert claude._extract_text("hello") == "hello"
 
 
 def test_extract_text_list() -> None:
+    """List-of-blocks content joins only type='text' blocks with newlines."""
     assert claude._extract_text(
         [
             {"type": "text", "text": "one"},
@@ -26,36 +28,43 @@ def test_extract_text_list() -> None:
 
 @pytest.mark.parametrize("prefix", claude.SYSTEM_PREFIXES)
 def test_is_system_message_true(prefix: str) -> None:
+    """Each known system prefix is detected as a system message."""
     assert claude._is_system_message(f"{prefix} details")
 
 
 def test_is_system_message_false() -> None:
+    """Normal user/assistant text is not classified as system."""
     assert not claude._is_system_message("Please fix the bug in app.py")
 
 
 def test_is_system_message_empty() -> None:
+    """Empty string is treated as system (noise, not user content)."""
     assert claude._is_system_message("")
 
 
 def test_parse_timestamp_epoch_millis() -> None:
+    """Numeric timestamps (epoch milliseconds) are converted to UTC datetime."""
     assert claude._parse_timestamp(1_735_689_600_000) == datetime(
         2025, 1, 1, tzinfo=timezone.utc
     )
 
 
 def test_parse_timestamp_iso() -> None:
+    """ISO 8601 timestamps with timezone offset parse correctly."""
     assert claude._parse_timestamp("2025-01-01T10:20:30+00:00") == datetime(
         2025, 1, 1, 10, 20, 30, tzinfo=timezone.utc
     )
 
 
 def test_parse_timestamp_iso_z() -> None:
+    """ISO 8601 timestamps with trailing 'Z' parse as UTC."""
     assert claude._parse_timestamp("2025-01-01T10:20:30Z") == datetime(
         2025, 1, 1, 10, 20, 30, tzinfo=timezone.utc
     )
 
 
 def test_extract_project_path_single_cwd(tmp_path: Path) -> None:
+    """When all JSONL entries share one cwd, it's returned as the project path."""
     project_dir = tmp_path / "proj"
     write_jsonl(
         project_dir / "a.jsonl",
@@ -73,6 +82,7 @@ def test_extract_project_path_single_cwd(tmp_path: Path) -> None:
 
 
 def test_extract_project_path_prefers_recent_reasonable_usage(tmp_path: Path) -> None:
+    """When the most recent cwd has reasonable usage (not an overwhelming minority), prefer it."""
     project_dir = tmp_path / "proj"
     entries = [
         {"cwd": "/a", "timestamp": "2025-01-01T00:00:00Z"},
@@ -87,6 +97,7 @@ def test_extract_project_path_prefers_recent_reasonable_usage(tmp_path: Path) ->
 
 
 def test_extract_project_path_falls_back_to_most_frequent(tmp_path: Path) -> None:
+    """When the most recent cwd is a tiny minority, fall back to the most frequent cwd."""
     project_dir = tmp_path / "proj"
     entries = [
         {"cwd": "/a", "timestamp": "2025-01-01T00:00:00Z"},
@@ -104,6 +115,7 @@ def test_extract_project_path_falls_back_to_most_frequent(tmp_path: Path) -> Non
 def test_discover_projects_uses_cached_project_path(
     tmp_cache_dir, tmp_claude_dir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Second discovery call uses the project-path cache, skipping JSONL scanning."""
     project_dir = tmp_claude_dir / "projects" / "-Users-me-repo"
     project_dir.mkdir(parents=True)
 
@@ -129,6 +141,7 @@ def test_discover_projects_uses_cached_project_path(
 def test_get_sessions_parses_and_groups_by_first_user_uuid(
     tmp_claude_dir,
 ) -> None:
+    """Sessions grouped by sessionId; summaries, models, and truncation all handled correctly."""
     project_path = "/Users/me/repo"
     project_dir = tmp_claude_dir / "projects" / claude.encode_claude_path(project_path)
     project_dir.mkdir(parents=True)
@@ -209,6 +222,7 @@ def test_get_sessions_parses_and_groups_by_first_user_uuid(
 
 
 def test_get_sessions_uses_directory_cache(tmp_claude_dir) -> None:
+    """A directory-level cache hit skips JSONL parsing entirely."""
     project_path = "/Users/me/repo"
     project_dir = tmp_claude_dir / "projects" / claude.encode_claude_path(project_path)
     project_dir.mkdir(parents=True)
@@ -233,6 +247,7 @@ def test_get_sessions_uses_directory_cache(tmp_claude_dir) -> None:
 
 
 def test_delete_session_removes_matching_lines_and_preserves_others(tmp_path: Path) -> None:
+    """Only JSONL lines with the matching sessionId are removed; others (incl. non-JSON) kept."""
     project_dir = tmp_path / "claude-project"
     file_path = project_dir / "a.jsonl"
     file_path.parent.mkdir(parents=True)
@@ -262,6 +277,7 @@ def test_delete_session_removes_matching_lines_and_preserves_others(tmp_path: Pa
 
 
 def test_delete_session_unlinks_empty_file(tmp_path: Path) -> None:
+    """If deleting all lines from a JSONL file, the empty file is removed."""
     project_dir = tmp_path / "claude-project"
     write_jsonl(
         project_dir / "a.jsonl",

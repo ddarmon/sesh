@@ -22,6 +22,7 @@ def _session_dict(**overrides) -> dict:
 
 
 def test_require_index_missing_exits(monkeypatch, capsys) -> None:
+    """Missing index prints a 'run refresh' hint and exits with code 1."""
     import sesh.cache as cache_mod
 
     monkeypatch.setattr(cache_mod, "load_index", lambda: None)
@@ -32,12 +33,14 @@ def test_require_index_missing_exits(monkeypatch, capsys) -> None:
 
 
 def test_cmd_projects_outputs_projects(monkeypatch, capsys) -> None:
+    """'sesh projects' outputs the projects array from the index as JSON."""
     monkeypatch.setattr(cli, "_require_index", lambda: {"projects": [{"path": "/repo"}]})
     cli.cmd_projects(_ns())
     assert json.loads(capsys.readouterr().out) == [{"path": "/repo"}]
 
 
 def test_cmd_sessions_filters_and_strips_source_path(monkeypatch, capsys) -> None:
+    """'sesh sessions' filters by --project/--provider and strips source_path from output."""
     index = {
         "sessions": [
             _session_dict(
@@ -66,6 +69,7 @@ def test_cmd_sessions_filters_and_strips_source_path(monkeypatch, capsys) -> Non
 
 
 def test_cmd_messages_not_found_exits(monkeypatch, capsys) -> None:
+    """Requesting messages for a nonexistent session ID exits with code 1."""
     monkeypatch.setattr(cli, "_require_index", lambda: {"sessions": []})
     args = _ns(
         session_id="missing",
@@ -84,6 +88,7 @@ def test_cmd_messages_not_found_exits(monkeypatch, capsys) -> None:
 
 
 def test_cmd_messages_summary_and_pagination(monkeypatch, capsys) -> None:
+    """--summary filters to user text only; --offset/--limit paginate the result."""
     index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
     messages = [
         make_message(role="user", content="u1"),
@@ -114,6 +119,7 @@ def test_cmd_messages_summary_and_pagination(monkeypatch, capsys) -> None:
 
 
 def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
+    """'sesh search' outputs SearchResult objects as JSON with all expected fields."""
     import sesh.search as search_mod
 
     monkeypatch.setattr(
@@ -143,6 +149,7 @@ def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
 
 
 def test_cmd_clean_empty_results(monkeypatch, capsys) -> None:
+    """'sesh clean' with no matches reports zero deletions."""
     import sesh.search as search_mod
 
     monkeypatch.setattr(search_mod, "ripgrep_search", lambda q: [])
@@ -152,6 +159,7 @@ def test_cmd_clean_empty_results(monkeypatch, capsys) -> None:
 
 
 def test_cmd_clean_dry_run(monkeypatch, capsys) -> None:
+    """'sesh clean --dry-run' reports what would be deleted without calling delete_session."""
     import sesh.search as search_mod
 
     monkeypatch.setattr(
@@ -175,6 +183,11 @@ def test_cmd_clean_dry_run(monkeypatch, capsys) -> None:
 
 
 def test_cmd_clean_dedup_regression(monkeypatch, capsys) -> None:
+    """Same Claude session matched in two JSONL files is deleted only once.
+
+    Regression: cmd_clean iterated raw search results without session-level
+    dedup, so a session matching in multiple JSONL files triggered duplicate deletes.
+    """
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
     import sesh.providers.cursor as cursor_mod
@@ -222,6 +235,7 @@ def test_cmd_clean_dedup_regression(monkeypatch, capsys) -> None:
 
 
 def test_cmd_clean_collects_errors(monkeypatch, capsys) -> None:
+    """Provider exceptions during clean are captured in the 'errors' list, not raised."""
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
     import sesh.providers.cursor as cursor_mod
@@ -259,6 +273,7 @@ def test_cmd_clean_collects_errors(monkeypatch, capsys) -> None:
 
 
 def test_cmd_resume_binary_missing(monkeypatch, capsys) -> None:
+    """'sesh resume' exits with an error when the provider's CLI binary isn't on PATH."""
     index = {
         "sessions": [
             _session_dict(
@@ -278,6 +293,7 @@ def test_cmd_resume_binary_missing(monkeypatch, capsys) -> None:
 
 
 def test_cmd_resume_cursor_txt_refusal(monkeypatch, capsys) -> None:
+    """Cursor .txt transcript sessions cannot be resumed (no session ID in Cursor's format)."""
     index = {
         "sessions": [
             _session_dict(
@@ -306,6 +322,7 @@ def test_cmd_resume_cursor_txt_refusal(monkeypatch, capsys) -> None:
 def test_cmd_resume_execvp_args_and_chdir(
     provider, expected_binary, expected_args, monkeypatch
 ) -> None:
+    """Correct CLI args and chdir-to-project for each provider's resume command."""
     index = {
         "sessions": [
             _session_dict(
@@ -339,6 +356,7 @@ def test_cmd_resume_execvp_args_and_chdir(
 
 
 def test_cmd_export_json_format(monkeypatch, capsys) -> None:
+    """JSON export includes session metadata and messages with tool fields."""
     session = make_session(
         id="s1",
         provider=Provider.CLAUDE,
@@ -377,6 +395,7 @@ def test_cmd_export_json_format(monkeypatch, capsys) -> None:
 
 
 def test_cmd_export_markdown_format(monkeypatch, capsys) -> None:
+    """Markdown export renders headings, blockquoted thinking, and fenced tool input."""
     session = make_session(
         id="s1",
         provider=Provider.CODEX,
@@ -424,6 +443,7 @@ def test_cmd_export_markdown_format(monkeypatch, capsys) -> None:
 
 
 def test_cmd_move_expands_paths_and_outputs_json(monkeypatch, capsys) -> None:
+    """'sesh move' expands ~ and relative paths before passing to move_project."""
     import sesh.move as move_mod
 
     calls = {}
@@ -460,6 +480,7 @@ def test_cmd_move_expands_paths_and_outputs_json(monkeypatch, capsys) -> None:
 
 
 def test_cmd_move_error_propagation(monkeypatch, capsys) -> None:
+    """move_project raising ValueError causes exit(1) with the error message on stderr."""
     import sesh.move as move_mod
 
     monkeypatch.setattr(move_mod, "move_project", lambda **kwargs: (_ for _ in ()).throw(ValueError("bad move")))

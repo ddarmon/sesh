@@ -27,6 +27,7 @@ def _read_blob_texts(store_db: Path) -> list[str]:
 
 
 def test_rewrite_workspace_json_updates_folder(tmp_path: Path) -> None:
+    """workspace.json folder URI is rewritten from old to new."""
     workspace_json = tmp_path / "workspace.json"
     workspace_json.write_text(json.dumps({"folder": "file:///old"}))
 
@@ -36,12 +37,14 @@ def test_rewrite_workspace_json_updates_folder(tmp_path: Path) -> None:
 
 
 def test_rewrite_workspace_json_no_change_returns_false(tmp_path: Path) -> None:
+    """When the folder URI doesn't match, the file is untouched and False is returned."""
     workspace_json = tmp_path / "workspace.json"
     workspace_json.write_text(json.dumps({"folder": "file:///other"}))
     assert cursor._rewrite_workspace_json(workspace_json, "file:///old", "file:///new") is False
 
 
 def test_rewrite_store_db_blobs_replaces_paths(tmp_path: Path) -> None:
+    """Old path references in store.db blob text are replaced with the new path."""
     store_db = tmp_path / "store.db"
     create_store_db(
         store_db,
@@ -59,12 +62,14 @@ def test_rewrite_store_db_blobs_replaces_paths(tmp_path: Path) -> None:
 
 
 def test_rewrite_store_db_blobs_no_change_returns_false(tmp_path: Path) -> None:
+    """When no blobs reference the old path, the DB is untouched and False is returned."""
     store_db = tmp_path / "store.db"
     create_store_db(store_db, blobs=[{"content": "nothing"}])
     assert cursor._rewrite_store_db_blobs(store_db, "/old", "/new") is False
 
 
 def test_move_project_renames_dirs_and_rewrites_files(tmp_cursor_dirs) -> None:
+    """Full Cursor move: renames chats + projects dirs, rewrites workspace.json and store.db blobs."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
 
@@ -108,6 +113,7 @@ def test_move_project_renames_dirs_and_rewrites_files(tmp_cursor_dirs) -> None:
 
 
 def test_move_project_conflict_returns_error(tmp_cursor_dirs) -> None:
+    """Move fails when the target chats directory (md5 hash) already exists."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
     (tmp_cursor_dirs["chats"] / hashlib.md5(old_path.encode()).hexdigest()).mkdir(parents=True)
@@ -121,6 +127,7 @@ def test_move_project_conflict_returns_error(tmp_cursor_dirs) -> None:
 
 
 def test_move_project_store_db_errors_become_warning(tmp_cursor_dirs, monkeypatch) -> None:
+    """SQLite errors during store.db blob rewrite are collected as warnings, not failures."""
     old_path = "/Users/me/old"
     new_path = "/Users/me/new"
     old_md5 = hashlib.md5(old_path.encode()).hexdigest()

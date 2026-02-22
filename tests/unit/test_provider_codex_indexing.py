@@ -10,12 +10,14 @@ from tests.helpers import make_session, write_jsonl
 
 
 def test_parse_timestamp_z() -> None:
+    """ISO timestamps with 'Z' suffix parse as UTC datetime."""
     assert codex._parse_timestamp("2025-02-01T12:00:00Z") == datetime(
         2025, 2, 1, 12, 0, 0, tzinfo=timezone.utc
     )
 
 
 def test_extract_text_from_content() -> None:
+    """Content list items with text/input_text/output_text keys are joined with newlines."""
     content = [
         {"text": "one"},
         {"input_text": "two"},
@@ -26,6 +28,7 @@ def test_extract_text_from_content() -> None:
 
 
 def test_stringify_tool_value() -> None:
+    """None returns empty string; dicts are JSON-stringified."""
     assert codex._stringify_tool_value(None) == ""
     rendered = codex._stringify_tool_value({"a": 1})
     assert isinstance(rendered, str)
@@ -33,6 +36,7 @@ def test_stringify_tool_value() -> None:
 
 
 def test_parse_session_file_new_format(tmp_path: Path) -> None:
+    """New-format Codex JSONL (with session_meta entry) extracts id, cwd, model, and summary."""
     file_path = tmp_path / "new.jsonl"
     first_prompt = "p" * 90
     write_jsonl(
@@ -68,6 +72,7 @@ def test_parse_session_file_new_format(tmp_path: Path) -> None:
 
 
 def test_parse_session_file_legacy_format(tmp_path: Path) -> None:
+    """Legacy Codex JSONL (with <cwd> tags) extracts the project path from the tag."""
     file_path = tmp_path / "legacy.jsonl"
     write_jsonl(
         file_path,
@@ -95,6 +100,7 @@ def test_parse_session_file_legacy_format(tmp_path: Path) -> None:
 
 
 def test_parse_session_file_legacy_without_cwd_returns_none(tmp_path: Path) -> None:
+    """Legacy file without a <cwd> tag returns None (can't determine project)."""
     file_path = tmp_path / "legacy.jsonl"
     write_jsonl(
         file_path,
@@ -107,6 +113,7 @@ def test_parse_session_file_legacy_without_cwd_returns_none(tmp_path: Path) -> N
 
 
 def test_discover_projects_skips_invalid_paths_and_get_sessions_sorted(tmp_codex_dir) -> None:
+    """Root '/' cwd is skipped; valid sessions are sorted newest-first per project."""
     write_jsonl(
         tmp_codex_dir / "a.jsonl",
         [
@@ -158,6 +165,7 @@ def test_discover_projects_skips_invalid_paths_and_get_sessions_sorted(tmp_codex
 
 
 def test_build_index_uses_cached_sessions(tmp_codex_dir) -> None:
+    """Per-file cache hit skips JSONL parsing and uses the cached session data."""
     file_path = tmp_codex_dir / "cached.jsonl"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text("{}\n")
@@ -186,6 +194,7 @@ def test_build_index_uses_cached_sessions(tmp_codex_dir) -> None:
 
 
 def test_delete_session_unlinks_source_file(tmp_path: Path) -> None:
+    """Codex delete_session removes the entire session JSONL file."""
     file_path = tmp_path / "session.jsonl"
     file_path.write_text("{}\n")
     session = make_session(id="s1", provider=Provider.CODEX, source_path=str(file_path))

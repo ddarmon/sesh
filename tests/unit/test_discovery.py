@@ -8,6 +8,7 @@ from tests.helpers import make_session
 
 
 def test_discover_all_merges_projects_and_sorts_sessions(monkeypatch) -> None:
+    """Sessions from multiple providers merge under the same project path, sorted newest-first."""
     cache_obj = object()
     calls: list[tuple[str, str, object]] = []
 
@@ -89,6 +90,7 @@ def test_discover_all_merges_projects_and_sorts_sessions(monkeypatch) -> None:
 
 
 def test_discover_all_ignores_provider_exceptions(monkeypatch) -> None:
+    """A provider raising during discovery or get_sessions doesn't crash other providers."""
     class GoodClaudeProvider:
         def discover_projects(self):
             yield "/repo", "repo"

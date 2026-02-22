@@ -58,6 +58,7 @@ def _write_claude_fixture(home: Path, project_path: str = "/Users/me/repo") -> s
 
 @pytest.mark.integration
 def test_refresh_then_projects(tmp_path: Path) -> None:
+    """Full pipeline: refresh discovers Claude fixtures, then projects returns valid JSON."""
     _write_claude_fixture(tmp_path)
 
     refresh = _run_cli(tmp_path, "refresh")
@@ -76,6 +77,7 @@ def test_refresh_then_projects(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 def test_sessions_filter(tmp_path: Path) -> None:
+    """'sesh sessions --provider --project' filters to matching sessions only."""
     _write_claude_fixture(tmp_path, "/Users/me/repo1")
     _write_claude_fixture(tmp_path, "/Users/me/repo2")
 
@@ -93,6 +95,7 @@ def test_sessions_filter(tmp_path: Path) -> None:
 
 @pytest.mark.integration
 def test_messages_roundtrip(tmp_path: Path) -> None:
+    """'sesh messages' reads back the fixture data written to Claude JSONL."""
     session_id = _write_claude_fixture(tmp_path)
 
     refresh = _run_cli(tmp_path, "refresh")

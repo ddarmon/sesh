@@ -24,6 +24,7 @@ def _rg_match(file_path: str, line_text: str) -> str:
 def test_search_cursor_transcripts_parses_and_dedups(
     tmp_search_dirs, monkeypatch
 ) -> None:
+    """Cursor transcript rg output is parsed into SearchResults, deduped by (session_id, file)."""
     base = tmp_search_dirs["cursor_projects"]
     base.mkdir(parents=True, exist_ok=True)
     file1 = base / "Users-me-repo" / "agent-transcripts" / "sess1.txt"
@@ -45,6 +46,7 @@ def test_search_cursor_transcripts_parses_and_dedups(
 
 
 def test_search_cursor_stores_reads_sqlite(tmp_search_dirs) -> None:
+    """Cursor store.db files are searched via SQLite (not rg) and matched case-insensitively."""
     store_db = tmp_search_dirs["cursor_chats"] / "hash1" / "sess1" / "store.db"
     create_store_db(
         store_db,
@@ -66,6 +68,7 @@ def test_search_cursor_stores_reads_sqlite(tmp_search_dirs) -> None:
 def test_ripgrep_search_parses_jsonl_and_merges_cursor_results(
     tmp_search_dirs, monkeypatch
 ) -> None:
+    """Full ripgrep_search merges Claude JSONL, Codex JSONL, and Cursor results, deduping Cursor."""
     claude_file = tmp_search_dirs["claude_projects"] / "proj" / "a.jsonl"
     codex_file = (
         tmp_search_dirs["codex_sessions"]
@@ -169,6 +172,11 @@ def test_ripgrep_search_parses_jsonl_and_merges_cursor_results(
 
 
 def test_ripgrep_search_cursor_only_regression(tmp_search_dirs, monkeypatch) -> None:
+    """Cursor search runs even when no Claude/Codex directories exist.
+
+    Regression: ripgrep_search() previously returned early before reaching
+    the Cursor search branches when JSONL directories were absent.
+    """
     monkeypatch.setattr(search.shutil, "which", lambda _: "rg")
     monkeypatch.setattr(
         search,
@@ -197,5 +205,6 @@ def test_ripgrep_search_cursor_only_regression(tmp_search_dirs, monkeypatch) -> 
 
 
 def test_ripgrep_search_returns_empty_when_rg_missing(monkeypatch) -> None:
+    """When rg is not on PATH, ripgrep_search returns an empty list."""
     monkeypatch.setattr(search.shutil, "which", lambda _: None)
     assert search.ripgrep_search("needle") == []
