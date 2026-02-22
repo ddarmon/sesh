@@ -81,7 +81,16 @@ status bar shows `Full:ON` when active. Press `?` to open the keyboard
 shortcuts help modal (press `?` or Escape again to close).
 
 CLI equivalents: `--include-tools`, `--include-thinking`, `--full`
-(both) on the `messages` and `export` subcommands.
+(both) on the `messages` and `export` subcommands. These toggles, along
+with the provider filter and sort mode, persist across launches in
+`~/.cache/sesh/preferences.json` (managed by `preferences.py`).
+
+## Session export
+
+Press `e` in the TUI to export the current session as Markdown to the
+system clipboard. The export respects the current tool/thinking
+visibility toggles. The formatting logic lives in `export.py` and is
+shared by the TUI and the `sesh export` CLI subcommand.
 
 ## Bookmarks
 
@@ -197,6 +206,9 @@ environment.
     fixtures (`tmp_cache_dir`, `tmp_claude_dir`, `tmp_codex_dir`,
     `tmp_cursor_dirs`, `tmp_search_dirs`, `tmp_move_dirs`). Always use
     these instead of touching real home-directory paths.
+-   An autouse `isolate_app_preferences` fixture stubs
+    `load_preferences`/`save_preferences` on the app module so tests
+    never read or write real preference files.
 -   Prefer deterministic synthetic fixtures over real user data.
 -   When adding a new provider, add corresponding test files under
     `tests/unit/` following the existing naming pattern
