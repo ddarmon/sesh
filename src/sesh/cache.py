@@ -132,8 +132,11 @@ class SessionCache:
     def _dir_fingerprint(dir_path: str) -> list | None:
         """Return a fingerprint based on JSONL file mtimes and sizes."""
         try:
+            base = Path(dir_path)
+            if not base.is_dir():
+                return None
             entries = []
-            for f in sorted(Path(dir_path).glob("*.jsonl")):
+            for f in sorted(base.glob("*.jsonl")):
                 if f.name.startswith("agent-"):
                     continue
                 stat = f.stat()

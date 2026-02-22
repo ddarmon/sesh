@@ -7,27 +7,19 @@ content_type and populated fields.
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from sesh.models import Message, Provider, SessionMeta
+from tests.helpers import create_store_db as _create_store_db
+from tests.helpers import write_jsonl as _write_jsonl
 
 
 # ---------------------------------------------------------------------------
 # Claude provider
 # ---------------------------------------------------------------------------
-
-
-def _write_jsonl(path: Path, entries: list[dict]) -> None:
-    with open(path, "w") as f:
-        for entry in entries:
-            f.write(json.dumps(entry) + "\n")
-
-
 @pytest.fixture()
 def claude_session_dir(tmp_path: Path):
     """Create a temp directory with a Claude-style JSONL file."""
@@ -297,22 +289,6 @@ def test_codex_extracts_all_types(codex_session_file):
 # ---------------------------------------------------------------------------
 # Cursor provider
 # ---------------------------------------------------------------------------
-
-
-def _create_store_db(db_path: Path, blobs: list[dict]) -> None:
-    """Create a minimal store.db with the given blob dicts."""
-    conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE blobs (id TEXT, data BLOB)")
-    conn.execute("CREATE TABLE meta (key TEXT, value TEXT)")
-    for i, blob in enumerate(blobs):
-        conn.execute(
-            "INSERT INTO blobs (id, data) VALUES (?, ?)",
-            (str(i), json.dumps(blob).encode("utf-8")),
-        )
-    conn.commit()
-    conn.close()
-
-
 @pytest.fixture()
 def cursor_store_db(tmp_path: Path):
     """Create a temp Cursor store.db with mixed content blocks."""
