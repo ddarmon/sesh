@@ -359,111 +359,110 @@ def ripgrep_search(query: str) -> list[SearchResult]:
     if CODEX_SESSIONS.is_dir():
         search_paths.append(str(CODEX_SESSIONS))
 
-    if not search_paths:
-        return []
-
-    cmd = [
-        rg, "--json", "-i",
-        "--glob", "*.jsonl",
-        query,
-        *search_paths,
-    ]
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return []
-
     results: list[SearchResult] = []
     seen_sessions: set[str] = set()
 
-    for line in proc.stdout.splitlines():
+    if search_paths:
+        cmd = [
+            rg, "--json", "-i",
+            "--glob", "*.jsonl",
+            query,
+            *search_paths,
+        ]
+
         try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            proc = None
 
-        if data.get("type") != "match":
-            continue
+        if proc is not None:
+            for line in proc.stdout.splitlines():
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-        match_data = data.get("data", {})
-        file_path = match_data.get("path", {}).get("text", "")
-        matched_text = match_data.get("lines", {}).get("text", "").strip()
+                if data.get("type") != "match":
+                    continue
 
-        if not file_path or not matched_text:
-            continue
+                match_data = data.get("data", {})
+                file_path = match_data.get("path", {}).get("text", "")
+                matched_text = match_data.get("lines", {}).get("text", "").strip()
 
-        # Determine provider from path
-        if "/.claude/" in file_path:
-            provider = Provider.CLAUDE
-        elif "/.codex/" in file_path:
-            provider = Provider.CODEX
-        else:
-            provider = Provider.CLAUDE
+                if not file_path or not matched_text:
+                    continue
 
-        # Try to extract sessionId from the matched JSONL line
-        session_id = ""
-        entry = {}
-        try:
-            entry = json.loads(matched_text)
-            session_id = entry.get("sessionId", "") or ""
-            if not session_id:
-                payload_id = entry.get("payload", {}).get("id", "")
-                # Only use payload.id from session_meta entries (not message IDs)
-                if payload_id and entry.get("type") == "session_meta":
-                    session_id = payload_id
-        except (json.JSONDecodeError, AttributeError):
-            pass
+                # Determine provider from path
+                if "/.claude/" in file_path:
+                    provider = Provider.CLAUDE
+                elif "/.codex/" in file_path:
+                    provider = Provider.CODEX
+                else:
+                    provider = Provider.CLAUDE
 
-        # For Codex files, fall back to extracting UUID from filename
-        if not session_id and provider == Provider.CODEX:
-            session_id = _extract_codex_session_id(file_path)
+                # Try to extract sessionId from the matched JSONL line
+                session_id = ""
+                entry = {}
+                try:
+                    entry = json.loads(matched_text)
+                    session_id = entry.get("sessionId", "") or ""
+                    if not session_id:
+                        payload_id = entry.get("payload", {}).get("id", "")
+                        # Only use payload.id from session_meta entries (not message IDs)
+                        if payload_id and entry.get("type") == "session_meta":
+                            session_id = payload_id
+                except (json.JSONDecodeError, AttributeError):
+                    pass
 
-        # Extract project_path (cwd) for session resume
-        project_path = ""
-        if entry:
-            project_path = entry.get("cwd", "") or ""
-            if not project_path:
-                project_path = entry.get("payload", {}).get("cwd", "") or ""
-        # For Codex, cwd is only in the session_meta (first line); read it
-        if not project_path and provider == Provider.CODEX:
-            try:
-                with open(file_path) as f:
-                    first = json.loads(f.readline())
-                    project_path = first.get("payload", {}).get("cwd", "") or ""
-            except (OSError, json.JSONDecodeError, AttributeError):
-                pass
+                # For Codex files, fall back to extracting UUID from filename
+                if not session_id and provider == Provider.CODEX:
+                    session_id = _extract_codex_session_id(file_path)
 
-        # Extract readable display text
-        content_text = _extract_content_text(entry, query) if entry else ""
-        display_text = _extract_display_text(content_text, query)
-        if not display_text or query.lower() not in display_text.lower():
-            # Content didn't contain the query (match was in metadata/paths);
-            # fall back to a window around the match in the raw JSONL line
-            raw_display = _extract_display_text(matched_text, query)
-            if raw_display and query.lower() in raw_display.lower():
-                display_text = raw_display
-            elif not display_text:
-                display_text = matched_text[:200]
+                # Extract project_path (cwd) for session resume
+                project_path = ""
+                if entry:
+                    project_path = entry.get("cwd", "") or ""
+                    if not project_path:
+                        project_path = entry.get("payload", {}).get("cwd", "") or ""
+                # For Codex, cwd is only in the session_meta (first line); read it
+                if not project_path and provider == Provider.CODEX:
+                    try:
+                        with open(file_path) as f:
+                            first = json.loads(f.readline())
+                            project_path = first.get("payload", {}).get("cwd", "") or ""
+                    except (OSError, json.JSONDecodeError, AttributeError):
+                        pass
 
-        # Deduplicate by session
-        dedup_key = f"{session_id}:{file_path}" if session_id else file_path
-        if dedup_key in seen_sessions:
-            continue
-        seen_sessions.add(dedup_key)
+                # Extract readable display text
+                content_text = _extract_content_text(entry, query) if entry else ""
+                display_text = _extract_display_text(content_text, query)
+                if not display_text or query.lower() not in display_text.lower():
+                    # Content didn't contain the query (match was in metadata/paths);
+                    # fall back to a window around the match in the raw JSONL line
+                    raw_display = _extract_display_text(matched_text, query)
+                    if raw_display and query.lower() in raw_display.lower():
+                        display_text = raw_display
+                    elif not display_text:
+                        display_text = matched_text[:200]
 
-        results.append(SearchResult(
-            session_id=session_id,
-            project_path=project_path,
-            provider=provider,
-            matched_line=display_text,
-            file_path=file_path,
-        ))
+                # Deduplicate by session
+                dedup_key = f"{session_id}:{file_path}" if session_id else file_path
+                if dedup_key in seen_sessions:
+                    continue
+                seen_sessions.add(dedup_key)
+
+                results.append(SearchResult(
+                    session_id=session_id,
+                    project_path=project_path,
+                    provider=provider,
+                    matched_line=display_text,
+                    file_path=file_path,
+                ))
 
     # Cursor search: transcripts (.txt) and store.db files
     cursor_seen: set[str] = set()

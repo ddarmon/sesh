@@ -227,6 +227,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
     deleted = []
     errors = []
+    seen_targets: set[tuple[str, str, str]] = set()
 
     for r in results:
         if r.provider == Provider.CLAUDE:
@@ -237,6 +238,11 @@ def cmd_clean(args: argparse.Namespace) -> None:
             source_path = r.file_path
         else:
             continue
+
+        dedup_key = (r.provider.value, r.session_id, source_path)
+        if dedup_key in seen_targets:
+            continue
+        seen_targets.add(dedup_key)
 
         entry = {
             "session_id": r.session_id,

@@ -1157,7 +1157,9 @@ class SeshApp(App):
         # Remove from in-memory session list
         sess_list = self.sessions.get(session.project_path, [])
         self.sessions[session.project_path] = [
-            s for s in sess_list if s.id != session.id
+            s
+            for s in sess_list
+            if not (s.id == session.id and s.provider == session.provider)
         ]
 
         # Remove bookmark if present
