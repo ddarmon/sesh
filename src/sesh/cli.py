@@ -2,6 +2,10 @@
 
 Provides JSON subcommands for programmatic access alongside the TUI.
 
+All sesh.* imports are lazy (inside functions) so that ``sesh --help``
+and argument parsing stay fast.  Only the stdlib modules needed by the
+arg parser are imported at module level.
+
 Workflow:
     sesh refresh          # discover sessions and build the index
     sesh projects         # list projects (from index)
