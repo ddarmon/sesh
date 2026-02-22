@@ -65,7 +65,9 @@ on Windows). Claude Code and Codex path resolution should work via
 
 Launch with `sesh`. The TUI loads sessions in the background and
 populates a project tree on the left. Select a session to view its
-messages on the right.
+messages on the right. Session labels show relative timestamps ("2h
+ago", "yesterday") for recent sessions. View preferences -- provider
+filter, sort mode, and visibility toggles -- persist across launches.
 
 #### Keybindings
 
@@ -75,6 +77,7 @@ messages on the right.
 | `Escape` | Clear search and return to full tree               |
 | `f`      | Cycle provider filter (All/Claude/Codex/Cursor)    |
 | `o`      | Open/resume the selected session in its CLI        |
+| `e`      | Export session to clipboard as Markdown            |
 | `d`      | Delete the selected session (with confirmation)    |
 | `m`      | Move selected project path (full or metadata-only) |
 | `t`      | Toggle tool call/result visibility                 |
@@ -230,7 +233,9 @@ exist.
 
 Parsed session metadata is cached at `~/.cache/sesh/sessions.json`,
 keyed by file path with mtime/size for invalidation. The CLI index is
-stored at `~/.cache/sesh/index.json`.
+stored at `~/.cache/sesh/index.json`. View preferences (provider filter,
+sort mode, visibility toggles) are saved to
+`~/.cache/sesh/preferences.json`.
 
 ## Project structure
 
@@ -241,6 +246,8 @@ src/sesh/
   cli.py             # argparse CLI with JSON subcommands
   app.py             # Textual TUI, layout, keybindings
   bookmarks.py       # bookmark persistence (load/save)
+  preferences.py     # view preference persistence (load/save)
+  export.py          # shared Markdown export formatter
   discovery.py       # shared discovery logic (used by TUI and CLI)
   models.py          # Project, SessionMeta, Message, SearchResult, MoveReport
   move.py            # project move orchestration across providers

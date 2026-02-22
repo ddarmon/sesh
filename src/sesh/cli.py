@@ -2,6 +2,10 @@
 
 Provides JSON subcommands for programmatic access alongside the TUI.
 
+All sesh.* imports are lazy (inside functions) so that ``sesh --help``
+and argument parsing stay fast.  Only the stdlib modules needed by the
+arg parser are imported at module level.
+
 Workflow:
     sesh refresh          # discover sessions and build the index
     sesh projects         # list projects (from index)
@@ -396,63 +400,9 @@ def cmd_export(args: argparse.Namespace) -> None:
             "messages": out_messages,
         })
     else:
-        # Markdown output
-        print(f"# Session: {session.id}")
-        print()
-        print(f"- **Provider:** {session.provider.value}")
-        print(f"- **Project:** {session.project_path}")
-        if session.model:
-            print(f"- **Model:** {session.model}")
-        print(f"- **Date:** {session.timestamp.strftime('%Y-%m-%d %H:%M')}")
-        print()
+        from sesh.export import format_session_markdown
 
-        for m in messages:
-            ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
-
-            if m.content_type == "thinking":
-                print(f"### Thinking{ts}")
-                print()
-                for line in (m.thinking or "").splitlines():
-                    print(f"> {line}")
-                print()
-
-            elif m.content_type == "tool_use":
-                tool = m.tool_name or "tool"
-                print(f"### {tool} (call){ts}")
-                print()
-                print("```json")
-                print(m.tool_input or "")
-                print("```")
-                print()
-
-            elif m.content_type == "tool_result":
-                tool = m.tool_name or "tool"
-                print(f"### {tool} (result){ts}")
-                print()
-                print(m.tool_output or "")
-                print()
-
-            elif m.role == "user":
-                print(f"## User{ts}")
-                print()
-                print(m.content)
-                print()
-            elif m.role == "assistant":
-                print(f"## Assistant{ts}")
-                print()
-                print(m.content)
-                print()
-            elif m.role == "tool":
-                tool = m.tool_name or "tool"
-                print(f"### {tool}{ts}")
-                print()
-                print(m.content)
-                print()
-            else:
-                print(f"## {m.role}{ts}")
-                print()
-                print(m.content)
-                print()
+        print(format_session_markdown(session, messages))
 
 
 def cmd_move(args: argparse.Namespace) -> None:

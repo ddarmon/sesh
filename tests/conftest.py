@@ -99,7 +99,7 @@ except ModuleNotFoundError:
 
 @pytest.fixture()
 def tmp_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from sesh import bookmarks, cache
+    from sesh import bookmarks, cache, preferences
 
     cache_dir = tmp_path / "cache" / "sesh"
     monkeypatch.setattr(cache, "CACHE_DIR", cache_dir)
@@ -107,7 +107,24 @@ def tmp_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cache, "INDEX_FILE", cache_dir / "index.json")
     monkeypatch.setattr(cache, "PROJECT_PATHS_FILE", cache_dir / "project_paths.json")
     monkeypatch.setattr(bookmarks, "BOOKMARKS_FILE", cache_dir / "bookmarks.json")
+    monkeypatch.setattr(preferences, "PREFERENCES_FILE", cache_dir / "preferences.json")
     return cache_dir
+
+
+@pytest.fixture(autouse=True)
+def isolate_app_preferences(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep SeshApp tests independent of any real user preference file."""
+    import sesh.app as app_mod
+
+    default_prefs = {
+        "provider_filter": None,
+        "sort_mode": "date",
+        "show_tools": False,
+        "show_thinking": False,
+        "fullscreen": False,
+    }
+    monkeypatch.setattr(app_mod, "load_preferences", lambda: dict(default_prefs))
+    monkeypatch.setattr(app_mod, "save_preferences", lambda _prefs: None)
 
 
 @pytest.fixture()

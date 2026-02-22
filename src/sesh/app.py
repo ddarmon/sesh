@@ -17,7 +17,9 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Header, Input, Label, RichLog, Static, Tree
 
 from sesh.bookmarks import load_bookmarks, save_bookmarks
+from sesh.export import format_session_markdown
 from sesh.models import Message, Project, Provider, SearchResult, SessionMeta, filter_messages
+from sesh.preferences import load_preferences, save_preferences
 
 _DATETIME_MIN = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -51,6 +53,36 @@ def _short_model_name(model: str) -> str:
         short = model.split("-")[0]
     _MODEL_SHORT[model] = short
     return short
+
+
+def _relative_time(dt: datetime, now: datetime | None = None) -> str:
+    """Return a compact relative timestamp label for session list display."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+
+    delta_seconds = (now - dt).total_seconds()
+    if delta_seconds <= 0:
+        return "now"
+    if delta_seconds < 60:
+        return "now"
+    if delta_seconds < 3600:
+        return f"{int(delta_seconds // 60)}m ago"
+    if delta_seconds < 86400:
+        return f"{int(delta_seconds // 3600)}h ago"
+    if delta_seconds < 2 * 86400:
+        return "yesterday"
+    if delta_seconds < 7 * 86400:
+        return f"{int(delta_seconds // 86400)}d ago"
+    return dt.strftime("%m-%d %H:%M")
 
 
 class SessionTree(Tree):
@@ -249,6 +281,7 @@ class HelpScreen(ModalScreen[None]):
                 [
                     ("o", "Open / resume session"),
                     ("b", "Toggle bookmark"),
+                    ("e", "Export session to clipboard"),
                     ("y", "Copy resume command"),
                     ("d", "Delete session"),
                     ("m", "Move project"),
@@ -351,6 +384,7 @@ class SeshApp(App):
         Binding("escape", "clear_search", "Clear", show=False),
         Binding("f", "cycle_filter", "Filter"),
         Binding("o", "open_session", "Open"),
+        Binding("e", "export_session", "Export"),
         Binding("d", "delete_session", "Delete"),
         Binding("m", "move_project", "Move"),
         Binding("r", "refresh", "Refresh"),
@@ -383,6 +417,23 @@ class SeshApp(App):
         self._fullscreen: bool = False
         self._status_base: str = "Loading..."
 
+        prefs = load_preferences()
+        provider_pref = prefs.get("provider_filter")
+        for idx, provider in enumerate(self.filter_cycle):
+            provider_value = provider.value if provider else None
+            if provider_value == provider_pref:
+                self.filter_index = idx
+                break
+        self.current_filter = self.filter_cycle[self.filter_index]
+
+        sort_pref = prefs.get("sort_mode")
+        if isinstance(sort_pref, str) and sort_pref in self.sort_options:
+            self.sort_index = self.sort_options.index(sort_pref)
+
+        self._show_tools = bool(prefs.get("show_tools", False))
+        self._show_thinking = bool(prefs.get("show_thinking", False))
+        self._fullscreen = bool(prefs.get("fullscreen", False))
+
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="search-bar"):
@@ -401,10 +452,17 @@ class SeshApp(App):
         tree.root.expand()
         tree.show_root = False
 
+        label = self.current_filter.value.title() if self.current_filter else "All"
+        self.query_one("#provider-filter", Static).update(label)
+        if self._fullscreen:
+            self.query_one("#main", Horizontal).toggle_class("fullscreen")
+
         # Tier 1: instant display from cached index
         if self._load_from_index():
-            self._populate_tree()
+            self._populate_tree(provider_filter=self.current_filter)
             self._set_status("(refreshing...)")
+
+        self._refresh_status()
 
         # Tier 2: background refresh
         self.run_worker(self._discover_all, thread=True, exclusive=True)
@@ -520,7 +578,7 @@ class SeshApp(App):
     def _session_label(self, session: SessionMeta, show_project: bool = False) -> str:
         """Build a display label for a session tree node."""
         star = "\u2605 " if (session.provider.value, session.id) in self._bookmarks else ""
-        ts = session.timestamp.strftime("%m-%d %H:%M")
+        ts = _relative_time(session.timestamp)
         count = f"({session.message_count}) " if session.message_count else ""
         summary = session.summary[:50]
         model = f" [{_short_model_name(session.model)}]" if session.model else ""
@@ -729,11 +787,24 @@ class SeshApp(App):
             self._status_base + self._format_status_suffix()
         )
 
+    def _save_current_prefs(self) -> None:
+        sort_mode = self.sort_options[self.sort_index] if 0 <= self.sort_index < len(self.sort_options) else "date"
+        save_preferences(
+            {
+                "provider_filter": self.current_filter.value if self.current_filter else None,
+                "sort_mode": sort_mode,
+                "show_tools": self._show_tools,
+                "show_thinking": self._show_thinking,
+                "fullscreen": self._fullscreen,
+            }
+        )
+
     def action_toggle_tools(self) -> None:
         """Toggle visibility of tool call messages."""
         self._show_tools = not self._show_tools
         if self._current_messages and self._current_session:
             self._render_messages(self._current_messages, self._current_session)
+        self._save_current_prefs()
         self._refresh_status()
 
     def action_toggle_thinking(self) -> None:
@@ -741,6 +812,7 @@ class SeshApp(App):
         self._show_thinking = not self._show_thinking
         if self._current_messages and self._current_session:
             self._render_messages(self._current_messages, self._current_session)
+        self._save_current_prefs()
         self._refresh_status()
 
     def action_toggle_fullscreen(self) -> None:
@@ -749,6 +821,7 @@ class SeshApp(App):
         self.query_one("#main", Horizontal).toggle_class("fullscreen")
         if self._fullscreen:
             self.query_one("#message-view", MessageView).focus()
+        self._save_current_prefs()
         self._refresh_status()
 
     def action_show_help(self) -> None:
@@ -966,6 +1039,7 @@ class SeshApp(App):
         self.query_one("#provider-filter", Static).update(label)
         search_text = self.query_one("#search-input", Input).value
         self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
+        self._save_current_prefs()
 
     def _copy_text(self, text: str) -> None:
         """Copy text to the system clipboard.
@@ -1004,6 +1078,20 @@ class SeshApp(App):
         self._copy_text(cmd_str)
         self._set_status(f"Copied: {cmd_str}")
 
+    def action_export_session(self) -> None:
+        """Export the current session to Markdown and copy it to the clipboard."""
+        if self._current_session is None:
+            return
+
+        filtered = filter_messages(
+            self._current_messages,
+            include_tools=self._show_tools,
+            include_thinking=self._show_thinking,
+        )
+        md = format_session_markdown(self._current_session, filtered)
+        self._copy_text(md)
+        self._set_status("Session exported to clipboard")
+
     def action_toggle_bookmark(self) -> None:
         """Toggle bookmark on the selected session."""
         tree = self.query_one("#session-tree", SessionTree)
@@ -1037,6 +1125,7 @@ class SeshApp(App):
         self.sort_index = (self.sort_index + 1) % len(self.sort_options)
         search_text = self.query_one("#search-input", Input).value
         self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
+        self._save_current_prefs()
 
     def action_next_project(self) -> None:
         """Jump to the next project node in the tree."""
