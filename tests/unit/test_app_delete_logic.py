@@ -1,13 +1,7 @@
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
-
-import pytest
-
-if sys.version_info < (3, 10):
-    pytest.skip("app.py requires Python 3.10+ syntax at import time", allow_module_level=True)
 
 from sesh.app import SeshApp
 from sesh.models import Project, Provider

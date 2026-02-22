@@ -8,6 +8,9 @@ authors = [{ name = "David Darmon" }]
 requires-python = ">=3.10"
 dependencies = ["textual>=0.89.0"]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
 [project.scripts]
 sesh = "sesh.cli:main"
 
