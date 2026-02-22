@@ -117,7 +117,16 @@ async def test_tree_populates_with_injected_sessions(app):
     sesh_app._populate_tree()
 
     tree = sesh_app.query_one("#session-tree")
-    assert len(list(tree.root.children)) >= 1
+    project_nodes = list(tree.root.children)
+    assert len(project_nodes) == 1
+
+    project_node = project_nodes[0]
+    assert isinstance(project_node.data, Project)
+    assert project_node.data.path == "/repo"
+
+    session_nodes = list(project_node.children)
+    assert len(session_nodes) == 1
+    assert getattr(session_nodes[0].data, "id", None) == "s1"
 
 
 @pytest.mark.integration
@@ -218,3 +227,12 @@ async def test_bookmark_toggle_on_session_node(app):
 
     await pilot.press("b")
     assert ("claude", "bm1") in sesh_app._bookmarks
+
+    # Re-select a session node after tree repopulation, then toggle bookmark off.
+    sesh_app._reselect_node(tree, ("claude", "bm1"))
+    await pilot.pause()
+    assert tree.cursor_node is not None
+    assert getattr(tree.cursor_node.data, "id", None) == "bm1"
+
+    await pilot.press("b")
+    assert ("claude", "bm1") not in sesh_app._bookmarks
