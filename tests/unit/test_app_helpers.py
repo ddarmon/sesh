@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sesh.app import SeshApp, _MODEL_SHORT, _short_model_name
+from sesh.app import SeshApp, _MODEL_SHORT, _relative_time, _short_model_name
 from sesh.models import MoveReport, Provider, SearchResult
 from tests.helpers import make_session
 
@@ -39,6 +39,38 @@ def test_date_suffix_falls_back_to_prefix() -> None:
 def test_none_like_empty_string() -> None:
     """Empty string input returns empty string."""
     assert _short_model_name("") == ""
+
+
+def test_relative_time_thresholds() -> None:
+    """Relative time labels use expected buckets at boundary values."""
+    now = datetime(2025, 2, 22, 15, 0, 0, tzinfo=timezone.utc)
+
+    assert _relative_time(now, now=now) == "now"
+    assert _relative_time(datetime(2025, 2, 22, 14, 59, 1, tzinfo=timezone.utc), now=now) == "now"
+    assert _relative_time(datetime(2025, 2, 22, 14, 59, 0, tzinfo=timezone.utc), now=now) == "1m ago"
+    assert _relative_time(datetime(2025, 2, 22, 14, 0, 1, tzinfo=timezone.utc), now=now) == "59m ago"
+    assert _relative_time(datetime(2025, 2, 22, 14, 0, 0, tzinfo=timezone.utc), now=now) == "1h ago"
+    assert _relative_time(datetime(2025, 2, 21, 15, 0, 1, tzinfo=timezone.utc), now=now) == "23h ago"
+    assert _relative_time(datetime(2025, 2, 21, 15, 0, 0, tzinfo=timezone.utc), now=now) == "yesterday"
+    assert _relative_time(datetime(2025, 2, 20, 15, 0, 0, tzinfo=timezone.utc), now=now) == "2d ago"
+    assert _relative_time(datetime(2025, 2, 16, 15, 0, 1, tzinfo=timezone.utc), now=now) == "5d ago"
+    assert _relative_time(datetime(2025, 2, 15, 15, 0, 0, tzinfo=timezone.utc), now=now) == "02-15 15:00"
+
+
+def test_relative_time_naive_datetime_treated_as_utc() -> None:
+    """Naive datetimes are interpreted as UTC for deterministic labels."""
+    now = datetime(2025, 2, 22, 15, 0, 0, tzinfo=timezone.utc)
+    naive_dt = datetime(2025, 2, 22, 14, 0, 0)
+
+    assert _relative_time(naive_dt, now=now) == "1h ago"
+
+
+def test_relative_time_future_timestamp_clamped_to_now() -> None:
+    """Future timestamps are clamped to 'now' to tolerate clock skew."""
+    now = datetime(2025, 2, 22, 15, 0, 0, tzinfo=timezone.utc)
+    future = datetime(2025, 2, 22, 15, 0, 30, tzinfo=timezone.utc)
+
+    assert _relative_time(future, now=now) == "now"
 
 
 def test_session_from_search_result_claude_source_path() -> None:
