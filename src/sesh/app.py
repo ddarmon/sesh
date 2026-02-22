@@ -176,6 +176,106 @@ class MoveProjectScreen(ModalScreen[tuple[str, bool] | None]):
         self.dismiss((new_path, full_move))
 
 
+class HelpScreen(ModalScreen[None]):
+    """Modal help screen listing keyboard shortcuts."""
+
+    CSS = """
+    HelpScreen {
+        align: center middle;
+    }
+
+    #help-dialog {
+        width: 60;
+        height: auto;
+        max-height: 80%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+        overflow-y: auto;
+    }
+
+    #help-title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+
+    .help-group {
+        margin-top: 1;
+        text-style: bold;
+    }
+
+    .help-row {
+        padding-left: 2;
+    }
+
+    #help-footer {
+        margin-top: 1;
+        text-align: center;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss_help", "Close", show=False),
+        Binding("question_mark", "dismiss_help", "Close", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        # Keep in sync with SeshApp.BINDINGS
+        groups = [
+            (
+                "Navigation",
+                [
+                    ("/", "Focus session search"),
+                    ("Esc", "Clear search / close message find"),
+                    ("J", "Next project"),
+                    ("K", "Previous project"),
+                ],
+            ),
+            (
+                "View",
+                [
+                    ("f", "Cycle provider filter"),
+                    ("s", "Cycle sort mode"),
+                    ("n", "Find in current messages"),
+                    ("t", "Toggle tool messages"),
+                    ("T", "Toggle thinking messages"),
+                    ("F", "Toggle fullscreen message pane"),
+                ],
+            ),
+            (
+                "Session Actions",
+                [
+                    ("o", "Open / resume session"),
+                    ("b", "Toggle bookmark"),
+                    ("y", "Copy resume command"),
+                    ("d", "Delete session"),
+                    ("m", "Move project"),
+                    ("r", "Refresh discovery"),
+                ],
+            ),
+            (
+                "General",
+                [
+                    ("?", "Show / close help"),
+                    ("q", "Quit"),
+                ],
+            ),
+        ]
+
+        with Vertical(id="help-dialog"):
+            yield Label("Keyboard Shortcuts", id="help-title")
+            for title, rows in groups:
+                yield Label(title, classes="help-group")
+                for key, desc in rows:
+                    yield Label(f"{key:<4} {desc}", classes="help-row")
+            yield Label("Press Esc or ? to close", id="help-footer")
+
+    def action_dismiss_help(self) -> None:
+        self.dismiss(None)
+
+
 class SeshApp(App):
     """Main application."""
 
@@ -232,6 +332,10 @@ class SeshApp(App):
         border: solid $accent;
     }
 
+    #main.fullscreen #session-tree {
+        display: none;
+    }
+
     #status-bar {
         height: 1;
         dock: bottom;
@@ -258,6 +362,8 @@ class SeshApp(App):
         Binding("n", "search_messages", "Find"),
         Binding("t", "toggle_tools", "Tools"),
         Binding("T", "toggle_thinking", "Thinking", key_display="T"),
+        Binding("F", "toggle_fullscreen", "Fullscreen", key_display="F"),
+        Binding("question_mark", "show_help", "Help", key_display="?"),
     ]
 
     def __init__(self) -> None:
@@ -274,6 +380,7 @@ class SeshApp(App):
         self._bookmarks: set[tuple[str, str]] = set()
         self._show_tools: bool = False
         self._show_thinking: bool = False
+        self._fullscreen: bool = False
         self._status_base: str = "Loading..."
 
     def compose(self) -> ComposeResult:
@@ -478,7 +585,7 @@ class SeshApp(App):
         self._set_status(
             f"{len(all_sessions)} sessions · "
             f"[{filter_name}] · [Sort: timeline] · "
-            f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete m:Move r:Refresh"
+            f"q:Quit /:Search f:Filter o:Open ?:Help"
         )
 
     def _populate_tree_grouped(self, filter_text: str, provider_filter: Provider | None) -> None:
@@ -572,7 +679,7 @@ class SeshApp(App):
         self._set_status(
             f"{shown_projects} projects · {total_sessions} sessions · "
             f"[{filter_name}] · [Sort: {sort_name}] · "
-            f"q:Quit /:Search f:Filter s:Sort o:Open d:Delete m:Move r:Refresh"
+            f"q:Quit /:Search f:Filter o:Open ?:Help"
         )
 
     @staticmethod
@@ -605,6 +712,8 @@ class SeshApp(App):
 
     def _format_status_suffix(self) -> str:
         parts = []
+        if self._fullscreen:
+            parts.append("Full:ON")
         if self._show_tools:
             parts.append("Tools:ON")
         if self._show_thinking:
@@ -633,6 +742,18 @@ class SeshApp(App):
         if self._current_messages and self._current_session:
             self._render_messages(self._current_messages, self._current_session)
         self._refresh_status()
+
+    def action_toggle_fullscreen(self) -> None:
+        """Toggle fullscreen mode for the message pane."""
+        self._fullscreen = not self._fullscreen
+        self.query_one("#main", Horizontal).toggle_class("fullscreen")
+        if self._fullscreen:
+            self.query_one("#message-view", MessageView).focus()
+        self._refresh_status()
+
+    def action_show_help(self) -> None:
+        """Show keyboard shortcuts help."""
+        self.push_screen(HelpScreen())
 
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         """Load messages when a session or search result node is selected."""
