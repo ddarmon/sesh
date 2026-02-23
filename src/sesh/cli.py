@@ -478,7 +478,8 @@ def main() -> None:
         help="Run full discovery across all providers and rebuild the index",
         description=(
             "Scan Claude Code, Codex, and Cursor session directories, "
-            "then write ~/.cache/sesh/index.json for fast querying. "
+            "then write the index (default: ~/.cache/sesh/index.json, "
+            "or $XDG_CACHE_HOME/sesh/index.json) for fast querying. "
             "Run this before other commands, or to pick up new sessions."
         ),
     )

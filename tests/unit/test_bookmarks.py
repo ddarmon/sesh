@@ -31,7 +31,7 @@ def test_load_empty_bookmarks_list(tmp_cache_dir) -> None:
     assert bookmarks.load_bookmarks() == set()
 
 
-def test_creates_cache_dir(tmp_cache_dir) -> None:
+def test_creates_config_dir(tmp_cache_dir) -> None:
     """Saving bookmarks auto-creates the parent directory if absent."""
     assert not bookmarks.BOOKMARKS_FILE.parent.exists()
     bookmarks.save_bookmarks({("claude", "s1")})

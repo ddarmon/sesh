@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sesh.models import Provider, SessionMeta
+from sesh.paths import CACHE_DIR
 
-CACHE_DIR = Path.home() / ".cache" / "sesh"
 CACHE_FILE = CACHE_DIR / "sessions.json"
 INDEX_FILE = CACHE_DIR / "index.json"
 

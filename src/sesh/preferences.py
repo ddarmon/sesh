@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-PREFERENCES_FILE = Path.home() / ".cache" / "sesh" / "preferences.json"
+from sesh.paths import CONFIG_DIR
+
+PREFERENCES_FILE = CONFIG_DIR / "preferences.json"
 
 DEFAULT_PREFERENCES = {
     "provider_filter": None,
