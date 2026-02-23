@@ -235,8 +235,12 @@ exist.
 Parsed session metadata is cached at `~/.cache/sesh/sessions.json`,
 keyed by file path with mtime/size for invalidation. The CLI index is
 stored at `~/.cache/sesh/index.json`. View preferences (provider filter,
-sort mode, visibility toggles) are saved to
-`~/.cache/sesh/preferences.json`.
+sort mode, visibility toggles) and bookmarks are config data, stored by
+default under `~/.config/sesh/` (`preferences.json`,
+`bookmarks.json`).
+
+If `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` are set to absolute paths, sesh
+uses those instead of `~/.cache` / `~/.config`.
 
 ## Project structure
 
@@ -260,4 +264,3 @@ src/sesh/
     codex.py         # Codex JSONL parser
     cursor.py        # Cursor SQLite parser
 ```
-

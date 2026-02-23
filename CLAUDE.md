@@ -13,6 +13,17 @@ uv run sesh
 uv tool install . && sesh
 ```
 
+## Versioning
+
+The package version lives in both `pyproject.toml` and
+`src/sesh/__init__.py`. Keep them in sync.
+
+Every PR merged to `main` that includes a bug fix or feature should bump
+the version:
+
+-   bug fix: patch version
+-   feature: minor version
+
 ## Architecture
 
 The app has three layers:
@@ -52,6 +63,14 @@ The app has three layers:
 | Codex    | `~/.codex/sessions/YYYY/MM/DD/`    | JSONL  |
 | Cursor   | `~/.cursor/chats/{md5}/*/store.db` | SQLite |
 
+App-managed files follow XDG base directories (absolute `XDG_*` env
+vars are honored; empty/relative values fall back to defaults):
+
+-   cache files (`sessions.json`, `index.json`, `project_paths.json`):
+    `~/.cache/sesh/` or `$XDG_CACHE_HOME/sesh/`
+-   config files (`preferences.json`, `bookmarks.json`):
+    `~/.config/sesh/` or `$XDG_CONFIG_HOME/sesh/`
+
 ## Adding a provider
 
 1.  Create `src/sesh/providers/yourprovider.py`.
@@ -83,7 +102,8 @@ shortcuts help modal (press `?` or Escape again to close).
 CLI equivalents: `--include-tools`, `--include-thinking`, `--full`
 (both) on the `messages` and `export` subcommands. These toggles, along
 with the provider filter and sort mode, persist across launches in
-`~/.cache/sesh/preferences.json` (managed by `preferences.py`).
+`~/.config/sesh/preferences.json` by default (or
+`$XDG_CONFIG_HOME/sesh/preferences.json`) (managed by `preferences.py`).
 
 ## Session export
 
@@ -97,7 +117,8 @@ shared by the TUI and the `sesh export` CLI subcommand.
 Pressing `b` on a session node toggles a bookmark. Bookmarked sessions
 show a star in the tree and appear in a dedicated Bookmarks section at
 the top. Bookmarks persist across sessions in
-`~/.cache/sesh/bookmarks.json`.
+`~/.config/sesh/bookmarks.json` by default (or
+`$XDG_CONFIG_HOME/sesh/bookmarks.json`).
 
 ## Session deletion
 
@@ -141,7 +162,8 @@ the index, then query it.
 | `sesh export <id> [--provider NAME] [--format md/json] [--include-tools] [--include-thinking] [--full]`   | Export a session to Markdown or JSON     |
 | `sesh move <old> <new> [--metadata-only] [--dry-run]`                                                     | Move project path and update metadata    |
 
-The index is stored at `~/.cache/sesh/index.json`.
+The index is stored at `~/.cache/sesh/index.json` by default (or
+`$XDG_CACHE_HOME/sesh/index.json`).
 
 ## Plans
 

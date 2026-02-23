@@ -17,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _run_cli(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["HOME"] = str(home)
+    env.pop("XDG_CACHE_HOME", None)
+    env.pop("XDG_CONFIG_HOME", None)
     existing_pythonpath = env.get("PYTHONPATH")
     src_path = str(REPO_ROOT / "src")
     env["PYTHONPATH"] = (
@@ -108,4 +110,3 @@ def test_messages_roundtrip(tmp_path: Path) -> None:
     roles = [m["role"] for m in data["messages"]]
     assert "user" in roles
     assert any("integration" in (m["content"] or "") for m in data["messages"])
-

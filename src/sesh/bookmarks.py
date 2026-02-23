@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
-BOOKMARKS_FILE = Path.home() / ".cache" / "sesh" / "bookmarks.json"
+from sesh.paths import CONFIG_DIR
+
+BOOKMARKS_FILE = CONFIG_DIR / "bookmarks.json"
 
 
 def load_bookmarks() -> set[tuple[str, str]]:
