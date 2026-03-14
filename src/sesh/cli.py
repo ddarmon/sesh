@@ -12,6 +12,7 @@ Workflow:
     sesh sessions         # list sessions (from index)
     sesh messages <id>    # read messages for a session
     sesh search <query>   # full-text search via ripgrep
+    sesh delete <id>      # delete a single session by ID
     sesh clean <query>    # delete sessions matching a query
     sesh                  # launch the TUI (default)
 """
@@ -37,10 +38,43 @@ def _require_index():
     return index
 
 
+def _confirm_destructive(message: str, *, force: bool) -> None:
+    """Guard destructive commands behind TTY confirmation or --force."""
+    if force:
+        return
+    if not sys.stdin.isatty():
+        print(
+            "Refusing to delete in non-interactive mode. "
+            "Use --force to bypass confirmation.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    try:
+        answer = input(f"{message} [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.", file=sys.stderr)
+        raise SystemExit(1)
+    if answer.strip().lower() not in ("y", "yes"):
+        print("Aborted.", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def _json_out(obj) -> None:
     """Print JSON to stdout."""
     json.dump(obj, sys.stdout, indent=2)
     print()
+
+
+def _refresh_index():
+    """Run discovery, save the cache and index, and return the index dict."""
+    from sesh.cache import SessionCache, load_index, save_index
+    from sesh.discovery import discover_all
+
+    cache = SessionCache()
+    projects, sessions = discover_all(cache=cache)
+    cache.save()
+    save_index(projects, sessions)
+    return load_index()
 
 
 def cmd_refresh(args: argparse.Namespace) -> None:
@@ -219,18 +253,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
         _json_out({"deleted": [], "total": 0, "dry_run": args.dry_run})
         return
 
-    from sesh.providers.claude import ClaudeProvider
-    from sesh.providers.codex import CodexProvider
-    from sesh.providers.cursor import CursorProvider
-
-    providers_map = {
-        Provider.CLAUDE: ClaudeProvider(),
-        Provider.CODEX: CodexProvider(),
-        Provider.CURSOR: CursorProvider(),
-    }
-
-    deleted = []
-    errors = []
+    # Deduplicate targets before confirmation so the count is accurate.
+    targets: list[tuple[dict, str]] = []
     seen_targets: set[tuple[str, str, str]] = set()
 
     for r in results:
@@ -253,31 +277,63 @@ def cmd_clean(args: argparse.Namespace) -> None:
             "provider": r.provider.value,
             "file_path": r.file_path,
             "matched_line": r.matched_line,
+            "project_path": r.project_path,
+            "source_path": source_path,
+        }
+        targets.append((entry, source_path))
+
+    if not args.dry_run:
+        n = len(targets)
+        _confirm_destructive(
+            f"Delete {n} session(s) matching '{args.query}'?",
+            force=args.force,
+        )
+
+    from sesh.providers.claude import ClaudeProvider
+    from sesh.providers.codex import CodexProvider
+    from sesh.providers.cursor import CursorProvider
+
+    providers_map = {
+        Provider.CLAUDE: ClaudeProvider(),
+        Provider.CODEX: CodexProvider(),
+        Provider.CURSOR: CursorProvider(),
+    }
+
+    deleted = []
+    errors = []
+
+    for entry, source_path in targets:
+        out_entry = {
+            "session_id": entry["session_id"],
+            "provider": entry["provider"],
+            "file_path": entry["file_path"],
+            "matched_line": entry["matched_line"],
         }
 
         if args.dry_run:
-            deleted.append(entry)
+            deleted.append(out_entry)
             continue
 
+        provider_enum = Provider(entry["provider"])
         session = SessionMeta(
-            id=r.session_id,
-            project_path=r.project_path,
-            provider=r.provider,
+            id=entry["session_id"],
+            project_path=entry["project_path"],
+            provider=provider_enum,
             summary="",
             timestamp=datetime.now(tz=timezone.utc),
             source_path=source_path,
         )
 
-        provider = providers_map.get(r.provider)
+        provider = providers_map.get(provider_enum)
         if provider is None:
             continue
 
         try:
             provider.delete_session(session)
-            deleted.append(entry)
+            deleted.append(out_entry)
         except Exception as exc:
-            entry["error"] = str(exc)
-            errors.append(entry)
+            out_entry["error"] = str(exc)
+            errors.append(out_entry)
 
     out: dict = {
         "deleted": deleted,
@@ -288,6 +344,86 @@ def cmd_clean(args: argparse.Namespace) -> None:
         out["errors"] = errors
 
     _json_out(out)
+
+
+def cmd_delete(args: argparse.Namespace) -> None:
+    """Delete a single session by ID."""
+    index = _refresh_index()
+
+    matches = [s for s in index["sessions"] if s["id"] == args.session_id]
+    if args.provider:
+        matches = [s for s in matches if s["provider"] == args.provider]
+
+    if not matches:
+        print(
+            f"Session '{args.session_id}' not found. "
+            "Run 'sesh refresh' to update the index.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    if len(matches) > 1:
+        providers = ", ".join(sorted(set(m["provider"] for m in matches)))
+        print(
+            f"Session '{args.session_id}' exists in multiple providers: {providers}. "
+            "Use --provider to disambiguate.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    session_data = matches[0]
+
+    info = {
+        "session_id": session_data["id"],
+        "provider": session_data["provider"],
+        "project_path": session_data["project_path"],
+        "summary": session_data["summary"],
+        "timestamp": session_data["timestamp"],
+    }
+
+    if args.dry_run:
+        _json_out({"would_delete": info, "dry_run": True})
+        return
+
+    _confirm_destructive(
+        f"About to delete session:\n"
+        f"  Provider:  {session_data['provider']}\n"
+        f"  Project:   {session_data['project_path']}\n"
+        f"  Summary:   {session_data['summary']}\n"
+        f"  Timestamp: {session_data['timestamp']}\n"
+        f"Delete this session?",
+        force=args.force,
+    )
+
+    from sesh.cache import _dict_to_session
+    from sesh.models import Provider
+    from sesh.providers.claude import ClaudeProvider
+    from sesh.providers.codex import CodexProvider
+    from sesh.providers.cursor import CursorProvider
+
+    providers_map = {
+        Provider.CLAUDE: ClaudeProvider(),
+        Provider.CODEX: CodexProvider(),
+        Provider.CURSOR: CursorProvider(),
+    }
+
+    session = _dict_to_session(session_data)
+    provider = providers_map.get(session.provider)
+
+    if provider is None:
+        print(
+            f"Unknown provider '{session.provider.value}'.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    try:
+        provider.delete_session(session)
+    except Exception as exc:
+        print(f"Delete failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    _json_out({"deleted": info})
 
 
 def cmd_resume(args: argparse.Namespace) -> None:
@@ -462,6 +598,7 @@ def main() -> None:
             "  sesh sessions           # list all sessions\n"
             "  sesh messages <id>      # read a session's messages\n"
             "  sesh search <query>     # full-text search across sessions\n"
+            "  sesh delete <id>        # delete a single session by ID\n"
             "  sesh clean <query>      # delete sessions matching a query\n"
             "  sesh resume <id>        # resume a session in its provider's CLI\n"
             "  sesh export <id>        # export a session to Markdown or JSON\n"
@@ -598,6 +735,42 @@ def main() -> None:
         action="store_true",
         help="Show what would be deleted without actually deleting",
     )
+    p_clean.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip confirmation prompt (required for non-interactive use)",
+    )
+
+    # delete
+    p_delete = sub.add_parser(
+        "delete",
+        help="Delete a single session by ID",
+        description=(
+            "Delete a session by its ID. Shows a confirmation prompt in interactive "
+            "terminals. Non-interactive invocations (piped stdin) are refused unless "
+            "--force is passed. Use --dry-run to preview without deleting."
+        ),
+    )
+    p_delete.add_argument(
+        "session_id",
+        help="The session ID to delete",
+    )
+    p_delete.add_argument(
+        "--provider",
+        metavar="NAME",
+        choices=["claude", "codex", "cursor"],
+        help="Disambiguate if the same ID exists in multiple providers",
+    )
+    p_delete.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip confirmation prompt (required for non-interactive use)",
+    )
+    p_delete.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be deleted without actually deleting",
+    )
 
     # resume
     p_resume = sub.add_parser(
@@ -709,6 +882,8 @@ def main() -> None:
         cmd_search(args)
     elif args.command == "clean":
         cmd_clean(args)
+    elif args.command == "delete":
+        cmd_delete(args)
     elif args.command == "resume":
         cmd_resume(args)
     elif args.command == "export":
