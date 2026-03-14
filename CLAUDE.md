@@ -63,8 +63,8 @@ The app has three layers:
 | Codex    | `~/.codex/sessions/YYYY/MM/DD/`    | JSONL  |
 | Cursor   | `~/.cursor/chats/{md5}/*/store.db` | SQLite |
 
-App-managed files follow XDG base directories (absolute `XDG_*` env
-vars are honored; empty/relative values fall back to defaults):
+App-managed files follow XDG base directories (absolute `XDG_*` env vars
+are honored; empty/relative values fall back to defaults):
 
 -   cache files (`sessions.json`, `index.json`, `project_paths.json`):
     `~/.cache/sesh/` or `$XDG_CACHE_HOME/sesh/`
@@ -129,6 +129,15 @@ the session is deleted via the provider's `delete_session` method:
 -   **Codex**: deletes the session JSONL file
 -   **Cursor**: removes the session directory (parent of `store.db`)
 
+CLI equivalents:
+
+-   `sesh delete <session-id>` --- delete a single session by ID
+-   `sesh clean <query>` --- delete all sessions matching a search query
+
+Both commands require interactive confirmation by default. In
+non-interactive contexts (piped stdin, LLM agents), they refuse unless
+`--force` is passed. Use `--dry-run` to preview without deleting.
+
 ## Project move
 
 Press `m` on a project or session node to move a project path. The move
@@ -157,7 +166,8 @@ the index, then query it.
 | `sesh sessions [--project PATH] [--provider NAME]`                                                        | List sessions with optional filters      |
 | `sesh messages <id> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full]` | Load messages for a session              |
 | `sesh search <query>`                                                                                     | Full-text search (Claude, Codex, Cursor) |
-| `sesh clean <query> [--dry-run]`                                                                          | Delete sessions matching a search query  |
+| `sesh delete <id> [--provider NAME] [--force] [--dry-run]`                                                | Delete a single session by ID            |
+| `sesh clean <query> [--force] [--dry-run]`                                                                | Delete sessions matching a search query  |
 | `sesh resume <id> [--provider NAME]`                                                                      | Resume a session in its provider's CLI   |
 | `sesh export <id> [--provider NAME] [--format md/json] [--include-tools] [--include-thinking] [--full]`   | Export a session to Markdown or JSON     |
 | `sesh move <old> <new> [--metadata-only] [--dry-run]`                                                     | Move project path and update metadata    |
