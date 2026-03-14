@@ -153,7 +153,7 @@ def test_cmd_clean_empty_results(monkeypatch, capsys) -> None:
     import sesh.search as search_mod
 
     monkeypatch.setattr(search_mod, "ripgrep_search", lambda q: [])
-    cli.cmd_clean(_ns(query="needle", dry_run=False))
+    cli.cmd_clean(_ns(query="needle", dry_run=False, force=True))
     out = json.loads(capsys.readouterr().out)
     assert out == {"deleted": [], "total": 0, "dry_run": False}
 
@@ -175,7 +175,7 @@ def test_cmd_clean_dry_run(monkeypatch, capsys) -> None:
             )
         ],
     )
-    cli.cmd_clean(_ns(query="needle", dry_run=True))
+    cli.cmd_clean(_ns(query="needle", dry_run=True, force=False))
     out = json.loads(capsys.readouterr().out)
     assert out["dry_run"] is True
     assert out["total"] == 1
@@ -227,7 +227,7 @@ def test_cmd_clean_dedup_regression(monkeypatch, capsys) -> None:
     monkeypatch.setattr(codex_mod, "CodexProvider", NoopProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", NoopProvider)
 
-    cli.cmd_clean(_ns(query="needle", dry_run=False))
+    cli.cmd_clean(_ns(query="needle", dry_run=False, force=True))
     out = json.loads(capsys.readouterr().out)
     assert out["total"] == 1
     assert len(out["deleted"]) == 1
@@ -266,7 +266,7 @@ def test_cmd_clean_collects_errors(monkeypatch, capsys) -> None:
     monkeypatch.setattr(codex_mod, "CodexProvider", NoopProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", NoopProvider)
 
-    cli.cmd_clean(_ns(query="needle", dry_run=False))
+    cli.cmd_clean(_ns(query="needle", dry_run=False, force=True))
     out = json.loads(capsys.readouterr().out)
     assert out["total"] == 0
     assert out["errors"][0]["error"] == "fail"
@@ -488,4 +488,281 @@ def test_cmd_move_error_propagation(monkeypatch, capsys) -> None:
         cli.cmd_move(_ns(old_path="/old", new_path="/new", metadata_only=False, dry_run=False))
     assert exc.value.code == 1
     assert "bad move" in capsys.readouterr().err
+
+
+# --- cmd_delete tests ---
+
+
+def test_cmd_delete_not_found(monkeypatch, capsys) -> None:
+    """Missing session ID exits with code 1."""
+    monkeypatch.setattr(cli, "_require_index", lambda: {"sessions": []})
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_delete(_ns(session_id="missing", provider=None, force=True, dry_run=False))
+    assert exc.value.code == 1
+    assert "not found" in capsys.readouterr().err
+
+
+def test_cmd_delete_ambiguous(monkeypatch, capsys) -> None:
+    """Same ID in multiple providers without --provider exits with code 1."""
+    index = {
+        "sessions": [
+            _session_dict(id="dup", provider=Provider.CLAUDE),
+            _session_dict(id="dup", provider=Provider.CODEX),
+        ]
+    }
+    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_delete(_ns(session_id="dup", provider=None, force=True, dry_run=False))
+    assert exc.value.code == 1
+    assert "multiple providers" in capsys.readouterr().err
+
+
+def test_cmd_delete_ambiguous_resolved_by_provider(monkeypatch, capsys) -> None:
+    """--provider disambiguates when same ID exists in multiple providers."""
+    import sesh.providers.claude as claude_mod
+    import sesh.providers.codex as codex_mod
+    import sesh.providers.cursor as cursor_mod
+
+    deleted_ids = []
+
+    class FakeProvider:
+        def delete_session(self, session):
+            deleted_ids.append(session.id)
+
+    index = {
+        "sessions": [
+            _session_dict(id="dup", provider=Provider.CLAUDE),
+            _session_dict(id="dup", provider=Provider.CODEX),
+        ]
+    }
+    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
+    monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
+    monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+
+    cli.cmd_delete(_ns(session_id="dup", provider="claude", force=True, dry_run=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["deleted"]["session_id"] == "dup"
+    assert out["deleted"]["provider"] == "claude"
+    assert deleted_ids == ["dup"]
+
+
+def test_cmd_delete_dry_run(monkeypatch, capsys) -> None:
+    """--dry-run reports what would be deleted without calling delete_session."""
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_require_index", lambda: index)
+
+    cli.cmd_delete(_ns(session_id="s1", provider=None, force=False, dry_run=True))
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert out["would_delete"]["session_id"] == "s1"
+
+
+def test_cmd_delete_non_tty_no_force(monkeypatch, capsys) -> None:
+    """Non-interactive mode without --force refuses to delete."""
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_delete(_ns(session_id="s1", provider=None, force=False, dry_run=False))
+    assert exc.value.code == 1
+    assert "non-interactive" in capsys.readouterr().err
+
+
+def test_cmd_delete_non_tty_with_force(monkeypatch, capsys) -> None:
+    """Non-interactive mode with --force deletes successfully."""
+    import sesh.providers.claude as claude_mod
+    import sesh.providers.codex as codex_mod
+    import sesh.providers.cursor as cursor_mod
+
+    deleted_ids = []
+
+    class FakeProvider:
+        def delete_session(self, session):
+            deleted_ids.append(session.id)
+
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
+    monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
+    monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+
+    cli.cmd_delete(_ns(session_id="s1", provider=None, force=True, dry_run=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["deleted"]["session_id"] == "s1"
+    assert deleted_ids == ["s1"]
+
+
+def test_cmd_delete_tty_confirms(monkeypatch, capsys) -> None:
+    """Interactive mode with 'y' confirmation deletes successfully."""
+    import sesh.providers.claude as claude_mod
+    import sesh.providers.codex as codex_mod
+    import sesh.providers.cursor as cursor_mod
+
+    deleted_ids = []
+
+    class FakeProvider:
+        def delete_session(self, session):
+            deleted_ids.append(session.id)
+
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
+    monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
+    monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+
+    cli.cmd_delete(_ns(session_id="s1", provider=None, force=False, dry_run=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["deleted"]["session_id"] == "s1"
+    assert deleted_ids == ["s1"]
+
+
+def test_cmd_delete_tty_declines(monkeypatch, capsys) -> None:
+    """Interactive mode with 'n' aborts."""
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_delete(_ns(session_id="s1", provider=None, force=False, dry_run=False))
+    assert exc.value.code == 1
+    assert "Aborted" in capsys.readouterr().err
+
+
+def test_cmd_delete_provider_error(monkeypatch, capsys) -> None:
+    """Provider exception during delete exits with code 1."""
+    import sesh.providers.claude as claude_mod
+    import sesh.providers.codex as codex_mod
+    import sesh.providers.cursor as cursor_mod
+
+    class BoomProvider:
+        def delete_session(self, session):
+            raise RuntimeError("disk error")
+
+    class NoopProvider:
+        def delete_session(self, session):
+            return None
+
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(claude_mod, "ClaudeProvider", BoomProvider)
+    monkeypatch.setattr(codex_mod, "CodexProvider", NoopProvider)
+    monkeypatch.setattr(cursor_mod, "CursorProvider", NoopProvider)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_delete(_ns(session_id="s1", provider=None, force=True, dry_run=False))
+    assert exc.value.code == 1
+    assert "disk error" in capsys.readouterr().err
+
+
+def test_cmd_delete_eof_aborts(monkeypatch, capsys) -> None:
+    """EOFError during confirmation prompt aborts."""
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+    def raise_eof(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_delete(_ns(session_id="s1", provider=None, force=False, dry_run=False))
+    assert exc.value.code == 1
+    assert "Aborted" in capsys.readouterr().err
+
+
+# --- cmd_clean TTY guard tests ---
+
+
+def test_cmd_clean_non_tty_no_force_refuses(monkeypatch, capsys) -> None:
+    """'sesh clean' in non-interactive mode without --force refuses."""
+    import sesh.search as search_mod
+
+    monkeypatch.setattr(
+        search_mod,
+        "ripgrep_search",
+        lambda q: [
+            SearchResult(
+                session_id="s1",
+                provider=Provider.CLAUDE,
+                project_path="/repo",
+                matched_line="needle",
+                file_path="/tmp/claude-proj/a.jsonl",
+            )
+        ],
+    )
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_clean(_ns(query="needle", dry_run=False, force=False))
+    assert exc.value.code == 1
+    assert "non-interactive" in capsys.readouterr().err
+
+
+def test_cmd_clean_non_tty_with_force_succeeds(monkeypatch, capsys) -> None:
+    """'sesh clean --force' in non-interactive mode deletes successfully."""
+    import sesh.providers.claude as claude_mod
+    import sesh.providers.codex as codex_mod
+    import sesh.providers.cursor as cursor_mod
+    import sesh.search as search_mod
+
+    deleted_ids = []
+
+    class FakeProvider:
+        def delete_session(self, session):
+            deleted_ids.append(session.id)
+
+    monkeypatch.setattr(
+        search_mod,
+        "ripgrep_search",
+        lambda q: [
+            SearchResult(
+                session_id="s1",
+                provider=Provider.CLAUDE,
+                project_path="/repo",
+                matched_line="needle",
+                file_path="/tmp/claude-proj/a.jsonl",
+            )
+        ],
+    )
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
+    monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
+    monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+
+    cli.cmd_clean(_ns(query="needle", dry_run=False, force=True))
+    out = json.loads(capsys.readouterr().out)
+    assert out["total"] == 1
+    assert deleted_ids == ["s1"]
+
+
+def test_cmd_clean_dry_run_skips_confirmation(monkeypatch, capsys) -> None:
+    """'sesh clean --dry-run' works without TTY or --force (no mutation)."""
+    import sesh.search as search_mod
+
+    monkeypatch.setattr(
+        search_mod,
+        "ripgrep_search",
+        lambda q: [
+            SearchResult(
+                session_id="s1",
+                provider=Provider.CLAUDE,
+                project_path="/repo",
+                matched_line="needle",
+                file_path="/tmp/claude-proj/a.jsonl",
+            )
+        ],
+    )
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    cli.cmd_clean(_ns(query="needle", dry_run=True, force=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert out["total"] == 1
 
