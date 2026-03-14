@@ -495,7 +495,7 @@ def test_cmd_move_error_propagation(monkeypatch, capsys) -> None:
 
 def test_cmd_delete_not_found(monkeypatch, capsys) -> None:
     """Missing session ID exits with code 1."""
-    monkeypatch.setattr(cli, "_require_index", lambda: {"sessions": []})
+    monkeypatch.setattr(cli, "_refresh_index", lambda: {"sessions": []})
     with pytest.raises(SystemExit) as exc:
         cli.cmd_delete(_ns(session_id="missing", provider=None, force=True, dry_run=False))
     assert exc.value.code == 1
@@ -510,7 +510,7 @@ def test_cmd_delete_ambiguous(monkeypatch, capsys) -> None:
             _session_dict(id="dup", provider=Provider.CODEX),
         ]
     }
-    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda: index)
     with pytest.raises(SystemExit) as exc:
         cli.cmd_delete(_ns(session_id="dup", provider=None, force=True, dry_run=False))
     assert exc.value.code == 1
@@ -535,7 +535,7 @@ def test_cmd_delete_ambiguous_resolved_by_provider(monkeypatch, capsys) -> None:
             _session_dict(id="dup", provider=Provider.CODEX),
         ]
     }
-    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda: index)
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
@@ -550,7 +550,7 @@ def test_cmd_delete_ambiguous_resolved_by_provider(monkeypatch, capsys) -> None:
 def test_cmd_delete_dry_run(monkeypatch, capsys) -> None:
     """--dry-run reports what would be deleted without calling delete_session."""
     index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
-    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda: index)
 
     cli.cmd_delete(_ns(session_id="s1", provider=None, force=False, dry_run=True))
     out = json.loads(capsys.readouterr().out)
@@ -561,7 +561,7 @@ def test_cmd_delete_dry_run(monkeypatch, capsys) -> None:
 def test_cmd_delete_non_tty_no_force(monkeypatch, capsys) -> None:
     """Non-interactive mode without --force refuses to delete."""
     index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
-    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda: index)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
 
     with pytest.raises(SystemExit) as exc:
@@ -583,7 +583,7 @@ def test_cmd_delete_non_tty_with_force(monkeypatch, capsys) -> None:
             deleted_ids.append(session.id)
 
     index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
-    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda: index)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
@@ -608,7 +608,7 @@ def test_cmd_delete_tty_confirms(monkeypatch, capsys) -> None:
             deleted_ids.append(session.id)
 
     index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
-    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda: index)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
@@ -624,7 +624,7 @@ def test_cmd_delete_tty_confirms(monkeypatch, capsys) -> None:
 def test_cmd_delete_tty_declines(monkeypatch, capsys) -> None:
     """Interactive mode with 'n' aborts."""
     index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
-    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda: index)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda prompt: "n")
 
@@ -649,7 +649,7 @@ def test_cmd_delete_provider_error(monkeypatch, capsys) -> None:
             return None
 
     index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
-    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda: index)
     monkeypatch.setattr(claude_mod, "ClaudeProvider", BoomProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", NoopProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", NoopProvider)
@@ -663,7 +663,7 @@ def test_cmd_delete_provider_error(monkeypatch, capsys) -> None:
 def test_cmd_delete_eof_aborts(monkeypatch, capsys) -> None:
     """EOFError during confirmation prompt aborts."""
     index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
-    monkeypatch.setattr(cli, "_require_index", lambda: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda: index)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
 
     def raise_eof(prompt):

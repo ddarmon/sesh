@@ -65,6 +65,18 @@ def _json_out(obj) -> None:
     print()
 
 
+def _refresh_index():
+    """Run discovery, save the cache and index, and return the index dict."""
+    from sesh.cache import SessionCache, load_index, save_index
+    from sesh.discovery import discover_all
+
+    cache = SessionCache()
+    projects, sessions = discover_all(cache=cache)
+    cache.save()
+    save_index(projects, sessions)
+    return load_index()
+
+
 def cmd_refresh(args: argparse.Namespace) -> None:
     """Run full discovery and save the index."""
     from sesh.cache import SessionCache, save_index
@@ -336,7 +348,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
 def cmd_delete(args: argparse.Namespace) -> None:
     """Delete a single session by ID."""
-    index = _require_index()
+    index = _refresh_index()
 
     matches = [s for s in index["sessions"] if s["id"] == args.session_id]
     if args.provider:
