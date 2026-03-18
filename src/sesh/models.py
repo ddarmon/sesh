@@ -11,6 +11,7 @@ class Provider(Enum):
     CLAUDE = "claude"
     CODEX = "codex"
     CURSOR = "cursor"
+    COPILOT = "copilot"
 
 
 @dataclass

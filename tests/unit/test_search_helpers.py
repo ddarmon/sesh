@@ -85,3 +85,56 @@ def test_decode_cursor_projects_path_fallback() -> None:
     """If the decoded path doesn't exist, the raw encoded name is returned."""
     assert search._decode_cursor_projects_path("Users-me-repo") == "Users-me-repo"
 
+
+def test_extract_content_text_copilot_user_message() -> None:
+    """Copilot user.message events have content under data.content."""
+    entry = {
+        "type": "user.message",
+        "data": {"content": "hello world"},
+    }
+    extracted = search._extract_content_text(entry)
+    assert "hello world" in extracted
+
+
+def test_extract_content_text_copilot_assistant_with_reasoning() -> None:
+    """Copilot assistant.message events with reasoningText are searchable."""
+    entry = {
+        "type": "assistant.message",
+        "data": {
+            "content": "answer",
+            "reasoningText": "thinking about it",
+            "toolRequests": [],
+        },
+    }
+    extracted = search._extract_content_text(entry, "thinking")
+    assert "thinking" in extracted
+
+
+def test_extract_content_text_copilot_tool_requests() -> None:
+    """Copilot assistant.message toolRequests arguments are searchable."""
+    entry = {
+        "type": "assistant.message",
+        "data": {
+            "content": "",
+            "toolRequests": [
+                {"toolCallId": "c1", "name": "view", "arguments": {"path": "/needle.py"}},
+            ],
+        },
+    }
+    extracted = search._extract_content_text(entry, "needle")
+    assert "needle" in extracted
+
+
+def test_extract_content_text_copilot_tool_result() -> None:
+    """Copilot tool.execution_complete result content is searchable."""
+    entry = {
+        "type": "tool.execution_complete",
+        "data": {
+            "toolCallId": "c1",
+            "success": True,
+            "result": {"content": "file contents needle", "detailedContent": "diff"},
+        },
+    }
+    extracted = search._extract_content_text(entry, "needle")
+    assert "needle" in extracted
+

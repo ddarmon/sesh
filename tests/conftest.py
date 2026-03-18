@@ -151,6 +151,15 @@ def tmp_codex_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
+def tmp_copilot_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from sesh.providers import copilot
+
+    copilot_dir = tmp_path / ".copilot" / "session-state"
+    monkeypatch.setattr(copilot, "COPILOT_DIR", copilot_dir)
+    return copilot_dir
+
+
+@pytest.fixture()
 def tmp_cursor_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     from sesh.providers import cursor
 
@@ -182,12 +191,15 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     monkeypatch.setattr(search, "CLAUDE_PROJECTS", claude_projects)
     monkeypatch.setattr(search, "CODEX_SESSIONS", codex_sessions)
     monkeypatch.setattr(search, "CURSOR_PROJECTS", cursor_projects)
+    copilot_sessions = tmp_path / ".copilot" / "session-state"
+    monkeypatch.setattr(search, "COPILOT_SESSIONS", copilot_sessions)
     monkeypatch.setattr(search, "CURSOR_CHATS", cursor_chats)
     return {
         "claude_projects": claude_projects,
         "codex_sessions": codex_sessions,
         "cursor_projects": cursor_projects,
         "cursor_chats": cursor_chats,
+        "copilot_sessions": copilot_sessions,
     }
 
 
@@ -207,6 +219,8 @@ def tmp_move_dirs(
     monkeypatch.setattr(move, "CODEX_DIR", codex_sessions)
     monkeypatch.setattr(move, "CURSOR_CHATS_DIR", cursor_chats)
     monkeypatch.setattr(move, "CURSOR_PROJECTS_DIR", cursor_projects)
+    copilot_sessions = tmp_path / ".copilot" / "session-state"
+    monkeypatch.setattr(move, "COPILOT_DIR", copilot_sessions)
     monkeypatch.setattr(move, "WORKSPACE_STORAGE", workspace_storage)
 
     cache_dir = tmp_path / "cache" / "sesh"
@@ -219,6 +233,7 @@ def tmp_move_dirs(
         "codex_sessions": codex_sessions,
         "cursor_chats": cursor_chats,
         "cursor_projects": cursor_projects,
+        "copilot_sessions": copilot_sessions,
         "workspace_storage": workspace_storage,
         "cache_dir": cache_dir,
     }

@@ -1,7 +1,7 @@
 [project]
 name = "sesh"
-version = "0.5.0"
-description = "Browse and search Claude Code, Codex, and Cursor sessions in the terminal"
+version = "0.6.0"
+description = "Browse and search Claude Code, Codex, Cursor, and Copilot sessions in the terminal"
 license = "MIT"
 readme = "README.md"
 authors = [{ name = "David Darmon" }]

@@ -1,7 +1,7 @@
 # sesh
 
-Browse and search Claude Code, Codex, and Cursor sessions in the
-terminal.
+Browse and search Claude Code, Codex, Cursor, and Copilot sessions in
+the terminal.
 
 `sesh` is a TUI that discovers session logs from multiple LLM coding
 assistants, lets you browse them by project, read message threads, and
@@ -48,15 +48,16 @@ Requires Python 3.10+ and
 Developed and tested on macOS. The codebase uses `pathlib.Path` and
 `shutil.which()` throughout, so most of it is platform-agnostic.
 
-**Linux** -- Should work out of the box. The Claude Code, Codex, and
-Cursor data directories use the same paths as macOS (`~/.claude`,
-`~/.codex`, `~/.cursor`). Textual and ripgrep both support Linux.
+**Linux** -- Should work out of the box. The Claude Code, Codex, Cursor,
+and Copilot data directories use the same paths as macOS (`~/.claude`,
+`~/.codex`, `~/.cursor`, `~/.copilot`). Textual and ripgrep both support
+Linux.
 
 **Windows** -- Partially supported. The core TUI and CLI will run, but
 the Cursor provider's workspace storage path may not resolve correctly
 (it defaults to a Linux-style path instead of `AppData/Roaming/Cursor`
-on Windows). Claude Code and Codex path resolution should work via
-`Path.home()`. Ripgrep is available on Windows via `winget` or
+on Windows). Claude Code, Codex, and Copilot path resolution should work
+via `Path.home()`. Ripgrep is available on Windows via `winget` or
 `choco install ripgrep`.
 
 ## Usage
@@ -72,20 +73,20 @@ toggles -- persist across launches.
 
 #### Keybindings
 
-| Key      | Action                                             |
-| -------- | -------------------------------------------------- |
-| `/`      | Focus the search bar                               |
-| `Escape` | Clear search and return to full tree               |
-| `f`      | Cycle provider filter (All/Claude/Codex/Cursor)    |
-| `o`      | Open/resume the selected session in its CLI        |
-| `e`      | Export session to clipboard as Markdown            |
-| `d`      | Delete the selected session (with confirmation)    |
-| `m`      | Move selected project path (full or metadata-only) |
-| `t`      | Toggle tool call/result visibility                 |
-| `T`      | Toggle thinking/reasoning visibility               |
-| `F`      | Toggle fullscreen message pane                     |
-| `?`      | Show keyboard shortcuts help                       |
-| `q`      | Quit                                               |
+| Key      | Action                                                  |
+| -------- | ------------------------------------------------------- |
+| `/`      | Focus the search bar                                    |
+| `Escape` | Clear search and return to full tree                    |
+| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot) |
+| `o`      | Open/resume the selected session in its CLI             |
+| `e`      | Export session to clipboard as Markdown                 |
+| `d`      | Delete the selected session (with confirmation)         |
+| `m`      | Move selected project path (full or metadata-only)      |
+| `t`      | Toggle tool call/result visibility                      |
+| `T`      | Toggle thinking/reasoning visibility                    |
+| `F`      | Toggle fullscreen message pane                          |
+| `?`      | Show keyboard shortcuts help                            |
+| `q`      | Quit                                                    |
 
 Press `?` at any time to see all keyboard shortcuts:
 
@@ -115,6 +116,7 @@ Each project in the tree shows which providers have sessions for it:
 -   `C` -- Claude Code
 -   `X` -- Codex
 -   `U` -- Cursor
+-   `P` -- Copilot
 
 Example: `myproject [C,X:12]` means 12 sessions from Claude and Codex.
 
@@ -230,14 +232,22 @@ Discovers sessions by computing MD5 hashes of known project paths from
 other providers. Returns empty gracefully if `~/.cursor/chats/` doesn't
 exist.
 
+### Copilot
+
+Reads `~/.copilot/session-state/{uuid}/`. Each session directory
+contains `workspace.yaml` (flat key-value metadata: `id`, `cwd`,
+`summary`, timestamps) and `events.jsonl` (event log with
+`user.message`, `assistant.message`, `tool.execution_start/complete`,
+and session lifecycle events). Summaries come from workspace.yaml, with
+fallback to the first user message.
+
 ## Cache
 
 Parsed session metadata is cached at `~/.cache/sesh/sessions.json`,
 keyed by file path with mtime/size for invalidation. The CLI index is
 stored at `~/.cache/sesh/index.json`. View preferences (provider filter,
 sort mode, visibility toggles) and bookmarks are config data, stored by
-default under `~/.config/sesh/` (`preferences.json`,
-`bookmarks.json`).
+default under `~/.config/sesh/` (`preferences.json`, `bookmarks.json`).
 
 If `XDG_CACHE_HOME` / `XDG_CONFIG_HOME` are set to absolute paths, sesh
 uses those instead of `~/.cache` / `~/.config`.
@@ -262,5 +272,7 @@ src/sesh/
     __init__.py      # SessionProvider base class
     claude.py        # Claude Code JSONL parser
     codex.py         # Codex JSONL parser
+    copilot.py       # Copilot YAML+JSONL parser
     cursor.py        # Cursor SQLite parser
 ```
+

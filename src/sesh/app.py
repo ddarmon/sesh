@@ -432,7 +432,7 @@ class SeshApp(App):
         self.projects: dict[str, Project] = {}
         self.sessions: dict[str, list[SessionMeta]] = {}
         self.current_filter: Provider | None = None
-        self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR]
+        self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT]
         self.filter_index = 0
         self.sort_options = ["date", "name", "messages", "timeline"]
         self.sort_index = 0
@@ -748,6 +748,8 @@ class SeshApp(App):
                 badges.append("X")
             if Provider.CURSOR in prov_set:
                 badges.append("U")
+            if Provider.COPILOT in prov_set:
+                badges.append("P")
             badge_str = ",".join(badges)
 
             label = f"{proj.display_name} [{badge_str}:{len(sessions)}]"
@@ -787,6 +789,10 @@ class SeshApp(App):
                 after = result.file_path[idx + len(marker):]
                 encoded_name = after.split("/")[0]
                 source_path = result.file_path[:idx + len(marker)] + encoded_name
+
+        # For Copilot, source_path must be the session directory (parent of events.jsonl).
+        elif result.provider == Provider.COPILOT:
+            source_path = str(Path(result.file_path).parent)
 
         return SessionMeta(
             id=result.session_id,
@@ -889,6 +895,9 @@ class SeshApp(App):
         elif session.provider == Provider.CURSOR:
             from sesh.providers.cursor import CursorProvider
             messages = CursorProvider().get_messages(session)
+        elif session.provider == Provider.COPILOT:
+            from sesh.providers.copilot import CopilotProvider
+            messages = CopilotProvider().get_messages(session)
         else:
             messages = []
 
@@ -1029,7 +1038,7 @@ class SeshApp(App):
         tree.clear()
 
         node = tree.root.add(f"Search: '{query}' ({len(results)} matches)", expand=True)
-        badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U"}
+        badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U", Provider.COPILOT: "P"}
         for r in results[:100]:
             badge = badge_map.get(r.provider, "?")
             proj = self.projects.get(r.project_path)
@@ -1246,6 +1255,7 @@ class SeshApp(App):
             Provider.CLAUDE: ("claude", ["claude", "--resume", session.id]),
             Provider.CODEX: ("codex", ["codex", "resume", session.id]),
             Provider.CURSOR: ("agent", ["agent", f"--resume={session.id}"]),
+            Provider.COPILOT: ("copilot", ["copilot", f"--resume={session.id}"]),
         }
         binary, args = commands[session.provider]
         if shutil.which(binary) is None:
@@ -1375,12 +1385,14 @@ class SeshApp(App):
         """Delete a session via its provider and refresh the tree."""
         from sesh.providers.claude import ClaudeProvider
         from sesh.providers.codex import CodexProvider
+        from sesh.providers.copilot import CopilotProvider
         from sesh.providers.cursor import CursorProvider
 
         providers_map: dict[Provider, type] = {
             Provider.CLAUDE: ClaudeProvider,
             Provider.CODEX: CodexProvider,
             Provider.CURSOR: CursorProvider,
+            Provider.COPILOT: CopilotProvider,
         }
 
         provider_cls = providers_map.get(session.provider)

@@ -148,6 +148,20 @@ def test_session_from_search_result_cursor_source_path() -> None:
     assert session.source_path.endswith("s1.txt")
 
 
+def test_session_from_search_result_copilot_source_path() -> None:
+    """Copilot search results use the parent directory (session dir) as source_path."""
+    result = SearchResult(
+        session_id="abc-123",
+        project_path="/repo",
+        provider=Provider.COPILOT,
+        matched_line="needle",
+        file_path="/tmp/.copilot/session-state/abc-123/events.jsonl",
+    )
+    session = SeshApp._session_from_search_result(result)
+    assert session is not None
+    assert session.source_path == "/tmp/.copilot/session-state/abc-123"
+
+
 def test_highlight_text_case_insensitive() -> None:
     """All case variants of the search term are highlighted."""
     out = SeshApp._highlight_text("Needle and needle", "needle")

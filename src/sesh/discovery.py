@@ -34,6 +34,12 @@ def discover_all(cache=None) -> tuple[dict[str, Project], dict[str, list[Session
     except Exception:
         pass
 
+    try:
+        from sesh.providers.copilot import CopilotProvider
+        providers_list.append(CopilotProvider())
+    except Exception:
+        pass
+
     projects: dict[str, Project] = {}
     sessions: dict[str, list[SessionMeta]] = {}
 

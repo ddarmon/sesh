@@ -70,6 +70,22 @@ def make_message(**overrides) -> Message:
     return Message(**data)
 
 
+def write_workspace_yaml(path: Path, fields: dict[str, str]) -> None:
+    """Write a flat key-value workspace.yaml for Copilot tests."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        for key, value in fields.items():
+            f.write(f"{key}: {value}\n")
+
+
+def write_copilot_events(path: Path, events: list[dict]) -> None:
+    """Write Copilot events.jsonl for tests."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        for event in events:
+            f.write(json.dumps(event) + "\n")
+
+
 def make_index(projects, sessions) -> dict:
     from sesh.cache import _session_to_dict
 
