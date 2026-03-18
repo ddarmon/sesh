@@ -15,6 +15,7 @@ CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 CURSOR_PROJECTS = Path.home() / ".cursor" / "projects"
 CURSOR_CHATS = Path.home() / ".cursor" / "chats"
+COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -135,6 +136,33 @@ def _extract_content_text(entry: dict, query: str | None = None) -> str:
         except (json.JSONDecodeError, AttributeError):
             pass
         candidates.append(output)
+
+    # Copilot event format: top-level "type" + "data" wrapper
+    data = entry.get("data", {})
+    if isinstance(data, dict):
+        etype = entry.get("type", "")
+        if etype in ("user.message", "assistant.message"):
+            content_text = data.get("content", "")
+            if content_text:
+                candidates.append(content_text)
+            reasoning = data.get("reasoningText", "")
+            if reasoning:
+                candidates.append(reasoning)
+            for req in data.get("toolRequests", []):
+                args = req.get("arguments")
+                if args:
+                    candidates.append(
+                        json.dumps(args) if not isinstance(args, str) else args
+                    )
+        elif etype == "tool.execution_complete":
+            result = data.get("result", {})
+            if isinstance(result, dict):
+                rc = result.get("content", "")
+                if rc:
+                    candidates.append(rc)
+                dc = result.get("detailedContent", "")
+                if dc:
+                    candidates.append(dc)
 
     if candidates:
         if query:
@@ -358,6 +386,8 @@ def ripgrep_search(query: str) -> list[SearchResult]:
         search_paths.append(str(CLAUDE_PROJECTS))
     if CODEX_SESSIONS.is_dir():
         search_paths.append(str(CODEX_SESSIONS))
+    if COPILOT_SESSIONS.is_dir():
+        search_paths.append(str(COPILOT_SESSIONS))
 
     results: list[SearchResult] = []
     seen_sessions: set[str] = set()
@@ -402,6 +432,8 @@ def ripgrep_search(query: str) -> list[SearchResult]:
                     provider = Provider.CLAUDE
                 elif "/.codex/" in file_path:
                     provider = Provider.CODEX
+                elif "/.copilot/" in file_path:
+                    provider = Provider.COPILOT
                 else:
                     provider = Provider.CLAUDE
 
@@ -423,6 +455,10 @@ def ripgrep_search(query: str) -> list[SearchResult]:
                 if not session_id and provider == Provider.CODEX:
                     session_id = _extract_codex_session_id(file_path)
 
+                # For Copilot, session ID is the directory name (UUID)
+                if not session_id and provider == Provider.COPILOT:
+                    session_id = Path(file_path).parent.name
+
                 # Extract project_path (cwd) for session resume
                 project_path = ""
                 if entry:
@@ -437,6 +473,13 @@ def ripgrep_search(query: str) -> list[SearchResult]:
                             project_path = first.get("payload", {}).get("cwd", "") or ""
                     except (OSError, json.JSONDecodeError, AttributeError):
                         pass
+
+                # For Copilot, cwd is in workspace.yaml alongside events.jsonl
+                if not project_path and provider == Provider.COPILOT:
+                    from sesh.providers.copilot import _parse_workspace_yaml
+                    yaml_path = Path(file_path).parent / "workspace.yaml"
+                    meta = _parse_workspace_yaml(yaml_path)
+                    project_path = meta.get("cwd", "")
 
                 # Extract readable display text
                 content_text = _extract_content_text(entry, query) if entry else ""

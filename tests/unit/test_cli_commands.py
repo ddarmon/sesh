@@ -190,6 +190,7 @@ def test_cmd_clean_dedup_regression(monkeypatch, capsys) -> None:
     """
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
     import sesh.search as search_mod
 
@@ -226,6 +227,7 @@ def test_cmd_clean_dedup_regression(monkeypatch, capsys) -> None:
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeClaudeProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", NoopProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", NoopProvider)
+    monkeypatch.setattr(copilot_mod, "CopilotProvider", NoopProvider)
 
     cli.cmd_clean(_ns(query="needle", dry_run=False, force=True))
     out = json.loads(capsys.readouterr().out)
@@ -238,6 +240,7 @@ def test_cmd_clean_collects_errors(monkeypatch, capsys) -> None:
     """Provider exceptions during clean are captured in the 'errors' list, not raised."""
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
     import sesh.search as search_mod
 
@@ -265,6 +268,7 @@ def test_cmd_clean_collects_errors(monkeypatch, capsys) -> None:
     monkeypatch.setattr(claude_mod, "ClaudeProvider", BoomProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", NoopProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", NoopProvider)
+    monkeypatch.setattr(copilot_mod, "CopilotProvider", NoopProvider)
 
     cli.cmd_clean(_ns(query="needle", dry_run=False, force=True))
     out = json.loads(capsys.readouterr().out)
@@ -317,6 +321,7 @@ def test_cmd_resume_cursor_txt_refusal(monkeypatch, capsys) -> None:
         ("claude", "claude", ["claude", "--resume", "s1"]),
         ("codex", "codex", ["codex", "resume", "s1"]),
         ("cursor", "agent", ["agent", "--resume=s1"]),
+        ("copilot", "copilot", ["copilot", "--resume=s1"]),
     ],
 )
 def test_cmd_resume_execvp_args_and_chdir(
@@ -521,6 +526,7 @@ def test_cmd_delete_ambiguous_resolved_by_provider(monkeypatch, capsys) -> None:
     """--provider disambiguates when same ID exists in multiple providers."""
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
 
     deleted_ids = []
@@ -539,6 +545,7 @@ def test_cmd_delete_ambiguous_resolved_by_provider(monkeypatch, capsys) -> None:
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+    monkeypatch.setattr(copilot_mod, "CopilotProvider", FakeProvider)
 
     cli.cmd_delete(_ns(session_id="dup", provider="claude", force=True, dry_run=False))
     out = json.loads(capsys.readouterr().out)
@@ -574,6 +581,7 @@ def test_cmd_delete_non_tty_with_force(monkeypatch, capsys) -> None:
     """Non-interactive mode with --force deletes successfully."""
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
 
     deleted_ids = []
@@ -588,6 +596,7 @@ def test_cmd_delete_non_tty_with_force(monkeypatch, capsys) -> None:
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+    monkeypatch.setattr(copilot_mod, "CopilotProvider", FakeProvider)
 
     cli.cmd_delete(_ns(session_id="s1", provider=None, force=True, dry_run=False))
     out = json.loads(capsys.readouterr().out)
@@ -599,6 +608,7 @@ def test_cmd_delete_tty_confirms(monkeypatch, capsys) -> None:
     """Interactive mode with 'y' confirmation deletes successfully."""
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
 
     deleted_ids = []
@@ -614,6 +624,7 @@ def test_cmd_delete_tty_confirms(monkeypatch, capsys) -> None:
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+    monkeypatch.setattr(copilot_mod, "CopilotProvider", FakeProvider)
 
     cli.cmd_delete(_ns(session_id="s1", provider=None, force=False, dry_run=False))
     out = json.loads(capsys.readouterr().out)
@@ -638,6 +649,7 @@ def test_cmd_delete_provider_error(monkeypatch, capsys) -> None:
     """Provider exception during delete exits with code 1."""
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
 
     class BoomProvider:
@@ -653,6 +665,7 @@ def test_cmd_delete_provider_error(monkeypatch, capsys) -> None:
     monkeypatch.setattr(claude_mod, "ClaudeProvider", BoomProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", NoopProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", NoopProvider)
+    monkeypatch.setattr(copilot_mod, "CopilotProvider", NoopProvider)
 
     with pytest.raises(SystemExit) as exc:
         cli.cmd_delete(_ns(session_id="s1", provider=None, force=True, dry_run=False))
@@ -709,6 +722,7 @@ def test_cmd_clean_non_tty_with_force_succeeds(monkeypatch, capsys) -> None:
     """'sesh clean --force' in non-interactive mode deletes successfully."""
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
     import sesh.search as search_mod
 

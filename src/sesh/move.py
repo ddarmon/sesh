@@ -12,6 +12,7 @@ from sesh.cache import CACHE_FILE, INDEX_FILE, PROJECT_PATHS_FILE
 from sesh.models import MoveReport, Provider, encode_claude_path, encode_cursor_path, workspace_uri
 from sesh.providers.claude import ClaudeProvider, PROJECTS_DIR
 from sesh.providers.codex import CODEX_DIR, CodexProvider
+from sesh.providers.copilot import COPILOT_DIR, CopilotProvider, _parse_workspace_yaml
 from sesh.providers.cursor import (
     CURSOR_CHATS_DIR,
     CURSOR_PROJECTS_DIR,
@@ -245,6 +246,28 @@ def _dry_run_cursor(old_path: str, new_path: str) -> MoveReport:
     )
 
 
+def _dry_run_copilot(old_path: str) -> MoveReport:
+    if not COPILOT_DIR.is_dir():
+        return MoveReport(provider=Provider.COPILOT, success=True)
+
+    files_modified = 0
+    for session_dir in COPILOT_DIR.iterdir():
+        if not session_dir.is_dir():
+            continue
+        yaml_path = session_dir / "workspace.yaml"
+        if not yaml_path.is_file():
+            continue
+        meta = _parse_workspace_yaml(yaml_path)
+        if meta.get("cwd") == old_path:
+            files_modified += 1
+
+    return MoveReport(
+        provider=Provider.COPILOT,
+        success=True,
+        files_modified=files_modified,
+    )
+
+
 def move_project(
     old_path: str,
     new_path: str,
@@ -259,6 +282,7 @@ def move_project(
             _dry_run_claude(old_path, new_path),
             _dry_run_codex(old_path),
             _dry_run_cursor(old_path, new_path),
+            _dry_run_copilot(old_path),
         ]
 
     if full_move:
@@ -273,6 +297,7 @@ def move_project(
         (Provider.CLAUDE, ClaudeProvider()),
         (Provider.CODEX, CodexProvider()),
         (Provider.CURSOR, CursorProvider()),
+        (Provider.COPILOT, CopilotProvider()),
     ]
 
     reports: list[MoveReport] = []

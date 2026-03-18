@@ -150,6 +150,9 @@ def _load_session_messages(session_data: dict):
     elif session.provider == Provider.CURSOR:
         from sesh.providers.cursor import CursorProvider
         messages = CursorProvider().get_messages(session)
+    elif session.provider == Provider.COPILOT:
+        from sesh.providers.copilot import CopilotProvider
+        messages = CopilotProvider().get_messages(session)
     else:
         messages = []
 
@@ -264,6 +267,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
             source_path = r.file_path
         elif r.provider == Provider.CURSOR:
             source_path = r.file_path
+        elif r.provider == Provider.COPILOT:
+            source_path = str(Path(r.file_path).parent)
         else:
             continue
 
@@ -291,12 +296,14 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
     from sesh.providers.claude import ClaudeProvider
     from sesh.providers.codex import CodexProvider
+    from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
 
     providers_map = {
         Provider.CLAUDE: ClaudeProvider(),
         Provider.CODEX: CodexProvider(),
         Provider.CURSOR: CursorProvider(),
+        Provider.COPILOT: CopilotProvider(),
     }
 
     deleted = []
@@ -399,12 +406,14 @@ def cmd_delete(args: argparse.Namespace) -> None:
     from sesh.models import Provider
     from sesh.providers.claude import ClaudeProvider
     from sesh.providers.codex import CodexProvider
+    from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
 
     providers_map = {
         Provider.CLAUDE: ClaudeProvider(),
         Provider.CODEX: CodexProvider(),
         Provider.CURSOR: CursorProvider(),
+        Provider.COPILOT: CopilotProvider(),
     }
 
     session = _dict_to_session(session_data)
@@ -464,6 +473,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
         Provider.CLAUDE: ("claude", ["claude", "--resume", session.id]),
         Provider.CODEX: ("codex", ["codex", "resume", session.id]),
         Provider.CURSOR: ("agent", ["agent", f"--resume={session.id}"]),
+        Provider.COPILOT: ("copilot", ["copilot", f"--resume={session.id}"]),
     }
 
     binary, cmd_args = commands[session.provider]
@@ -589,7 +599,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sesh",
         description=(
-            "Browse and search LLM coding sessions (Claude Code, Codex, Cursor).\n\n"
+            "Browse and search LLM coding sessions (Claude Code, Codex, Cursor, Copilot).\n\n"
             "With no subcommand, launches the interactive TUI.\n"
             "Use subcommands for JSON output suitable for scripts and LLM agents.\n\n"
             "Typical workflow:\n"
@@ -614,7 +624,7 @@ def main() -> None:
         "refresh",
         help="Run full discovery across all providers and rebuild the index",
         description=(
-            "Scan Claude Code, Codex, and Cursor session directories, "
+            "Scan Claude Code, Codex, Cursor, and Copilot session directories, "
             "then write the index (default: ~/.cache/sesh/index.json, "
             "or $XDG_CACHE_HOME/sesh/index.json) for fast querying. "
             "Run this before other commands, or to pick up new sessions."
@@ -645,8 +655,8 @@ def main() -> None:
     p_sessions.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor"],
-        help="Filter to sessions from this provider (claude, codex, cursor)",
+        choices=["claude", "codex", "cursor", "copilot"],
+        help="Filter to sessions from this provider (claude, codex, cursor, copilot)",
     )
 
     # messages
@@ -666,7 +676,7 @@ def main() -> None:
     p_messages.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor"],
+        choices=["claude", "codex", "cursor", "copilot"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_messages.add_argument(
@@ -723,7 +733,7 @@ def main() -> None:
         description=(
             "Search for sessions using ripgrep and delete all matches. "
             "Use --dry-run to preview what would be deleted without making changes. "
-            "Supports Claude, Codex, and Cursor sessions."
+            "Supports Claude, Codex, Cursor, and Copilot sessions."
         ),
     )
     p_clean.add_argument(
@@ -758,7 +768,7 @@ def main() -> None:
     p_delete.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor"],
+        choices=["claude", "codex", "cursor", "copilot"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_delete.add_argument(
@@ -778,7 +788,7 @@ def main() -> None:
         help="Resume a session in its provider's CLI",
         description=(
             "Look up a session by ID and launch the provider's CLI to resume it. "
-            "Replaces the sesh process with the provider CLI (claude, codex, or agent)."
+            "Replaces the sesh process with the provider CLI (claude, codex, agent, or copilot)."
         ),
     )
     p_resume.add_argument(
@@ -788,7 +798,7 @@ def main() -> None:
     p_resume.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor"],
+        choices=["claude", "codex", "cursor", "copilot"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
 
@@ -809,7 +819,7 @@ def main() -> None:
     p_export.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor"],
+        choices=["claude", "codex", "cursor", "copilot"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_export.add_argument(

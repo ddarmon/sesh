@@ -192,7 +192,7 @@ def test_move_project_dry_run_does_not_move_files(tmp_path: Path, monkeypatch) -
     )
 
     reports = move.move_project(str(old_path), str(new_path), dry_run=True)
-    assert [r.provider for r in reports] == [Provider.CLAUDE, Provider.CODEX, Provider.CURSOR]
+    assert [r.provider for r in reports] == [Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT]
     assert all(isinstance(r, MoveReport) for r in reports)
     assert old_path.exists()
     assert not new_path.exists()
@@ -225,14 +225,19 @@ def test_move_project_orchestrates_providers_and_invalidates_caches(
         def move_project(self, old: str, new: str) -> MoveReport:
             return MoveReport(provider=Provider.CURSOR, success=True, dirs_renamed=2)
 
+    class FakeCopilot:
+        def move_project(self, old: str, new: str) -> MoveReport:
+            return MoveReport(provider=Provider.COPILOT, success=True)
+
     monkeypatch.setattr(move, "ClaudeProvider", FakeClaude)
     monkeypatch.setattr(move, "CodexProvider", FakeCodex)
     monkeypatch.setattr(move, "CursorProvider", FakeCursor)
+    monkeypatch.setattr(move, "CopilotProvider", FakeCopilot)
 
     reports = move.move_project(str(old_path), str(new_path), full_move=True, dry_run=False)
 
     assert moved == [(str(old_path), str(new_path))]
-    assert [r.provider for r in reports] == [Provider.CLAUDE, Provider.CODEX, Provider.CURSOR]
+    assert [r.provider for r in reports] == [Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT]
     assert all(r.success for r in reports)
     assert not move.CACHE_FILE.exists()
     assert not move.INDEX_FILE.exists()
@@ -257,6 +262,7 @@ def test_move_project_captures_provider_exception(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(move, "ClaudeProvider", OkProvider)
     monkeypatch.setattr(move, "CodexProvider", BoomProvider)
     monkeypatch.setattr(move, "CursorProvider", OkProvider)
+    monkeypatch.setattr(move, "CopilotProvider", OkProvider)
 
     reports = move.move_project(str(old_path), str(new_path))
     by_provider = {r.provider: r for r in reports}

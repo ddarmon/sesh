@@ -57,11 +57,12 @@ The app has three layers:
 
 ## Data locations
 
-| Provider | Path                               | Format |
-| -------- | ---------------------------------- | ------ |
-| Claude   | `~/.claude/projects/{encoded}/`    | JSONL  |
-| Codex    | `~/.codex/sessions/YYYY/MM/DD/`    | JSONL  |
-| Cursor   | `~/.cursor/chats/{md5}/*/store.db` | SQLite |
+| Provider | Path                               | Format     |
+| -------- | ---------------------------------- | ---------- |
+| Claude   | `~/.claude/projects/{encoded}/`    | JSONL      |
+| Codex    | `~/.codex/sessions/YYYY/MM/DD/`    | JSONL      |
+| Cursor   | `~/.cursor/chats/{md5}/*/store.db` | SQLite     |
+| Copilot  | `~/.copilot/session-state/{uuid}/` | YAML+JSONL |
 
 App-managed files follow XDG base directories (absolute `XDG_*` env vars
 are honored; empty/relative values fall back to defaults):
@@ -87,6 +88,7 @@ CLI to resume the session. Per-provider commands:
     directory)
 -   **Codex**: `codex resume <session-id>`
 -   **Cursor**: `agent --resume=<session-id>`
+-   **Copilot**: `copilot --resume=<session-id>`
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
@@ -128,6 +130,7 @@ the session is deleted via the provider's `delete_session` method:
 -   **Claude**: removes matching `sessionId` lines from JSONL files
 -   **Codex**: deletes the session JSONL file
 -   **Cursor**: removes the session directory (parent of `store.db`)
+-   **Copilot**: removes the session directory
 
 CLI equivalents:
 
