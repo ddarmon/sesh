@@ -509,6 +509,9 @@ class ClaudeProvider(SessionProvider):
                                 "model": None,
                                 "last_user_message": None,
                                 "cwd": entry.get("cwd"),
+                                "input_tokens": 0,
+                                "output_tokens": 0,
+                                "cumulative_input_tokens": 0,
                             }
 
                         s = sessions[session_id]
@@ -538,9 +541,20 @@ class ClaudeProvider(SessionProvider):
                         role = msg.get("role")
                         s["message_count"] += 1
 
-                        # Extract model from assistant messages
-                        if role == "assistant" and msg.get("model"):
-                            s["model"] = msg["model"]
+                        # Extract model and token usage from assistant messages
+                        if role == "assistant":
+                            if msg.get("model"):
+                                s["model"] = msg["model"]
+                            usage = msg.get("usage")
+                            if usage:
+                                turn_input = (
+                                    usage.get("input_tokens", 0)
+                                    + usage.get("cache_creation_input_tokens", 0)
+                                    + usage.get("cache_read_input_tokens", 0)
+                                )
+                                s["input_tokens"] = turn_input
+                                s["cumulative_input_tokens"] += turn_input
+                                s["output_tokens"] += usage.get("output_tokens", 0)
 
                         # Track first user message (parentUuid is null)
                         if role == "user" and entry.get("parentUuid") is None and entry.get("uuid"):
@@ -603,6 +617,9 @@ class ClaudeProvider(SessionProvider):
                 message_count=s["message_count"],
                 model=s["model"],
                 source_path=str(project_dir),
+                input_tokens=s["input_tokens"] or None,
+                output_tokens=s["output_tokens"] or None,
+                cumulative_input_tokens=s["cumulative_input_tokens"] or None,
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)

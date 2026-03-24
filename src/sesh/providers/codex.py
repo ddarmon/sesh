@@ -175,6 +175,9 @@ class CodexProvider(SessionProvider):
                 message_count=s.get("message_count", 0),
                 model=s.get("model"),
                 source_path=s.get("file_path"),
+                input_tokens=s.get("input_tokens"),
+                output_tokens=s.get("output_tokens"),
+                cumulative_input_tokens=s.get("cumulative_input_tokens"),
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)
@@ -339,6 +342,9 @@ class CodexProvider(SessionProvider):
                             "summary": s.summary,
                             "message_count": s.message_count,
                             "file_path": s.source_path or file_str,
+                            "input_tokens": s.input_tokens,
+                            "output_tokens": s.output_tokens,
+                            "cumulative_input_tokens": s.cumulative_input_tokens,
                         })
                     continue
 
@@ -361,6 +367,9 @@ class CodexProvider(SessionProvider):
                         message_count=data.get("message_count", 0),
                         model=data.get("model"),
                         source_path=data.get("file_path"),
+                        input_tokens=data.get("input_tokens"),
+                        output_tokens=data.get("output_tokens"),
+                        cumulative_input_tokens=data.get("cumulative_input_tokens"),
                     )])
 
         return self._index
@@ -387,6 +396,9 @@ class CodexProvider(SessionProvider):
                     last_ts = first_ts
                     first_user_msg = None
                     msg_count = 0
+                    last_input_tokens = None
+                    last_output_tokens = None
+                    cumul_input_tokens = None
 
                     for line in f:
                         line = line.strip()
@@ -398,7 +410,7 @@ class CodexProvider(SessionProvider):
                                 last_ts = entry["timestamp"]
 
                             etype = entry.get("type", "")
-                            epayload = entry.get("payload", {})
+                            epayload = entry.get("payload") or {}
 
                             if etype == "event_msg" and epayload.get("type") == "user_message":
                                 msg_count += 1
@@ -406,6 +418,16 @@ class CodexProvider(SessionProvider):
                                     first_user_msg = epayload.get("message", "")
                             elif etype == "response_item" and epayload.get("role") == "assistant":
                                 msg_count += 1
+                            elif etype == "event_msg" and epayload.get("type") == "token_count":
+                                info = epayload.get("info") or {}
+                                last_usage = info.get("last_token_usage") or {}
+                                if last_usage:
+                                    last_input_tokens = last_usage.get("input_tokens")
+                                    last_output_tokens = last_usage.get("output_tokens")
+                                total_usage = info.get("total_token_usage") or {}
+                                if total_usage:
+                                    cumul_input_tokens = total_usage.get("input_tokens")
+                                    last_output_tokens = total_usage.get("output_tokens")
                         except json.JSONDecodeError:
                             continue
 
@@ -422,6 +444,9 @@ class CodexProvider(SessionProvider):
                         "summary": summary,
                         "message_count": msg_count,
                         "file_path": str(file_path),
+                        "input_tokens": last_input_tokens,
+                        "output_tokens": last_output_tokens,
+                        "cumulative_input_tokens": cumul_input_tokens,
                     }
 
                 # Legacy format: no session_meta, extract cwd from environment_context XML
@@ -445,7 +470,7 @@ class CodexProvider(SessionProvider):
                                 last_ts = entry["timestamp"]
 
                             # Extract cwd from environment_context XML
-                            payload = entry.get("payload", {})
+                            payload = entry.get("payload") or {}
                             content = payload.get("content", [])
                             if isinstance(content, list):
                                 for item in content:
