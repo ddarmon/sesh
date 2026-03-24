@@ -107,6 +107,30 @@ with the provider filter and sort mode, persist across launches in
 `~/.config/sesh/preferences.json` by default (or
 `$XDG_CONFIG_HOME/sesh/preferences.json`) (managed by `preferences.py`).
 
+## Token usage
+
+Session tree labels show a compact token count (e.g., `18K tok`,
+`1.7M tok`) when available. Token data is extracted during session
+discovery and cached alongside other metadata. Per-provider sources:
+
+-   **Claude**: last assistant message's `usage` for `input_tokens`
+    (context size of the final turn, including cache variants); sums
+    `output_tokens` across all turns
+-   **Codex**: last `token_count` event ---
+    `last_token_usage.input_tokens` for context size;
+    `total_token_usage.output_tokens` for cumulative output
+-   **Copilot**: `session.shutdown` event's `modelMetrics` (sums
+    `inputTokens` + `cacheReadTokens` + `cacheWriteTokens` across all
+    models for input; `outputTokens` for output)
+-   **Cursor**: no token data available
+
+The `sesh sessions` CLI output includes three token fields:
+`input_tokens` (last turn context size), `output_tokens` (total output),
+and `cumulative_input_tokens` (sum of all turns' inputs, useful for cost
+estimation). Markdown exports include both **Context** and
+**Cumulative** token lines in the header when data is present. The TUI
+tree label shows only the context-size total.
+
 ## Session export
 
 Press `e` in the TUI to export the current session as Markdown to the

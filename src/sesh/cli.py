@@ -129,6 +129,9 @@ def cmd_sessions(args: argparse.Namespace) -> None:
             "timestamp": s["timestamp"],
             "message_count": s["message_count"],
             "model": s["model"],
+            "input_tokens": s.get("input_tokens"),
+            "output_tokens": s.get("output_tokens"),
+            "cumulative_input_tokens": s.get("cumulative_input_tokens"),
         })
 
     _json_out(out)

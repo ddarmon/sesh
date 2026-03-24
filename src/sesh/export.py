@@ -16,6 +16,18 @@ def format_session_markdown(session: SessionMeta, messages: list[Message]) -> st
     if session.model:
         lines.append(f"- **Model:** {session.model}")
     lines.append(f"- **Date:** {session.timestamp.strftime('%Y-%m-%d %H:%M')}")
+    if session.input_tokens is not None or session.output_tokens is not None:
+        ctx = (session.input_tokens or 0) + (session.output_tokens or 0)
+        lines.append(
+            f"- **Context:** {ctx:,} tokens "
+            f"({session.input_tokens or 0:,} in / {session.output_tokens or 0:,} out)"
+        )
+    if session.cumulative_input_tokens is not None:
+        cumul = (session.cumulative_input_tokens or 0) + (session.output_tokens or 0)
+        lines.append(
+            f"- **Cumulative:** {cumul:,} tokens "
+            f"({session.cumulative_input_tokens or 0:,} in / {session.output_tokens or 0:,} out)"
+        )
     lines.append("")
 
     for m in messages:

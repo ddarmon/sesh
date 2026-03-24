@@ -96,6 +96,9 @@ class CopilotProvider(SessionProvider):
                 message_count=s.get("message_count", 0),
                 model=s.get("model"),
                 source_path=s.get("session_dir"),
+                input_tokens=s.get("input_tokens"),
+                output_tokens=s.get("output_tokens"),
+                cumulative_input_tokens=s.get("cumulative_input_tokens"),
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)
@@ -298,6 +301,9 @@ class CopilotProvider(SessionProvider):
                             "summary": s.summary,
                             "message_count": s.message_count,
                             "session_dir": s.source_path or dir_str,
+                            "input_tokens": s.input_tokens,
+                            "output_tokens": s.output_tokens,
+                            "cumulative_input_tokens": s.cumulative_input_tokens,
                         })
                     continue
 
@@ -320,6 +326,9 @@ class CopilotProvider(SessionProvider):
                         message_count=data.get("message_count", 0),
                         model=data.get("model"),
                         source_path=data.get("session_dir"),
+                        input_tokens=data.get("input_tokens"),
+                        output_tokens=data.get("output_tokens"),
+                        cumulative_input_tokens=data.get("cumulative_input_tokens"),
                     )])
 
         return self._index
@@ -345,6 +354,8 @@ class CopilotProvider(SessionProvider):
         model = ""
         msg_count = 0
         first_user_msg = None
+        input_tokens = 0
+        output_tokens = 0
 
         if events_file.is_file():
             try:
@@ -371,6 +382,14 @@ class CopilotProvider(SessionProvider):
                             model = data.get("newModel", model)
                         elif etype == "session.shutdown":
                             model = data.get("currentModel", model) or model
+                            for metrics in data.get("modelMetrics", {}).values():
+                                usage = metrics.get("usage", {})
+                                input_tokens += (
+                                    usage.get("inputTokens", 0)
+                                    + usage.get("cacheReadTokens", 0)
+                                    + usage.get("cacheWriteTokens", 0)
+                                )
+                                output_tokens += usage.get("outputTokens", 0)
             except OSError:
                 pass
 
@@ -388,4 +407,7 @@ class CopilotProvider(SessionProvider):
             "summary": summary,
             "message_count": msg_count,
             "session_dir": str(session_dir),
+            "input_tokens": input_tokens or None,
+            "output_tokens": output_tokens or None,
+            "cumulative_input_tokens": input_tokens or None,
         }

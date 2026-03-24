@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sesh.app import SeshApp, _MODEL_SHORT, _format_duration, _relative_time, _short_model_name
+from sesh.app import SeshApp, _MODEL_SHORT, _compact_tokens, _format_duration, _relative_time, _short_model_name
 from sesh.models import MoveReport, Provider, SearchResult
 from tests.helpers import make_session
 
@@ -277,3 +277,29 @@ def test_format_status_suffix_no_flags() -> None:
     app = SeshApp()
 
     assert app._format_status_suffix() == ""
+
+
+def test_compact_tokens_none() -> None:
+    """Both None inputs produce an empty string."""
+    assert _compact_tokens(None, None) == ""
+
+
+def test_compact_tokens_small() -> None:
+    """Sub-1K totals show exact number."""
+    assert _compact_tokens(500, 200) == "700 tok"
+
+
+def test_compact_tokens_thousands() -> None:
+    """Totals in the thousands show K suffix."""
+    assert _compact_tokens(15000, 3000) == "18K tok"
+
+
+def test_compact_tokens_millions() -> None:
+    """Totals in the millions show M suffix with one decimal."""
+    assert _compact_tokens(1500000, 200000) == "1.7M tok"
+
+
+def test_compact_tokens_partial_none() -> None:
+    """One None input treated as zero."""
+    assert _compact_tokens(5000, None) == "5K tok"
+    assert _compact_tokens(None, 800) == "800 tok"
