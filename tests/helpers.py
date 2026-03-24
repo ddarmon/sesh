@@ -49,6 +49,9 @@ def make_session(**overrides) -> SessionMeta:
         "message_count": 1,
         "model": None,
         "source_path": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "cumulative_input_tokens": None,
     }
     data.update(overrides)
     return SessionMeta(**data)

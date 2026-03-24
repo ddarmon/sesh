@@ -25,6 +25,9 @@ def _session_to_dict(s: SessionMeta) -> dict:
         "message_count": s.message_count,
         "model": s.model,
         "source_path": s.source_path,
+        "input_tokens": s.input_tokens,
+        "output_tokens": s.output_tokens,
+        "cumulative_input_tokens": s.cumulative_input_tokens,
     }
 
 
@@ -55,6 +58,9 @@ def _dict_to_session(d: dict) -> SessionMeta:
         message_count=d.get("message_count", 0),
         model=d.get("model"),
         source_path=d.get("source_path"),
+        input_tokens=d.get("input_tokens"),
+        output_tokens=d.get("output_tokens"),
+        cumulative_input_tokens=d.get("cumulative_input_tokens"),
     )
 
 

@@ -45,6 +45,9 @@ class SessionMeta:
     message_count: int = 0
     model: str | None = None
     source_path: str | None = None  # File path for on-demand message loading
+    input_tokens: int | None = None              # Last turn's input context size
+    output_tokens: int | None = None             # Total output across all turns
+    cumulative_input_tokens: int | None = None   # Sum of all turns' inputs
 
 
 @dataclass
