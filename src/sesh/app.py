@@ -112,6 +112,18 @@ def _format_duration(start: datetime | None, end: datetime | None) -> str:
     return f"{int(delta_seconds // 86400)}d"
 
 
+def _compact_tokens(input_tokens: int | None, output_tokens: int | None) -> str:
+    """Format token counts as a compact string like '15K tok'."""
+    if input_tokens is None and output_tokens is None:
+        return ""
+    total = (input_tokens or 0) + (output_tokens or 0)
+    if total >= 1_000_000:
+        return f"{total / 1_000_000:.1f}M tok"
+    if total >= 1_000:
+        return f"{total / 1_000:.0f}K tok"
+    return f"{total} tok"
+
+
 class SessionTree(Tree):
     """Left pane: project/session tree."""
 
@@ -609,13 +621,15 @@ class SeshApp(App):
         count = f"({session.message_count}) " if session.message_count else ""
         duration = _format_duration(session.start_timestamp, session.timestamp)
         dur = f"~{duration} " if duration else ""
+        tok = _compact_tokens(session.input_tokens, session.output_tokens)
+        tok_str = f"{tok} " if tok else ""
         summary = session.summary[:50]
         model = f" [{_short_model_name(session.model)}]" if session.model else ""
         if show_project:
             proj = self.projects.get(session.project_path)
             proj_name = proj.display_name if proj else session.project_path.rsplit("/", 1)[-1]
-            return f"{star}{ts}  {count}{dur}{proj_name} — {summary}{model}"
-        return f"{star}{ts}  {count}{dur}{summary}{model}"
+            return f"{star}{ts}  {count}{dur}{tok_str}{proj_name} — {summary}{model}"
+        return f"{star}{ts}  {count}{dur}{tok_str}{summary}{model}"
 
     def _populate_tree(self, filter_text: str = "", provider_filter: Provider | None = None) -> None:
         """Populate tree with projects and sessions."""
