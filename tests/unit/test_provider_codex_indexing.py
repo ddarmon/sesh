@@ -201,6 +201,94 @@ def test_build_index_uses_cached_sessions(tmp_codex_dir) -> None:
     assert index["/cached-repo"][0]["start_timestamp"] == datetime(2025, 2, 1, tzinfo=timezone.utc)
 
 
+def test_parse_session_file_extracts_token_count(tmp_path: Path) -> None:
+    """input_tokens uses last_token_usage (per-turn context); output_tokens uses total_token_usage (cumulative)."""
+    file_path = tmp_path / "tokens.jsonl"
+    write_jsonl(
+        file_path,
+        [
+            {
+                "type": "session_meta",
+                "timestamp": "2025-02-01T00:00:00Z",
+                "payload": {"id": "sess-tok", "cwd": "/repo", "model": "gpt-4.1"},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2025-02-01T00:00:01Z",
+                "payload": {"type": "user_message", "message": "hello"},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2025-02-01T00:00:02Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 500,
+                            "output_tokens": 100,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 500,
+                            "output_tokens": 100,
+                        },
+                    },
+                },
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2025-02-01T00:00:03Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "input_tokens": 800,
+                            "output_tokens": 150,
+                        },
+                        "total_token_usage": {
+                            "input_tokens": 1300,
+                            "output_tokens": 250,
+                        },
+                    },
+                },
+            },
+        ],
+    )
+
+    data = codex.CodexProvider()._parse_session_file(file_path)
+    assert data is not None
+    # input_tokens = last entry's last_token_usage (context size of final turn)
+    assert data["input_tokens"] == 800
+    # output_tokens = last entry's total_token_usage (cumulative output)
+    assert data["output_tokens"] == 250
+    # cumulative_input_tokens = last entry's total_token_usage (cumulative input)
+    assert data["cumulative_input_tokens"] == 1300
+
+
+def test_parse_session_file_no_token_count(tmp_path: Path) -> None:
+    """Sessions without token_count events have None token fields."""
+    file_path = tmp_path / "notokens.jsonl"
+    write_jsonl(
+        file_path,
+        [
+            {
+                "type": "session_meta",
+                "timestamp": "2025-02-01T00:00:00Z",
+                "payload": {"id": "sess-no", "cwd": "/repo", "model": "gpt-4.1"},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2025-02-01T00:00:01Z",
+                "payload": {"type": "user_message", "message": "hello"},
+            },
+        ],
+    )
+
+    data = codex.CodexProvider()._parse_session_file(file_path)
+    assert data is not None
+    assert data["input_tokens"] is None
+    assert data["output_tokens"] is None
+
+
 def test_delete_session_unlinks_source_file(tmp_path: Path) -> None:
     """Codex delete_session removes the entire session JSONL file."""
     file_path = tmp_path / "session.jsonl"

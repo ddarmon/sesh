@@ -286,6 +286,83 @@ def test_get_messages_accepts_events_jsonl_path(tmp_copilot_dir: Path) -> None:
     assert msgs[0].content == "hello"
 
 
+# --- Token usage ---
+
+
+def test_get_sessions_extracts_token_usage(tmp_copilot_dir: Path) -> None:
+    """Token usage is summed across all models in session.shutdown modelMetrics."""
+    s_dir = tmp_copilot_dir / "tok-1"
+    write_workspace_yaml(s_dir / "workspace.yaml", {
+        "id": "tok-1",
+        "cwd": "/repo",
+        "summary": "Token test",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z",
+    })
+    write_copilot_events(s_dir / "events.jsonl", [
+        {"type": "user.message", "data": {"content": "hi"}, "timestamp": "2026-01-01T00:00:01Z"},
+        {"type": "assistant.message", "data": {"content": "hello"}, "timestamp": "2026-01-01T00:00:02Z"},
+        {
+            "type": "session.shutdown",
+            "data": {
+                "currentModel": "gpt-5",
+                "modelMetrics": {
+                    "gpt-5": {
+                        "requests": {"count": 5, "cost": 1},
+                        "usage": {
+                            "inputTokens": 10000,
+                            "outputTokens": 2000,
+                            "cacheReadTokens": 5000,
+                            "cacheWriteTokens": 1000,
+                        },
+                    },
+                    "gpt-4.1": {
+                        "requests": {"count": 2, "cost": 0},
+                        "usage": {
+                            "inputTokens": 3000,
+                            "outputTokens": 500,
+                            "cacheReadTokens": 1000,
+                            "cacheWriteTokens": 0,
+                        },
+                    },
+                },
+            },
+            "timestamp": "2026-01-02T00:00:00Z",
+        },
+    ])
+
+    provider = CopilotProvider()
+    sessions = provider.get_sessions("/repo")
+    assert len(sessions) == 1
+    s = sessions[0]
+    # gpt-5: 10000+5000+1000=16000 input, 2000 output
+    # gpt-4.1: 3000+1000+0=4000 input, 500 output
+    assert s.input_tokens == 20000
+    assert s.output_tokens == 2500
+    # Copilot only has cumulative totals
+    assert s.cumulative_input_tokens == 20000
+
+
+def test_get_sessions_no_shutdown_returns_none(tmp_copilot_dir: Path) -> None:
+    """Sessions without a shutdown event have None token fields."""
+    s_dir = tmp_copilot_dir / "no-tok"
+    write_workspace_yaml(s_dir / "workspace.yaml", {
+        "id": "no-tok",
+        "cwd": "/repo",
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    })
+    write_copilot_events(s_dir / "events.jsonl", [
+        {"type": "user.message", "data": {"content": "hi"}, "timestamp": "2026-01-01T00:00:01Z"},
+    ])
+
+    provider = CopilotProvider()
+    sessions = provider.get_sessions("/repo")
+    assert len(sessions) == 1
+    assert sessions[0].input_tokens is None
+    assert sessions[0].output_tokens is None
+
+
 # --- Deletion ---
 
 

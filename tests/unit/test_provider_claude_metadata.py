@@ -278,6 +278,100 @@ def test_delete_session_removes_matching_lines_and_preserves_others(tmp_path: Pa
     assert "not json" in text
 
 
+def test_get_sessions_extracts_token_usage(tmp_claude_dir) -> None:
+    """input_tokens uses the last assistant message (context size); output_tokens sums all."""
+    project_path = "/Users/me/repo"
+    project_dir = tmp_claude_dir / "projects" / claude.encode_claude_path(project_path)
+    project_dir.mkdir(parents=True)
+
+    write_jsonl(
+        project_dir / "sessions.jsonl",
+        [
+            {
+                "sessionId": "tok-1",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "uuid": "root-1",
+                "parentUuid": None,
+                "cwd": project_path,
+                "message": {"role": "user", "content": "hello"},
+            },
+            {
+                "sessionId": "tok-1",
+                "timestamp": "2025-01-01T00:00:01Z",
+                "message": {
+                    "role": "assistant",
+                    "content": "hi",
+                    "model": "claude-sonnet",
+                    "usage": {
+                        "input_tokens": 100,
+                        "cache_creation_input_tokens": 50,
+                        "cache_read_input_tokens": 200,
+                        "output_tokens": 30,
+                    },
+                },
+            },
+            {
+                "sessionId": "tok-1",
+                "timestamp": "2025-01-01T00:00:02Z",
+                "message": {
+                    "role": "assistant",
+                    "content": "more",
+                    "model": "claude-sonnet",
+                    "usage": {
+                        "input_tokens": 400,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 300,
+                        "output_tokens": 70,
+                    },
+                },
+            },
+        ],
+    )
+
+    provider = claude.ClaudeProvider()
+    sessions = provider.get_sessions(project_path)
+    assert len(sessions) == 1
+    s = sessions[0]
+    # input_tokens = last assistant's usage (400+0+300=700), not cumulative
+    # output_tokens = sum of all (30+70=100)
+    assert s.input_tokens == 700
+    assert s.output_tokens == 100
+    # cumulative_input_tokens = sum across all turns (350+700=1050)
+    assert s.cumulative_input_tokens == 1050
+
+
+def test_get_sessions_no_usage_returns_none(tmp_claude_dir) -> None:
+    """Sessions without usage data have None token fields."""
+    project_path = "/Users/me/repo"
+    project_dir = tmp_claude_dir / "projects" / claude.encode_claude_path(project_path)
+    project_dir.mkdir(parents=True)
+
+    write_jsonl(
+        project_dir / "sessions.jsonl",
+        [
+            {
+                "sessionId": "no-tok",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "uuid": "root-1",
+                "parentUuid": None,
+                "cwd": project_path,
+                "message": {"role": "user", "content": "hello"},
+            },
+            {
+                "sessionId": "no-tok",
+                "timestamp": "2025-01-01T00:00:01Z",
+                "message": {"role": "assistant", "content": "hi", "model": "claude-sonnet"},
+            },
+        ],
+    )
+
+    provider = claude.ClaudeProvider()
+    sessions = provider.get_sessions(project_path)
+    assert len(sessions) == 1
+    assert sessions[0].input_tokens is None
+    assert sessions[0].output_tokens is None
+
+
 def test_delete_session_unlinks_empty_file(tmp_path: Path) -> None:
     """If deleting all lines from a JSONL file, the empty file is removed."""
     project_dir = tmp_path / "claude-project"

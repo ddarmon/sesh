@@ -25,6 +25,9 @@ def test_session_serialization_roundtrip(tmp_cache_dir) -> None:
         model="gpt-4.1",
         source_path="/tmp/session.jsonl",
         timestamp=datetime(2025, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+        input_tokens=15000,
+        output_tokens=3000,
+        cumulative_input_tokens=150000,
     )
     payload = cache._session_to_dict(session)
     rebuilt = cache._dict_to_session(payload)
@@ -60,6 +63,9 @@ def test_dict_to_session_missing_optional_fields(tmp_cache_dir) -> None:
     assert session.model is None
     assert session.source_path is None
     assert session.message_count == 0
+    assert session.input_tokens is None
+    assert session.output_tokens is None
+    assert session.cumulative_input_tokens is None
 
 
 def test_dict_to_session_parses_optional_start_timestamp(tmp_cache_dir) -> None:
