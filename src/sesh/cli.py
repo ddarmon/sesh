@@ -457,29 +457,18 @@ def cmd_resume(args: argparse.Namespace) -> None:
     session_data = matches[0]
 
     from sesh.cache import _dict_to_session
+    from sesh.resume import is_resumable, resume_argv, resume_binary_name
     session = _dict_to_session(session_data)
 
-    # Cursor IDE sessions (txt transcripts) can't be resumed from CLI
-    from sesh.models import Provider
-    if (
-        session.provider == Provider.CURSOR
-        and session.source_path
-        and session.source_path.endswith(".txt")
-    ):
+    if not is_resumable(session):
         print(
             "Cursor IDE sessions cannot be resumed from the CLI.",
             file=sys.stderr,
         )
         raise SystemExit(1)
 
-    commands: dict[Provider, tuple[str, list[str]]] = {
-        Provider.CLAUDE: ("claude", ["claude", "--resume", session.id]),
-        Provider.CODEX: ("codex", ["codex", "resume", session.id]),
-        Provider.CURSOR: ("agent", ["agent", f"--resume={session.id}"]),
-        Provider.COPILOT: ("copilot", ["copilot", f"--resume={session.id}"]),
-    }
-
-    binary, cmd_args = commands[session.provider]
+    cmd_args = resume_argv(session.provider, session.id)
+    binary = resume_binary_name(session.provider)
     binary_path = shutil.which(binary)
     if binary_path is None:
         print(
@@ -554,6 +543,103 @@ def cmd_export(args: argparse.Namespace) -> None:
         print(format_session_markdown(session, messages))
 
 
+def cmd_snapshot_save(args: argparse.Namespace) -> None:
+    """Capture the current Terminal state and save it to disk."""
+    from sesh import snapshots
+
+    try:
+        snap = snapshots.capture()
+    except snapshots.SnapshotsUnsupportedError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+
+    path = snapshots.save(snap)
+    resumable = sum(1 for t in snap.tabs if t.resume is not None)
+    _json_out({
+        "id": snap.id,
+        "path": str(path),
+        "tab_count": len(snap.tabs),
+        "resumable": resumable,
+    })
+
+
+def cmd_snapshot_list(args: argparse.Namespace) -> None:
+    """Print all stored snapshots as JSON, newest first."""
+    from sesh import snapshots
+
+    summaries = snapshots.list_snapshots()
+    _json_out([s.to_dict() for s in summaries])
+
+
+def cmd_snapshot_show(args: argparse.Namespace) -> None:
+    """Print the full JSON for one snapshot."""
+    from sesh import snapshots
+
+    try:
+        snap = snapshots.load(args.snapshot_id)
+    except snapshots.SnapshotsNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+    except snapshots.SnapshotsSchemaError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+
+    _json_out(snap.to_dict())
+
+
+def cmd_snapshot_reopen(args: argparse.Namespace) -> None:
+    """Reopen tabs from a stored snapshot."""
+    from sesh import snapshots
+
+    try:
+        snap = snapshots.load(args.snapshot_id)
+    except snapshots.SnapshotsNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+
+    try:
+        report = snapshots.restore(
+            snap,
+            include_shells=args.all,
+            dry_run=args.dry_run,
+        )
+    except snapshots.SnapshotsUnsupportedError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+
+    _json_out(report.to_dict())
+
+
+def cmd_snapshot_delete(args: argparse.Namespace) -> None:
+    """Remove a stored snapshot."""
+    from sesh import snapshots
+
+    try:
+        snap = snapshots.load(args.snapshot_id)
+    except snapshots.SnapshotsNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+
+    info = {
+        "id": snap.id,
+        "created_at": snap.created_at,
+        "host": snap.host,
+        "tab_count": len(snap.tabs),
+    }
+
+    if args.dry_run:
+        _json_out({"would_delete": info, "dry_run": True})
+        return
+
+    _confirm_destructive(
+        f"Delete snapshot '{snap.id}' ({len(snap.tabs)} tabs)?",
+        force=args.force,
+    )
+
+    snapshots.delete(args.snapshot_id)
+    _json_out({"deleted": info})
+
+
 def cmd_move(args: argparse.Namespace) -> None:
     """Move a project and rewrite provider metadata."""
     from sesh.move import move_project
@@ -615,7 +701,8 @@ def main() -> None:
             "  sesh clean <query>      # delete sessions matching a query\n"
             "  sesh resume <id>        # resume a session in its provider's CLI\n"
             "  sesh export <id>        # export a session to Markdown or JSON\n"
-            "  sesh move <old> <new>   # move project path + update metadata"
+            "  sesh move <old> <new>   # move project path + update metadata\n"
+            "  sesh snapshot save      # capture Terminal.app tabs (macOS only)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -877,6 +964,65 @@ def main() -> None:
         help="Show what would change without modifying anything",
     )
 
+    # snapshot
+    p_snapshot = sub.add_parser(
+        "snapshot",
+        help="Manage Terminal.app tab snapshots (macOS only)",
+        description=(
+            "Capture and reopen Terminal.app tabs running coding-agent sessions. "
+            "Resume metadata is resolved at capture time so reopens are deterministic."
+        ),
+    )
+    snap_sub = p_snapshot.add_subparsers(dest="snapshot_action", required=True)
+
+    snap_sub.add_parser(
+        "save",
+        help="Capture a new snapshot of the current Terminal state",
+    )
+
+    snap_sub.add_parser(
+        "list",
+        help="List stored snapshots as JSON (newest first)",
+    )
+
+    p_snap_show = snap_sub.add_parser(
+        "show",
+        help="Print the full JSON for a snapshot",
+    )
+    p_snap_show.add_argument("snapshot_id", help="Snapshot ID to show")
+
+    p_snap_reopen = snap_sub.add_parser(
+        "reopen",
+        help="Reopen Terminal tabs from a snapshot",
+    )
+    p_snap_reopen.add_argument("snapshot_id", help="Snapshot ID to reopen")
+    p_snap_reopen.add_argument(
+        "--all",
+        action="store_true",
+        help="Also reopen plain shell tabs (no resumable session)",
+    )
+    p_snap_reopen.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the restore plan without spawning any tabs",
+    )
+
+    p_snap_delete = snap_sub.add_parser(
+        "delete",
+        help="Delete a stored snapshot",
+    )
+    p_snap_delete.add_argument("snapshot_id", help="Snapshot ID to delete")
+    p_snap_delete.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip confirmation prompt (required for non-interactive use)",
+    )
+    p_snap_delete.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be deleted without actually deleting",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -903,6 +1049,14 @@ def main() -> None:
         cmd_export(args)
     elif args.command == "move":
         cmd_move(args)
+    elif args.command == "snapshot":
+        {
+            "save": cmd_snapshot_save,
+            "list": cmd_snapshot_list,
+            "show": cmd_snapshot_show,
+            "reopen": cmd_snapshot_reopen,
+            "delete": cmd_snapshot_delete,
+        }[args.snapshot_action](args)
 
 
 if __name__ == "__main__":

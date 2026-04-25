@@ -89,6 +89,52 @@ def write_copilot_events(path: Path, events: list[dict]) -> None:
             f.write(json.dumps(event) + "\n")
 
 
+def make_snapshot_resume(**overrides):
+    """Build a SnapshotResume for tests."""
+    from sesh.snapshots import SnapshotResume
+
+    data = {
+        "provider": Provider.CLAUDE,
+        "session_id": "abc-123",
+        "cmd_args": ["claude", "--resume", "abc-123"],
+        "source": "explicit",
+        "matched_phrase": None,
+    }
+    data.update(overrides)
+    return SnapshotResume(**data)
+
+
+def make_snapshot_tab(**overrides):
+    """Build a SnapshotTab for tests."""
+    from sesh.snapshots import SnapshotTab
+
+    data = {
+        "window": 1,
+        "tab": 1,
+        "tty": "/dev/ttys001",
+        "cwd": "/tmp/proj",
+        "scrollback_tail": "",
+        "resume": None,
+    }
+    data.update(overrides)
+    return SnapshotTab(**data)
+
+
+def make_snapshot(**overrides):
+    """Build a Snapshot for tests."""
+    from sesh.snapshots import SCHEMA_VERSION, Snapshot
+
+    data = {
+        "schema_version": SCHEMA_VERSION,
+        "id": "snapshot-20260424-152330",
+        "created_at": "2026-04-24T15:23:30-04:00",
+        "host": "test-host",
+        "tabs": [],
+    }
+    data.update(overrides)
+    return Snapshot(**data)
+
+
 def make_index(projects, sessions) -> dict:
     from sesh.cache import _session_to_dict
 

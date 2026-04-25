@@ -69,6 +69,27 @@ def _install_textual_stubs() -> None:
     class Static(_Base):
         pass
 
+    class Checkbox(_Base):
+        class Changed:
+            pass
+
+    class ListItem(_Base):
+        pass
+
+    class ListView(_Base):
+        class Selected:
+            pass
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.index = None
+
+        def clear(self):
+            pass
+
+        def append(self, _item):
+            pass
+
     app_mod.App = App
     app_mod.ComposeResult = list
     binding_mod.Binding = Binding
@@ -76,9 +97,12 @@ def _install_textual_stubs() -> None:
     containers_mod.Vertical = Vertical
     screen_mod.ModalScreen = ModalScreen
     widgets_mod.Button = Button
+    widgets_mod.Checkbox = Checkbox
     widgets_mod.Header = Header
     widgets_mod.Input = Input
     widgets_mod.Label = Label
+    widgets_mod.ListItem = ListItem
+    widgets_mod.ListView = ListView
     widgets_mod.RichLog = RichLog
     widgets_mod.Static = Static
     widgets_mod.Tree = Tree
@@ -201,6 +225,56 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         "cursor_chats": cursor_chats,
         "copilot_sessions": copilot_sessions,
     }
+
+
+@pytest.fixture()
+def tmp_snapshots_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Redirect snapshot storage to a temp dir for tests."""
+    from sesh import paths
+    from sesh.snapshots import core as snapshots_core
+
+    snap_dir = tmp_path / "data" / "sesh" / "snapshots"
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(paths, "SNAPSHOTS_DIR", snap_dir)
+    monkeypatch.setattr(snapshots_core, "SNAPSHOTS_DIR", snap_dir)
+    return snap_dir
+
+
+@pytest.fixture()
+def fake_backend(monkeypatch: pytest.MonkeyPatch):
+    """Replace get_backend() with a controllable in-memory backend."""
+    from sesh.snapshots import backend as backend_mod
+    from sesh.snapshots.backend import RestoreOutcome
+
+    class FakeBackend:
+        name = "fake"
+
+        def __init__(self) -> None:
+            self.captured_tabs: list = []
+            self.restore_outcome = RestoreOutcome(launched=0, fellback=False, note=None)
+            self.restore_calls: list = []
+
+        def is_supported(self) -> bool:
+            return True
+
+        def capture(self):
+            return list(self.captured_tabs)
+
+        def restore(self, items):
+            self.restore_calls.append(list(items))
+            outcome = self.restore_outcome
+            return RestoreOutcome(
+                launched=outcome.launched or len(items),
+                fellback=outcome.fellback,
+                note=outcome.note,
+            )
+
+    fake = FakeBackend()
+    monkeypatch.setattr(backend_mod, "get_backend", lambda: fake)
+    # core.py imported get_backend at import time; override there too.
+    from sesh.snapshots import core as snapshots_core
+    monkeypatch.setattr(snapshots_core, "get_backend", lambda: fake)
+    return fake
 
 
 @pytest.fixture()

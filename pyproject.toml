@@ -1,6 +1,6 @@
 [project]
 name = "sesh"
-version = "0.7.0"
+version = "0.8.0"
 description = "Browse and search Claude Code, Codex, Cursor, and Copilot sessions in the terminal"
 license = "MIT"
 readme = "README.md"

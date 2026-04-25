@@ -85,6 +85,7 @@ toggles -- persist across launches.
 | `t`      | Toggle tool call/result visibility                      |
 | `T`      | Toggle thinking/reasoning visibility                    |
 | `F`      | Toggle fullscreen message pane                          |
+| `S`      | Open Terminal-tab snapshots (macOS only)                |
 | `?`      | Show keyboard shortcuts help                            |
 | `q`      | Quit                                                    |
 
@@ -144,6 +145,12 @@ sesh export <session-id> --full           # export with tools + thinking
 sesh move /old/path /new/path --dry-run   # preview project move changes
 sesh move /old/path /new/path             # full move + metadata rewrite
 sesh move /old/path /new/path --metadata-only  # metadata rewrite only
+sesh snapshot save                         # capture Terminal.app tabs
+sesh snapshot list                         # list saved snapshots
+sesh snapshot show <id>                    # full snapshot JSON
+sesh snapshot reopen <id> --dry-run        # preview restore plan
+sesh snapshot reopen <id> --all            # reopen incl. plain shells
+sesh snapshot delete <id> --force          # delete a snapshot
 ```
 
 Run `sesh --help` or `sesh <command> --help` for full details.
@@ -164,6 +171,35 @@ sesh move <old-path> <new-path>
 sesh move <old-path> <new-path> --metadata-only
 sesh move <old-path> <new-path> --dry-run
 ```
+
+### Terminal tab snapshots (macOS only)
+
+Press `Shift+S` in the TUI (or use `sesh snapshot save`) to capture
+every open Terminal.app tab --- its working directory and the resume
+command for any coding-agent session running inside it (Claude Code,
+Codex, Cursor, or Copilot). Reopen the snapshot later to restore the
+same set of tabs, each one resumed against the same session.
+
+Resume metadata is resolved at capture time: `sesh` first scans
+scrollback for explicit `claude --resume`, `codex resume`,
+`agent --resume=`, and `copilot --resume=` lines, then falls back to a
+ripgrep-based search across your indexed sessions when the explicit line
+has scrolled off. This means reopens are deterministic and fast.
+
+```
+sesh snapshot save                  # capture; prints id and counts
+sesh snapshot list                  # JSON array of saved snapshots
+sesh snapshot show <id>             # full snapshot JSON
+sesh snapshot reopen <id> --dry-run # preview restore plan
+sesh snapshot reopen <id>           # spawn one Terminal tab per session
+sesh snapshot reopen <id> --all     # also reopen plain shell tabs
+sesh snapshot delete <id> --force   # delete a saved snapshot
+```
+
+Snapshots live under `~/.local/share/sesh/snapshots/` (or
+`$XDG_DATA_HOME/sesh/snapshots/`). On platforms without Terminal.app
+support, the CLI exits with an error and the TUI shows the unsupported
+message in the status bar.
 
 ### Using with LLM agents
 
