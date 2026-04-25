@@ -93,6 +93,18 @@ def test_compose_command_returns_none_without_cwd() -> None:
     assert ta_mod._compose_command(item) is None
 
 
+def test_compose_command_shell_quotes_resume_args() -> None:
+    item = RestoreItem(
+        window=1,
+        tab=1,
+        cwd="/tmp/proj",
+        cmd_args=["claude", "--resume", "named session"],
+        label="x",
+    )
+    cmd = ta_mod._compose_command(item)
+    assert cmd == "cd '/tmp/proj' && claude --resume 'named session'"
+
+
 def test_restore_passes_commands_to_osascript(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 

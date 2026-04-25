@@ -10,9 +10,10 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 
-from sesh.app import HelpScreen, SeshApp, SessionTree
+from sesh import snapshots
+from sesh.app import HelpScreen, SeshApp, SessionTree, SnapshotPreviewScreen, SnapshotsScreen
 from sesh.models import Project, Provider
-from tests.helpers import make_session
+from tests.helpers import make_session, make_snapshot, make_snapshot_resume, make_snapshot_tab
 
 
 @pytest_asyncio.fixture()
@@ -274,6 +275,61 @@ async def test_help_screen_dismisses_on_question_mark(app):
     await pilot.pause()
 
     assert not any(isinstance(screen, HelpScreen) for screen in sesh_app.screen_stack)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_snapshots_screen_opens_with_bracketed_host(
+    app, tmp_snapshots_dir, monkeypatch
+):
+    """The snapshots modal should render summary labels literally, not as markup."""
+    sesh_app, pilot = app
+
+    monkeypatch.setattr("sesh.snapshots.backend.get_backend", lambda: object())
+    snap = make_snapshot(
+        host="host-name.local",
+        tabs=[make_snapshot_tab(resume=make_snapshot_resume())],
+    )
+    snapshots.save(snap)
+
+    await pilot.press("S")
+    await pilot.pause()
+
+    assert any(isinstance(screen, SnapshotsScreen) for screen in sesh_app.screen_stack)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_snapshot_preview_screen_renders_literal_bracketed_text(
+    app, tmp_snapshots_dir
+):
+    """Preview rows and warnings should render literal bracketed text without crashing."""
+    sesh_app, pilot = app
+
+    snap = make_snapshot(
+        host="different-host",
+        tabs=[
+            make_snapshot_tab(
+                cwd="/tmp/proj",
+                resume=make_snapshot_resume(
+                    provider=Provider.COPILOT,
+                    session_id="93f1d5c1-6794-4614-af5b-cccaa64f354b",
+                    cmd_args=[
+                        "copilot",
+                        "--resume=93f1d5c1-6794-4614-af5b-cccaa64f354b",
+                    ],
+                ),
+            ),
+        ],
+    )
+    snapshots.save(snap)
+
+    sesh_app.push_screen(SnapshotPreviewScreen(snap.id))
+    await pilot.pause()
+
+    assert any(
+        isinstance(screen, SnapshotPreviewScreen) for screen in sesh_app.screen_stack
+    )
 
 
 @pytest.mark.integration

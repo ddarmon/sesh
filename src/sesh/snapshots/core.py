@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 from dataclasses import dataclass, field
@@ -569,7 +570,7 @@ def _build_label(
 ) -> str:
     cwd_str = cwd or "(no cwd)"
     if cmd_args:
-        cmd_str = " ".join(cmd_args)
+        cmd_str = shlex.join(cmd_args)
         return f"Window {window}, Tab {tab}  {cwd_str}  [{cmd_str}]"
     return f"Window {window}, Tab {tab}  {cwd_str}  [shell]"
 

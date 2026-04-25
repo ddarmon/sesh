@@ -198,6 +198,31 @@ def test_build_restore_plan_preserves_window_tab_order(tmp_snapshots_dir: Path, 
     assert pairs == [(2, 1), (1, 3), (1, 1)]
 
 
+def test_build_restore_plan_label_shell_quotes_resume_command(
+    tmp_snapshots_dir: Path, monkeypatch
+) -> None:
+    snap = make_snapshot(
+        tabs=[
+            make_snapshot_tab(
+                window=1,
+                tab=1,
+                cwd="/tmp/proj",
+                resume=make_snapshot_resume(
+                    provider=Provider.CLAUDE,
+                    session_id="named session",
+                    cmd_args=["claude", "--resume", "named session"],
+                ),
+            ),
+        ],
+    )
+    monkeypatch.setattr("pathlib.Path.is_dir", lambda self: True)
+    monkeypatch.setattr("sesh.snapshots.core.shutil.which", lambda _: "/usr/bin/claude")
+
+    plan = snapshots.build_restore_plan(snap)
+
+    assert plan.items[0].label.endswith("[claude --resume 'named session']")
+
+
 def test_restore_dry_run_returns_plan_without_calling_backend(
     fake_backend, tmp_snapshots_dir: Path, monkeypatch
 ) -> None:

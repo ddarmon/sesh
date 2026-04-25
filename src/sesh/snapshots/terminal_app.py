@@ -10,6 +10,7 @@ that permission.
 from __future__ import annotations
 
 import platform
+import shlex
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -283,6 +284,6 @@ def _compose_command(item: "RestoreItem") -> str | None:
         return None
     cwd_quoted = "'" + item.cwd.replace("'", "'\\''") + "'"
     if item.cmd_args:
-        resume_str = " ".join(item.cmd_args)
+        resume_str = shlex.join(item.cmd_args)
         return f"cd {cwd_quoted} && {resume_str}"
     return f"cd {cwd_quoted}"

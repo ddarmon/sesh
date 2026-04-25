@@ -422,9 +422,9 @@ class SnapshotsScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="snapshots-dialog"):
             yield Label("Terminal Tab Snapshots", id="snapshots-title")
-            yield Label("", id="snapshots-empty")
+            yield Label("", id="snapshots-empty", markup=False)
             yield ListView(id="snapshots-list")
-            yield Label("", id="snapshots-status")
+            yield Label("", id="snapshots-status", markup=False)
             yield Label(
                 "c:Capture  Enter:Reopen  d:Delete  Esc:Close",
                 id="snapshots-footer",
@@ -458,7 +458,7 @@ class SnapshotsScreen(ModalScreen[None]):
         for summary in self._summaries:
             view.append(
                 ListItem(
-                    Label(self._format_summary(summary)),
+                    Label(self._format_summary(summary), markup=False),
                 )
             )
 
@@ -647,7 +647,7 @@ class SnapshotPreviewScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="preview-dialog"):
             yield Label(f"Reopen snapshot: {self.snapshot_id}", id="preview-title")
-            yield Label("", id="preview-warning")
+            yield Label("", id="preview-warning", markup=False)
             yield Vertical(id="preview-rows")
             yield Checkbox("Include plain shell tabs", id="preview-checkbox")
             with Horizontal(id="preview-buttons"):
@@ -691,7 +691,7 @@ class SnapshotPreviewScreen(ModalScreen):
             pass
 
         if not plan.items:
-            container.mount(Label("(no tabs in snapshot)", classes="preview-row"))
+            container.mount(Label("(no tabs in snapshot)", classes="preview-row", markup=False))
             return
 
         for item in plan.items:
@@ -700,7 +700,7 @@ class SnapshotPreviewScreen(ModalScreen):
             if item.reason_skipped:
                 text = f"{text}  — skipped: {item.reason_skipped}"
                 classes = "preview-row preview-row-skip"
-            container.mount(Label(text, classes=classes))
+            container.mount(Label(text, classes=classes, markup=False))
 
     def on_checkbox_changed(self, event) -> None:
         if getattr(getattr(event, "checkbox", None), "id", None) != "preview-checkbox":
