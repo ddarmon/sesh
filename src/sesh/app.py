@@ -14,7 +14,18 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Header, Input, Label, RichLog, Static, Tree
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Header,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    RichLog,
+    Static,
+    Tree,
+)
 
 from sesh.bookmarks import load_bookmarks, save_bookmarks
 from sesh.export import format_session_markdown
@@ -313,6 +324,7 @@ class HelpScreen(ModalScreen[None]):
                     ("t", "Toggle tool messages"),
                     ("T", "Toggle thinking messages"),
                     ("F", "Toggle fullscreen message pane"),
+                    ("S", "Open Terminal-tab snapshots (macOS)"),
                 ],
             ),
             (
@@ -345,6 +357,366 @@ class HelpScreen(ModalScreen[None]):
             yield Label("Press Esc or ? to close", id="help-footer")
 
     def action_dismiss_help(self) -> None:
+        self.dismiss(None)
+
+
+class SnapshotsScreen(ModalScreen[None]):
+    """Modal screen listing stored Terminal-tab snapshots."""
+
+    CSS = """
+    SnapshotsScreen {
+        align: center middle;
+    }
+
+    #snapshots-dialog {
+        width: 70;
+        height: auto;
+        max-height: 80%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #snapshots-title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+
+    #snapshots-list {
+        height: 12;
+        margin-top: 1;
+    }
+
+    #snapshots-empty {
+        height: 3;
+        margin-top: 1;
+        color: $text-muted;
+        text-align: center;
+    }
+
+    #snapshots-status {
+        margin-top: 1;
+        height: 1;
+        color: $text-muted;
+    }
+
+    #snapshots-footer {
+        margin-top: 1;
+        text-align: center;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss_screen", "Close", show=False),
+        Binding("c", "capture", "Capture", show=False),
+        Binding("d", "delete_snapshot", "Delete", show=False),
+        Binding("enter", "preview", "Preview", show=False),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._summaries: list = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="snapshots-dialog"):
+            yield Label("Terminal Tab Snapshots", id="snapshots-title")
+            yield Label("", id="snapshots-empty", markup=False)
+            yield ListView(id="snapshots-list")
+            yield Label("", id="snapshots-status", markup=False)
+            yield Label(
+                "c:Capture  Enter:Reopen  d:Delete  Esc:Close",
+                id="snapshots-footer",
+            )
+
+    def on_mount(self) -> None:
+        self._refresh_list()
+
+    def _refresh_list(self) -> None:
+        from sesh import snapshots
+
+        try:
+            self._summaries = snapshots.list_snapshots()
+        except Exception as exc:
+            self._summaries = []
+            self._set_status(f"Error: {exc}")
+            return
+
+        view = self.query_one("#snapshots-list", ListView)
+        empty = self.query_one("#snapshots-empty", Label)
+        try:
+            view.clear()
+        except Exception:
+            pass
+
+        if not self._summaries:
+            empty.update("No snapshots saved yet. Press 'c' to capture.")
+            return
+
+        empty.update("")
+        for summary in self._summaries:
+            view.append(
+                ListItem(
+                    Label(self._format_summary(summary), markup=False),
+                )
+            )
+
+    @staticmethod
+    def _format_summary(summary) -> str:
+        ts = (summary.created_at or "").replace("T", " ")[:19]
+        host = summary.host or "?"
+        return (
+            f"{ts}  {summary.tab_count} tabs "
+            f"({summary.resumable_count} sessions)  [{host}]"
+        )
+
+    def _set_status(self, text: str) -> None:
+        self.query_one("#snapshots-status", Label).update(text)
+
+    def _selected_summary(self):
+        view = self.query_one("#snapshots-list", ListView)
+        idx = getattr(view, "index", None)
+        if idx is None or idx < 0 or idx >= len(self._summaries):
+            return None
+        return self._summaries[idx]
+
+    def action_dismiss_screen(self) -> None:
+        self.dismiss(None)
+
+    def action_capture(self) -> None:
+        self._set_status("Capturing tabs (this may take a moment)...")
+        self.run_worker(self._do_capture, thread=True, exclusive=True, group="snapshots-capture")
+
+    def _do_capture(self) -> None:
+        from sesh import snapshots
+
+        try:
+            snap = snapshots.capture()
+            snapshots.save(snap)
+        except snapshots.SnapshotsUnsupportedError as exc:
+            self.app.call_from_thread(self._set_status, str(exc))
+            return
+        except Exception as exc:
+            self.app.call_from_thread(self._set_status, f"Capture failed: {exc}")
+            return
+
+        def _after():
+            self._refresh_list()
+            self._set_status(
+                f"Saved {snap.id} ({len(snap.tabs)} tabs, "
+                f"{sum(1 for t in snap.tabs if t.resume) } resumable)"
+            )
+
+        self.app.call_from_thread(_after)
+
+    def action_preview(self) -> None:
+        summary = self._selected_summary()
+        if summary is None:
+            return
+        self.app.push_screen(
+            SnapshotPreviewScreen(summary.id),
+            lambda result: self._handle_preview_result(summary.id, result),
+        )
+
+    def on_list_view_selected(self, event) -> None:
+        # Allow click/Enter selection from the list to preview as well.
+        self.action_preview()
+
+    def _handle_preview_result(self, snapshot_id: str, result) -> None:
+        from sesh import snapshots
+
+        if result is None or not getattr(result, "confirmed", False):
+            return
+
+        include_shells = bool(getattr(result, "include_shells", False))
+        self._set_status(f"Reopening {snapshot_id}...")
+
+        def _do():
+            try:
+                snap = snapshots.load(snapshot_id)
+                report = snapshots.restore(snap, include_shells=include_shells)
+            except snapshots.SnapshotsUnsupportedError as exc:
+                self.app.call_from_thread(self._set_status, str(exc))
+                return
+            except Exception as exc:
+                self.app.call_from_thread(self._set_status, f"Reopen failed: {exc}")
+                return
+
+            note = report.note or ""
+            msg = f"Reopened {report.launched} tab(s)"
+            if report.fellback:
+                msg += " (separate windows — Accessibility denied)"
+            if note and not report.fellback:
+                msg += f" — {note}"
+            self.app.call_from_thread(self._set_status, msg)
+
+        self.run_worker(_do, thread=True, exclusive=True, group="snapshots-restore")
+
+    def action_delete_snapshot(self) -> None:
+        summary = self._selected_summary()
+        if summary is None:
+            return
+
+        def _on_confirm(confirmed):
+            if not confirmed:
+                return
+            try:
+                from sesh import snapshots
+
+                snapshots.delete(summary.id)
+            except Exception as exc:
+                self._set_status(f"Delete failed: {exc}")
+                return
+            self._refresh_list()
+            self._set_status(f"Deleted {summary.id}")
+
+        self.app.push_screen(
+            ConfirmDeleteScreen(f"Snapshot {summary.id}"),
+            _on_confirm,
+        )
+
+
+class SnapshotPreviewScreen(ModalScreen):
+    """Preview the restore plan for a snapshot before reopening tabs."""
+
+    CSS = """
+    SnapshotPreviewScreen {
+        align: center middle;
+    }
+
+    #preview-dialog {
+        width: 90;
+        height: auto;
+        max-height: 80%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #preview-title {
+        text-align: center;
+        text-style: bold;
+        padding-bottom: 1;
+    }
+
+    #preview-warning {
+        color: $warning;
+        margin-bottom: 1;
+    }
+
+    #preview-rows {
+        height: auto;
+        max-height: 14;
+        margin-top: 1;
+    }
+
+    .preview-row {
+        padding: 0 1;
+    }
+
+    .preview-row-skip {
+        color: $text-muted;
+    }
+
+    #preview-checkbox {
+        margin-top: 1;
+    }
+
+    #preview-buttons {
+        margin-top: 1;
+        height: 3;
+        align: center middle;
+    }
+
+    #preview-buttons Button {
+        margin: 0 1;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss_screen", "Cancel", show=False),
+    ]
+
+    def __init__(self, snapshot_id: str) -> None:
+        super().__init__()
+        self.snapshot_id = snapshot_id
+        self._snapshot = None
+        self._include_shells = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="preview-dialog"):
+            yield Label(f"Reopen snapshot: {self.snapshot_id}", id="preview-title")
+            yield Label("", id="preview-warning", markup=False)
+            yield Vertical(id="preview-rows")
+            yield Checkbox("Include plain shell tabs", id="preview-checkbox")
+            with Horizontal(id="preview-buttons"):
+                yield Button("Reopen", variant="primary", id="preview-confirm")
+                yield Button("Cancel", variant="default", id="preview-cancel")
+
+    def on_mount(self) -> None:
+        from sesh import snapshots
+
+        try:
+            self._snapshot = snapshots.load(self.snapshot_id)
+        except Exception as exc:
+            self.query_one("#preview-warning", Label).update(f"Error: {exc}")
+            return
+
+        if self._snapshot.host:
+            import socket as _socket
+
+            if self._snapshot.host != _socket.gethostname():
+                self.query_one("#preview-warning", Label).update(
+                    f"[!] Captured on {self._snapshot.host}; paths may not exist"
+                )
+
+        self._render_rows()
+
+    def _render_rows(self) -> None:
+        from sesh import snapshots as _snapshots
+
+        if self._snapshot is None:
+            return
+
+        plan = _snapshots.build_restore_plan(
+            self._snapshot, include_shells=self._include_shells
+        )
+
+        container = self.query_one("#preview-rows", Vertical)
+        try:
+            for child in list(container.children):
+                child.remove()
+        except Exception:
+            pass
+
+        if not plan.items:
+            container.mount(Label("(no tabs in snapshot)", classes="preview-row", markup=False))
+            return
+
+        for item in plan.items:
+            text = item.label
+            classes = "preview-row"
+            if item.reason_skipped:
+                text = f"{text}  — skipped: {item.reason_skipped}"
+                classes = "preview-row preview-row-skip"
+            container.mount(Label(text, classes=classes, markup=False))
+
+    def on_checkbox_changed(self, event) -> None:
+        if getattr(getattr(event, "checkbox", None), "id", None) != "preview-checkbox":
+            return
+        self._include_shells = bool(getattr(event, "value", False))
+        self._render_rows()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        from sesh.snapshots import PreviewResult
+
+        if event.button.id == "preview-confirm":
+            self.dismiss(PreviewResult(confirmed=True, include_shells=self._include_shells))
+        else:
+            self.dismiss(None)
+
+    def action_dismiss_screen(self) -> None:
         self.dismiss(None)
 
 
@@ -436,6 +808,7 @@ class SeshApp(App):
         Binding("t", "toggle_tools", "Tools"),
         Binding("T", "toggle_thinking", "Thinking", key_display="T"),
         Binding("F", "toggle_fullscreen", "Fullscreen", key_display="F"),
+        Binding("S", "show_snapshots", "Snapshots", key_display="S"),
         Binding("question_mark", "show_help", "Help", key_display="?"),
     ]
 
@@ -877,6 +1250,18 @@ class SeshApp(App):
         """Show keyboard shortcuts help."""
         self.push_screen(HelpScreen())
 
+    def action_show_snapshots(self) -> None:
+        """Open the Terminal-tab snapshots modal (macOS only)."""
+        from sesh.snapshots.backend import get_backend
+
+        if get_backend() is None:
+            self._set_status(
+                "Terminal.app snapshots are macOS-only — "
+                "no supported terminal backend on this platform"
+            )
+            return
+        self.push_screen(SnapshotsScreen())
+
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         """Load messages when a session or search result node is selected."""
         data = event.node.data
@@ -1257,24 +1642,13 @@ class SeshApp(App):
     @staticmethod
     def _resume_command(session: SessionMeta) -> tuple[list[str], str] | None:
         """Return (cmd_args, cwd) to resume a session, or None if the CLI is missing."""
-        # Cursor IDE sessions (txt transcripts) can't be resumed from CLI
-        if (
-            session.provider == Provider.CURSOR
-            and session.source_path
-            and session.source_path.endswith(".txt")
-        ):
-            return None
+        from sesh.resume import is_resumable, resume_argv, resume_binary_available
 
-        commands: dict[Provider, tuple[str, list[str]]] = {
-            Provider.CLAUDE: ("claude", ["claude", "--resume", session.id]),
-            Provider.CODEX: ("codex", ["codex", "resume", session.id]),
-            Provider.CURSOR: ("agent", ["agent", f"--resume={session.id}"]),
-            Provider.COPILOT: ("copilot", ["copilot", f"--resume={session.id}"]),
-        }
-        binary, args = commands[session.provider]
-        if shutil.which(binary) is None:
+        if not is_resumable(session):
             return None
-        return args, session.project_path
+        if not resume_binary_available(session.provider):
+            return None
+        return resume_argv(session.provider, session.id), session.project_path
 
     def action_move_project(self) -> None:
         """Prompt to move the selected project and rewrite metadata."""

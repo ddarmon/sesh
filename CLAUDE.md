@@ -198,9 +198,65 @@ the index, then query it.
 | `sesh resume <id> [--provider NAME]`                                                                      | Resume a session in its provider's CLI   |
 | `sesh export <id> [--provider NAME] [--format md/json] [--include-tools] [--include-thinking] [--full]`   | Export a session to Markdown or JSON     |
 | `sesh move <old> <new> [--metadata-only] [--dry-run]`                                                     | Move project path and update metadata    |
+| `sesh snapshot save`                                                                                      | Capture Terminal.app tabs (macOS only)   |
+| `sesh snapshot list`                                                                                      | List stored snapshots                    |
+| `sesh snapshot show <id>`                                                                                 | Print full snapshot JSON                 |
+| `sesh snapshot reopen <id> [--all] [--dry-run]`                                                           | Reopen Terminal tabs from a snapshot     |
+| `sesh snapshot delete <id> [--force] [--dry-run]`                                                         | Delete a stored snapshot                 |
 
 The index is stored at `~/.cache/sesh/index.json` by default (or
 `$XDG_CACHE_HOME/sesh/index.json`).
+
+## Terminal tab snapshots
+
+`Shift+S` in the TUI (or `sesh snapshot save` on the CLI) captures the
+state of every open Terminal.app tab --- its window/tab index, working
+directory, scrollback tail, and the resume command for any coding-agent
+session running in that tab. `sesh snapshot reopen <id>` respawns those
+tabs, each one running its resume command in its original CWD. Snapshots
+are macOS-only in v1; the gate lives in
+`sesh.snapshots.backend.get_backend()` (returns `None` off Darwin).
+
+Layout:
+
+-   `src/sesh/resume.py` -- shared resume-command mapping
+    (`RESUME_COMMANDS`, `is_resumable`, `resume_argv`,
+    `resume_binary_available`). Used by the CLI, the TUI, and the
+    snapshot subsystem. PATH-presence is decoupled from resumability so
+    capture can persist `cmd_args` even when the CLI isn't installed at
+    snapshot time.
+-   `src/sesh/snapshots/core.py` -- backend-agnostic dataclasses and
+    JSON I/O (`Snapshot`, `SnapshotTab`, `SnapshotResume`,
+    `RestorePlan`, `RestoreReport`), `capture` / `save` / `load` /
+    `list_snapshots` / `delete` / `build_restore_plan` / `restore`, and
+    resume-info resolution (explicit-line parsing then ripgrep-based
+    search recovery).
+-   `src/sesh/snapshots/backend.py` -- `TerminalBackend` Protocol,
+    `CapturedTab` / `RestoreOutcome` dataclasses, and `get_backend()`.
+-   `src/sesh/snapshots/terminal_app.py` -- Darwin/Terminal.app backend.
+    `_run_osascript`, `_resolve_cwd` (via `ps` + `lsof`), and
+    AppleScript snippets for capture and restore.
+
+Resume metadata is resolved at **save time**, not at restore time:
+
+1.  Scrollback is scanned for the LAST explicit `claude --resume <id>`,
+    `codex resume <id>`, `agent --resume=<id>`, or
+    `copilot --resume=<id>` line (`_parse_explicit_resume`).
+2.  If no explicit line is found, distinctive scrollback phrases are fed
+    to `sesh.search.ripgrep_search` until one returns a result whose
+    `project_path` matches the tab's CWD (`_search_recover`).
+    Tie-breaker cascade: index mtime → on-disk file mtime → ripgrep
+    result order.
+
+Snapshot files live at `$XDG_DATA_HOME/sesh/snapshots/<id>.json`
+(default `~/.local/share/sesh/snapshots/`). Files include
+`schema_version` (currently `1`); loads of unsupported versions raise
+`SnapshotsSchemaError`.
+
+Tests stub `_run_osascript`, `_resolve_cwd`, and `ripgrep_search`; no
+real Terminal.app or `osascript` calls happen in the suite. The
+`fake_backend` and `tmp_snapshots_dir` fixtures in `tests/conftest.py`
+let cross-platform tests exercise the core, CLI, and TUI paths.
 
 ## Plans
 

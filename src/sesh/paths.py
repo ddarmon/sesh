@@ -20,5 +20,14 @@ def _xdg_config_home() -> Path:
     return Path.home() / ".config"
 
 
+def _xdg_data_home() -> Path:
+    val = os.environ.get("XDG_DATA_HOME", "")
+    if val and Path(val).is_absolute():
+        return Path(val)
+    return Path.home() / ".local" / "share"
+
+
 CACHE_DIR = _xdg_cache_home() / "sesh"
 CONFIG_DIR = _xdg_config_home() / "sesh"
+DATA_DIR = _xdg_data_home() / "sesh"
+SNAPSHOTS_DIR = DATA_DIR / "snapshots"
