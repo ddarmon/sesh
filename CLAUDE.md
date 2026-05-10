@@ -63,6 +63,13 @@ The app has three layers:
 | Codex    | `~/.codex/sessions/YYYY/MM/DD/`    | JSONL      |
 | Cursor   | `~/.cursor/chats/{md5}/*/store.db` | SQLite     |
 | Copilot  | `~/.copilot/session-state/{uuid}/` | YAML+JSONL |
+| pi       | `~/.pi/agent/sessions/{encoded}/`  | JSONL      |
+
+The pi encoded directory wraps the cwd with leading and trailing `--`
+(e.g. `/Users/me/proj` -\> `--Users-me-proj--`). Each session is one
+JSONL file named `{ISO-timestamp}_{uuid}.jsonl`; the first line is a
+`type:"session"` header carrying the cwd. The provider always recovers
+the real cwd from that header, never from the encoded folder name.
 
 App-managed files follow XDG base directories (absolute `XDG_*` env vars
 are honored; empty/relative values fall back to defaults):
@@ -89,6 +96,7 @@ CLI to resume the session. Per-provider commands:
 -   **Codex**: `codex resume <session-id>`
 -   **Cursor**: `agent --resume=<session-id>`
 -   **Copilot**: `copilot --resume=<session-id>`
+-   **pi**: `pi --session <session-id>`
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
@@ -122,6 +130,10 @@ discovery and cached alongside other metadata. Per-provider sources:
 -   **Copilot**: `session.shutdown` event's `modelMetrics` (sums
     `inputTokens` + `cacheReadTokens` + `cacheWriteTokens` across all
     models for input; `outputTokens` for output)
+-   **pi**: per-assistant-message `usage` blocks. `input_tokens` is the
+    LAST turn's `input + cacheRead + cacheWrite`; `output_tokens` sums
+    `output` across turns; `cumulative_input_tokens` sums per-turn
+    `input + cacheRead + cacheWrite` across the whole session
 -   **Cursor**: no token data available
 
 The `sesh sessions` CLI output includes three token fields:
@@ -155,6 +167,7 @@ the session is deleted via the provider's `delete_session` method:
 -   **Codex**: deletes the session JSONL file
 -   **Cursor**: removes the session directory (parent of `store.db`)
 -   **Copilot**: removes the session directory
+-   **pi**: deletes the session JSONL file
 
 CLI equivalents:
 
@@ -240,8 +253,8 @@ Layout:
 Resume metadata is resolved at **save time**, not at restore time:
 
 1.  Scrollback is scanned for the LAST explicit `claude --resume <id>`,
-    `codex resume <id>`, `agent --resume=<id>`, or
-    `copilot --resume=<id>` line (`_parse_explicit_resume`).
+    `codex resume <id>`, `agent --resume=<id>`, `copilot --resume=<id>`,
+    or `pi --session <id>` line (`_parse_explicit_resume`).
 2.  If no explicit line is found, distinctive scrollback phrases are fed
     to `sesh.search.ripgrep_search` until one returns a result whose
     `project_path` matches the tab's CWD (`_search_recover`).

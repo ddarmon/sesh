@@ -817,7 +817,7 @@ class SeshApp(App):
         self.projects: dict[str, Project] = {}
         self.sessions: dict[str, list[SessionMeta]] = {}
         self.current_filter: Provider | None = None
-        self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT]
+        self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT, Provider.PI]
         self.filter_index = 0
         self.sort_options = ["date", "name", "messages", "timeline"]
         self.sort_index = 0
@@ -1137,6 +1137,8 @@ class SeshApp(App):
                 badges.append("U")
             if Provider.COPILOT in prov_set:
                 badges.append("P")
+            if Provider.PI in prov_set:
+                badges.append("π")
             badge_str = ",".join(badges)
 
             label = f"{proj.display_name} [{badge_str}:{len(sessions)}]"
@@ -1297,6 +1299,9 @@ class SeshApp(App):
         elif session.provider == Provider.COPILOT:
             from sesh.providers.copilot import CopilotProvider
             messages = CopilotProvider().get_messages(session)
+        elif session.provider == Provider.PI:
+            from sesh.providers.pi import PiProvider
+            messages = PiProvider().get_messages(session)
         else:
             messages = []
 
@@ -1437,7 +1442,7 @@ class SeshApp(App):
         tree.clear()
 
         node = tree.root.add(f"Search: '{query}' ({len(results)} matches)", expand=True)
-        badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U", Provider.COPILOT: "P"}
+        badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U", Provider.COPILOT: "P", Provider.PI: "π"}
         for r in results[:100]:
             badge = badge_map.get(r.provider, "?")
             proj = self.projects.get(r.project_path)
@@ -1775,12 +1780,14 @@ class SeshApp(App):
         from sesh.providers.codex import CodexProvider
         from sesh.providers.copilot import CopilotProvider
         from sesh.providers.cursor import CursorProvider
+        from sesh.providers.pi import PiProvider
 
         providers_map: dict[Provider, type] = {
             Provider.CLAUDE: ClaudeProvider,
             Provider.CODEX: CodexProvider,
             Provider.CURSOR: CursorProvider,
             Provider.COPILOT: CopilotProvider,
+            Provider.PI: PiProvider,
         }
 
         provider_cls = providers_map.get(session.provider)

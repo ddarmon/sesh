@@ -303,6 +303,10 @@ _RESUME_PATTERNS: list[tuple[Provider, re.Pattern[str]]] = [
         Provider.COPILOT,
         re.compile(r"\bcopilot\s+--resume=([A-Za-z0-9_-]+)"),
     ),
+    (
+        Provider.PI,
+        re.compile(r"\bpi\s+--session\s+([A-Za-z0-9_-]+)"),
+    ),
 ]
 
 

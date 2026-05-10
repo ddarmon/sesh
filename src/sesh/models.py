@@ -12,6 +12,7 @@ class Provider(Enum):
     CODEX = "codex"
     CURSOR = "cursor"
     COPILOT = "copilot"
+    PI = "pi"
 
 
 @dataclass

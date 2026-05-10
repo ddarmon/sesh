@@ -40,6 +40,12 @@ def discover_all(cache=None) -> tuple[dict[str, Project], dict[str, list[Session
     except Exception:
         pass
 
+    try:
+        from sesh.providers.pi import PiProvider
+        providers_list.append(PiProvider(cache=cache))
+    except Exception:
+        pass
+
     projects: dict[str, Project] = {}
     sessions: dict[str, list[SessionMeta]] = {}
 

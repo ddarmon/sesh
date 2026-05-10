@@ -204,6 +204,17 @@ def tmp_cursor_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
 
 
 @pytest.fixture()
+def tmp_pi_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from sesh.providers import pi
+
+    pi_dir = tmp_path / ".pi" / "agent"
+    sessions_dir = pi_dir / "sessions"
+    monkeypatch.setattr(pi, "PI_DIR", pi_dir)
+    monkeypatch.setattr(pi, "SESSIONS_DIR", sessions_dir)
+    return sessions_dir
+
+
+@pytest.fixture()
 def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     from sesh import search
 
@@ -218,12 +229,15 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     copilot_sessions = tmp_path / ".copilot" / "session-state"
     monkeypatch.setattr(search, "COPILOT_SESSIONS", copilot_sessions)
     monkeypatch.setattr(search, "CURSOR_CHATS", cursor_chats)
+    pi_sessions = tmp_path / ".pi" / "agent" / "sessions"
+    monkeypatch.setattr(search, "PI_SESSIONS", pi_sessions)
     return {
         "claude_projects": claude_projects,
         "codex_sessions": codex_sessions,
         "cursor_projects": cursor_projects,
         "cursor_chats": cursor_chats,
         "copilot_sessions": copilot_sessions,
+        "pi_sessions": pi_sessions,
     }
 
 
@@ -297,6 +311,14 @@ def tmp_move_dirs(
     monkeypatch.setattr(move, "COPILOT_DIR", copilot_sessions)
     monkeypatch.setattr(move, "WORKSPACE_STORAGE", workspace_storage)
 
+    pi_sessions = tmp_path / ".pi" / "agent" / "sessions"
+    monkeypatch.setattr(move, "PI_SESSIONS_DIR", pi_sessions)
+
+    # Also patch the actual pi provider module so PiProvider() picks it up.
+    from sesh.providers import pi as pi_mod
+    monkeypatch.setattr(pi_mod, "PI_DIR", pi_sessions.parent)
+    monkeypatch.setattr(pi_mod, "SESSIONS_DIR", pi_sessions)
+
     cache_dir = tmp_path / "cache" / "sesh"
     monkeypatch.setattr(move, "CACHE_FILE", cache_dir / "sessions.json")
     monkeypatch.setattr(move, "INDEX_FILE", cache_dir / "index.json")
@@ -309,5 +331,6 @@ def tmp_move_dirs(
         "cursor_projects": cursor_projects,
         "copilot_sessions": copilot_sessions,
         "workspace_storage": workspace_storage,
+        "pi_sessions": pi_sessions,
         "cache_dir": cache_dir,
     }

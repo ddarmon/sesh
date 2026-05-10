@@ -16,6 +16,7 @@ CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 CURSOR_PROJECTS = Path.home() / ".cursor" / "projects"
 CURSOR_CHATS = Path.home() / ".cursor" / "chats"
 COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
+PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -388,6 +389,8 @@ def ripgrep_search(query: str) -> list[SearchResult]:
         search_paths.append(str(CODEX_SESSIONS))
     if COPILOT_SESSIONS.is_dir():
         search_paths.append(str(COPILOT_SESSIONS))
+    if PI_SESSIONS.is_dir():
+        search_paths.append(str(PI_SESSIONS))
 
     results: list[SearchResult] = []
     seen_sessions: set[str] = set()
@@ -434,6 +437,8 @@ def ripgrep_search(query: str) -> list[SearchResult]:
                     provider = Provider.CODEX
                 elif "/.copilot/" in file_path:
                     provider = Provider.COPILOT
+                elif "/.pi/" in file_path:
+                    provider = Provider.PI
                 else:
                     provider = Provider.CLAUDE
 
@@ -459,6 +464,14 @@ def ripgrep_search(query: str) -> list[SearchResult]:
                 if not session_id and provider == Provider.COPILOT:
                     session_id = Path(file_path).parent.name
 
+                # For pi, the session header is the only line carrying the
+                # session id; fall back to the trailing UUID in the filename.
+                if not session_id and provider == Provider.PI:
+                    if entry.get("type") == "session" and entry.get("id"):
+                        session_id = entry["id"]
+                    else:
+                        session_id = _extract_codex_session_id(file_path)
+
                 # Extract project_path (cwd) for session resume
                 project_path = ""
                 if entry:
@@ -471,6 +484,20 @@ def ripgrep_search(query: str) -> list[SearchResult]:
                         with open(file_path) as f:
                             first = json.loads(f.readline())
                             project_path = first.get("payload", {}).get("cwd", "") or ""
+                    except (OSError, json.JSONDecodeError, AttributeError):
+                        pass
+
+                # For pi, cwd is only in the session header (first line)
+                if not project_path and provider == Provider.PI:
+                    try:
+                        with open(file_path) as f:
+                            for raw in f:
+                                stripped = raw.strip()
+                                if not stripped:
+                                    continue
+                                first = json.loads(stripped)
+                                project_path = first.get("cwd", "") or ""
+                                break
                     except (OSError, json.JSONDecodeError, AttributeError):
                         pass
 

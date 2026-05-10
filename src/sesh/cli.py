@@ -156,6 +156,9 @@ def _load_session_messages(session_data: dict):
     elif session.provider == Provider.COPILOT:
         from sesh.providers.copilot import CopilotProvider
         messages = CopilotProvider().get_messages(session)
+    elif session.provider == Provider.PI:
+        from sesh.providers.pi import PiProvider
+        messages = PiProvider().get_messages(session)
     else:
         messages = []
 
@@ -272,6 +275,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
             source_path = r.file_path
         elif r.provider == Provider.COPILOT:
             source_path = str(Path(r.file_path).parent)
+        elif r.provider == Provider.PI:
+            source_path = r.file_path
         else:
             continue
 
@@ -301,12 +306,14 @@ def cmd_clean(args: argparse.Namespace) -> None:
     from sesh.providers.codex import CodexProvider
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
+    from sesh.providers.pi import PiProvider
 
     providers_map = {
         Provider.CLAUDE: ClaudeProvider(),
         Provider.CODEX: CodexProvider(),
         Provider.CURSOR: CursorProvider(),
         Provider.COPILOT: CopilotProvider(),
+        Provider.PI: PiProvider(),
     }
 
     deleted = []
@@ -411,12 +418,14 @@ def cmd_delete(args: argparse.Namespace) -> None:
     from sesh.providers.codex import CodexProvider
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
+    from sesh.providers.pi import PiProvider
 
     providers_map = {
         Provider.CLAUDE: ClaudeProvider(),
         Provider.CODEX: CodexProvider(),
         Provider.CURSOR: CursorProvider(),
         Provider.COPILOT: CopilotProvider(),
+        Provider.PI: PiProvider(),
     }
 
     session = _dict_to_session(session_data)
@@ -745,7 +754,7 @@ def main() -> None:
     p_sessions.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot"],
+        choices=["claude", "codex", "cursor", "copilot", "pi"],
         help="Filter to sessions from this provider (claude, codex, cursor, copilot)",
     )
 
@@ -766,7 +775,7 @@ def main() -> None:
     p_messages.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot"],
+        choices=["claude", "codex", "cursor", "copilot", "pi"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_messages.add_argument(
@@ -858,7 +867,7 @@ def main() -> None:
     p_delete.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot"],
+        choices=["claude", "codex", "cursor", "copilot", "pi"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_delete.add_argument(
@@ -888,7 +897,7 @@ def main() -> None:
     p_resume.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot"],
+        choices=["claude", "codex", "cursor", "copilot", "pi"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
 
@@ -909,7 +918,7 @@ def main() -> None:
     p_export.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot"],
+        choices=["claude", "codex", "cursor", "copilot", "pi"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_export.add_argument(
