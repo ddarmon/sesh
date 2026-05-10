@@ -12,6 +12,7 @@ def test_resume_argv_per_provider() -> None:
     assert resume.resume_argv(Provider.CODEX, "xyz") == ["codex", "resume", "xyz"]
     assert resume.resume_argv(Provider.CURSOR, "cur") == ["agent", "--resume=cur"]
     assert resume.resume_argv(Provider.COPILOT, "cop") == ["copilot", "--resume=cop"]
+    assert resume.resume_argv(Provider.PI, "pp") == ["pi", "--session", "pp"]
 
 
 def test_resume_argv_handles_uuid_with_dashes() -> None:
@@ -45,3 +46,4 @@ def test_resume_binary_name() -> None:
     assert resume.resume_binary_name(Provider.CODEX) == "codex"
     assert resume.resume_binary_name(Provider.CURSOR) == "agent"
     assert resume.resume_binary_name(Provider.COPILOT) == "copilot"
+    assert resume.resume_binary_name(Provider.PI) == "pi"

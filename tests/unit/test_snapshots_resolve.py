@@ -49,6 +49,15 @@ def test_parse_explicit_resume_finds_copilot() -> None:
     assert r.cmd_args == ["copilot", "--resume=cop-2"]
 
 
+def test_parse_explicit_resume_finds_pi() -> None:
+    text = "pi --session 11111111-2222-3333-4444-555555555555"
+    r = snapshots_core._parse_explicit_resume(text)
+    assert r is not None
+    assert r.provider == Provider.PI
+    assert r.session_id == "11111111-2222-3333-4444-555555555555"
+    assert r.cmd_args == ["pi", "--session", "11111111-2222-3333-4444-555555555555"]
+
+
 def test_parse_explicit_resume_takes_last_match() -> None:
     text = "claude --resume old-id\nlater output\nclaude --resume new-id"
     r = snapshots_core._parse_explicit_resume(text)

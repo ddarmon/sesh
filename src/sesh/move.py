@@ -19,6 +19,7 @@ from sesh.providers.cursor import (
     WORKSPACE_STORAGE,
     CursorProvider,
 )
+from sesh.providers.pi import SESSIONS_DIR as PI_SESSIONS_DIR, PiProvider, encode_pi_path
 
 
 
@@ -246,6 +247,65 @@ def _dry_run_cursor(old_path: str, new_path: str) -> MoveReport:
     )
 
 
+def _pi_file_needs_rewrite(jsonl_file: Path, old_path: str) -> bool:
+    try:
+        with open(jsonl_file) as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError:
+                    return False
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("type") == "session"
+                    and entry.get("cwd") == old_path
+                ):
+                    return True
+                # Only the first session header line carries cwd; stop scanning.
+                return False
+    except OSError:
+        return False
+    return False
+
+
+def _dry_run_pi(old_path: str, new_path: str) -> MoveReport:
+    if not PI_SESSIONS_DIR.is_dir():
+        return MoveReport(provider=Provider.PI, success=True)
+
+    old_dir = PI_SESSIONS_DIR / encode_pi_path(old_path)
+    new_dir = PI_SESSIONS_DIR / encode_pi_path(new_path)
+
+    if old_dir.is_dir() and new_dir.exists():
+        return MoveReport(
+            provider=Provider.PI,
+            success=False,
+            error=f"Target pi project directory already exists: {new_dir}",
+        )
+
+    dirs_renamed = 1 if old_dir.is_dir() else 0
+    scan_dir: Path | None = None
+    if old_dir.is_dir():
+        scan_dir = old_dir
+    elif new_dir.is_dir():
+        scan_dir = new_dir
+
+    files_modified = 0
+    if scan_dir is not None:
+        for jsonl_file in scan_dir.glob("*.jsonl"):
+            if _pi_file_needs_rewrite(jsonl_file, old_path):
+                files_modified += 1
+
+    return MoveReport(
+        provider=Provider.PI,
+        success=True,
+        files_modified=files_modified,
+        dirs_renamed=dirs_renamed,
+    )
+
+
 def _dry_run_copilot(old_path: str) -> MoveReport:
     if not COPILOT_DIR.is_dir():
         return MoveReport(provider=Provider.COPILOT, success=True)
@@ -283,6 +343,7 @@ def move_project(
             _dry_run_codex(old_path),
             _dry_run_cursor(old_path, new_path),
             _dry_run_copilot(old_path),
+            _dry_run_pi(old_path, new_path),
         ]
 
     if full_move:
@@ -298,6 +359,7 @@ def move_project(
         (Provider.CODEX, CodexProvider()),
         (Provider.CURSOR, CursorProvider()),
         (Provider.COPILOT, CopilotProvider()),
+        (Provider.PI, PiProvider()),
     ]
 
     reports: list[MoveReport] = []

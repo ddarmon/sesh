@@ -76,15 +76,27 @@ def test_discover_all_merges_projects_and_sorts_sessions(monkeypatch) -> None:
         def get_sessions(self, project_path: str, cache=None):
             return []
 
+    class FakePiProvider:
+        def __init__(self, cache=None):
+            pass
+
+        def discover_projects(self):
+            return iter([])
+
+        def get_sessions(self, project_path: str, cache=None):
+            return []
+
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
     import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
+    import sesh.providers.pi as pi_mod
 
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeClaudeProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", FakeCodexProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", FakeCursorProvider)
     monkeypatch.setattr(copilot_mod, "CopilotProvider", FakeCopilotProvider)
+    monkeypatch.setattr(pi_mod, "PiProvider", FakePiProvider)
 
     projects, sessions = discovery.discover_all(cache=cache_obj)
 
@@ -138,15 +150,27 @@ def test_discover_all_ignores_provider_exceptions(monkeypatch) -> None:
         def get_sessions(self, project_path: str, cache=None):
             return []
 
+    class NullPiProvider:
+        def __init__(self, cache=None):
+            pass
+
+        def discover_projects(self):
+            return iter([])
+
+        def get_sessions(self, project_path: str, cache=None):
+            return []
+
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
     import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
+    import sesh.providers.pi as pi_mod
 
     monkeypatch.setattr(claude_mod, "ClaudeProvider", GoodClaudeProvider)
     monkeypatch.setattr(codex_mod, "CodexProvider", BadCodexProvider)
     monkeypatch.setattr(cursor_mod, "CursorProvider", BadCursorProvider)
     monkeypatch.setattr(copilot_mod, "CopilotProvider", NullCopilotProvider)
+    monkeypatch.setattr(pi_mod, "PiProvider", NullPiProvider)
 
     projects, sessions = discovery.discover_all()
     assert set(projects) == {"/repo", "/cursor"}
