@@ -289,7 +289,7 @@ $SESH_AGGREGATION_ROOT/
 ```
 
 Sync is owned by the user (rsync / Syncthing / Dropbox / etc.) ---
-`sesh` does not push or pull. Typical setup on the aggregator Mac:
+`sesh` does not push or pull. Typical setup on the aggregator machine:
 
 ```bash
 rsync -a --delete laptop:.claude/  $SESH_AGGREGATION_ROOT/laptop/.claude/
