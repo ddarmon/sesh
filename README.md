@@ -124,7 +124,10 @@ Example: `myproject [C,X:12]` means 12 sessions from Claude and Codex.
 ### CLI
 
 All subcommands output JSON to stdout. Run `sesh refresh` first to build
-an index, then query it.
+an index, then query it. Add `--aggregation-root PATH` (or set
+`SESH_AGGREGATION_ROOT` in the environment) to any command to browse a
+multi-host aggregation tree instead of the local `$HOME` --- see
+[Aggregation mode](#aggregation-mode-cross-machine-browsing).
 
 ```
 sesh refresh                              # discover sessions, build index
@@ -200,6 +203,57 @@ Snapshots live under `~/.local/share/sesh/snapshots/` (or
 `$XDG_DATA_HOME/sesh/snapshots/`). On platforms without Terminal.app
 support, the CLI exits with an error and the TUI shows the unsupported
 message in the status bar.
+
+### Aggregation mode (cross-machine browsing)
+
+`sesh` can browse sessions from multiple machines through a read-only
+**aggregation mode**. Point it at a directory containing one mirrored
+`$HOME` per host (each immediate subdirectory) and one `sesh` invocation
+surfaces sessions from all of them in a single tree:
+
+```
+$SESH_AGGREGATION_ROOT/
+  laptop/
+    .claude/projects/...
+    .codex/sessions/...
+    .pi/agent/sessions/...
+  desktop/
+    .claude/projects/...
+    ...
+```
+
+Sync is your responsibility (rsync, Syncthing, Dropbox, whatever) ---
+`sesh` does not push or pull. A typical rsync on the aggregator machine:
+
+```
+rsync -a --delete user@host2:.claude/  $SESH_AGGREGATION_ROOT/host2/.claude/
+rsync -a --delete user@host2:.codex/   $SESH_AGGREGATION_ROOT/host2/.codex/
+rsync -a --delete user@host2:.pi/      $SESH_AGGREGATION_ROOT/host2/.pi/
+```
+
+Enable with either the env var (ambient default for scripts/cron) or the
+CLI flag (per-invocation override):
+
+```
+SESH_AGGREGATION_ROOT=$HOME/sesh-agg sesh
+sesh --aggregation-root $HOME/sesh-agg sessions
+```
+
+In aggregation mode:
+
+-   Every project and session JSON entry carries a `host` field (the
+    name of the per-host subdirectory).
+-   The TUI tree shows `[host] project-name`; the status bar shows
+    `Agg:{N hosts}`.
+-   Identical project paths on different hosts stay separate (two
+    entries, one per host).
+-   The on-disk index (`~/.cache/sesh/index.json`) is owned by
+    local-mode runs and is not overwritten --- aggregation queries
+    always rebuild from the source tree.
+-   Resume, delete, clean, move, and bookmark actions are disabled
+    (mutations would only affect the local mirror; the next sync would
+    overwrite them, and resume needs the source host's CLI state
+    anyway).
 
 ### Using with LLM agents
 

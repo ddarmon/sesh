@@ -63,13 +63,24 @@ def _stringify_tool_value(value) -> str:
 class CopilotProvider(SessionProvider):
     """Provider for GitHub Copilot CLI sessions."""
 
-    def __init__(self, cache=None) -> None:
+    def __init__(
+        self,
+        cache=None,
+        base_dir: Path | None = None,
+        host: str | None = None,
+    ) -> None:
         self._index: dict[str, list[dict]] | None = None
         self._cache = cache
+        self._base_dir = base_dir
+        self.host = host
+
+    @property
+    def _copilot_dir(self) -> Path:
+        return COPILOT_DIR if self._base_dir is None else self._base_dir / ".copilot" / "session-state"
 
     def discover_projects(self) -> Iterator[tuple[str, str]]:
         """Yield (project_path, display_name) for each Copilot project."""
-        if not COPILOT_DIR.is_dir():
+        if not self._copilot_dir.is_dir():
             return
 
         index = self._build_index()
@@ -99,6 +110,7 @@ class CopilotProvider(SessionProvider):
                 input_tokens=s.get("input_tokens"),
                 output_tokens=s.get("output_tokens"),
                 cumulative_input_tokens=s.get("cumulative_input_tokens"),
+                host=self.host,
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)
@@ -214,12 +226,13 @@ class CopilotProvider(SessionProvider):
 
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Update Copilot metadata when a project path changes."""
-        if not COPILOT_DIR.is_dir():
+        copilot_dir = self._copilot_dir
+        if not copilot_dir.is_dir():
             return MoveReport(provider=Provider.COPILOT, success=True)
 
         files_modified = 0
         try:
-            for session_dir in COPILOT_DIR.iterdir():
+            for session_dir in copilot_dir.iterdir():
                 if not session_dir.is_dir():
                     continue
                 yaml_path = session_dir / "workspace.yaml"
@@ -273,12 +286,13 @@ class CopilotProvider(SessionProvider):
             return self._index
 
         self._index = {}
-        if not COPILOT_DIR.is_dir():
+        copilot_dir = self._copilot_dir
+        if not copilot_dir.is_dir():
             return self._index
 
         cache = self._cache
 
-        for session_dir in COPILOT_DIR.iterdir():
+        for session_dir in copilot_dir.iterdir():
             if not session_dir.is_dir():
                 continue
 

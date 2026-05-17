@@ -28,6 +28,7 @@ def _session_to_dict(s: SessionMeta) -> dict:
         "input_tokens": s.input_tokens,
         "output_tokens": s.output_tokens,
         "cumulative_input_tokens": s.cumulative_input_tokens,
+        "host": s.host,
     }
 
 
@@ -61,6 +62,7 @@ def _dict_to_session(d: dict) -> SessionMeta:
         input_tokens=d.get("input_tokens"),
         output_tokens=d.get("output_tokens"),
         cumulative_input_tokens=d.get("cumulative_input_tokens"),
+        host=d.get("host"),
     )
 
 
@@ -204,6 +206,7 @@ def save_index(
             "providers": sorted(p.value for p in proj.providers),
             "session_count": proj.session_count,
             "latest_activity": proj.latest_activity.isoformat() if proj.latest_activity else None,
+            "host": proj.host,
         })
 
     sess_list = []
