@@ -812,7 +812,7 @@ class SeshApp(App):
         Binding("question_mark", "show_help", "Help", key_display="?"),
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, aggregation_root: Path | None = None) -> None:
         super().__init__()
         self.projects: dict[str, Project] = {}
         self.sessions: dict[str, list[SessionMeta]] = {}
@@ -828,6 +828,7 @@ class SeshApp(App):
         self._show_thinking: bool = False
         self._fullscreen: bool = False
         self._status_base: str = "Loading..."
+        self._aggregation_root: Path | None = aggregation_root
 
         prefs = load_preferences()
         provider_pref = prefs.get("provider_filter")
@@ -930,7 +931,10 @@ class SeshApp(App):
         self.call_from_thread(self._set_status, "Discovering sessions...")
 
         cache = SessionCache()
-        projects, sessions = discover_all(cache=cache)
+        projects, sessions = discover_all(
+            cache=cache,
+            aggregation_root=self._aggregation_root,
+        )
         self.projects = projects
         self.sessions = sessions
 
@@ -941,11 +945,13 @@ class SeshApp(App):
                     cache.put_sessions(s.source_path, [s])
         cache.save()
 
-        # Save index for Tier 1 instant display on next launch
-        try:
-            save_index(projects, sessions)
-        except Exception:
-            pass
+        # Save index for Tier 1 instant display on next launch — only in
+        # local mode; the on-disk index is owned by local-mode runs.
+        if self._aggregation_root is None:
+            try:
+                save_index(projects, sessions)
+            except Exception:
+                pass
 
         self.call_from_thread(self._refresh_tree)
 
@@ -1141,7 +1147,8 @@ class SeshApp(App):
                 badges.append("π")
             badge_str = ",".join(badges)
 
-            label = f"{proj.display_name} [{badge_str}:{len(sessions)}]"
+            host_prefix = f"[{proj.host}] " if proj.host else ""
+            label = f"{host_prefix}{proj.display_name} [{badge_str}:{len(sessions)}]"
             expand = shown_projects < 5
             project_node = tree.root.add(label, expand=expand)
             project_node.data = proj
@@ -1194,6 +1201,9 @@ class SeshApp(App):
 
     def _format_status_suffix(self) -> str:
         parts = []
+        if self._aggregation_root is not None:
+            hosts = {p.host for p in self.projects.values() if p.host}
+            parts.append(f"Agg:{len(hosts)}")
         if self._fullscreen:
             parts.append("Full:ON")
         if self._show_tools:
@@ -1286,27 +1296,36 @@ class SeshApp(App):
 
     def _load_messages(self, session: SessionMeta) -> list[Message]:
         """Load messages in a thread."""
-        from sesh.providers.claude import ClaudeProvider
-        from sesh.providers.codex import CodexProvider
-
-        if session.provider == Provider.CLAUDE:
-            messages = ClaudeProvider().get_messages(session)
-        elif session.provider == Provider.CODEX:
-            messages = CodexProvider().get_messages(session)
-        elif session.provider == Provider.CURSOR:
-            from sesh.providers.cursor import CursorProvider
-            messages = CursorProvider().get_messages(session)
-        elif session.provider == Provider.COPILOT:
-            from sesh.providers.copilot import CopilotProvider
-            messages = CopilotProvider().get_messages(session)
-        elif session.provider == Provider.PI:
-            from sesh.providers.pi import PiProvider
-            messages = PiProvider().get_messages(session)
-        else:
-            messages = []
-
+        provider = self._provider_for(session)
+        messages = provider.get_messages(session) if provider is not None else []
         self.call_from_thread(self._render_messages, messages, session)
         return messages
+
+    def _provider_for(self, session: SessionMeta):
+        """Build a provider instance pointed at the right base_dir for a session."""
+        from sesh.providers.claude import ClaudeProvider
+        from sesh.providers.codex import CodexProvider
+        from sesh.providers.copilot import CopilotProvider
+        from sesh.providers.cursor import CursorProvider
+        from sesh.providers.pi import PiProvider
+
+        base_dir = None
+        host = None
+        if self._aggregation_root is not None and session.host:
+            base_dir = self._aggregation_root / session.host
+            host = session.host
+
+        cls_map = {
+            Provider.CLAUDE: ClaudeProvider,
+            Provider.CODEX: CodexProvider,
+            Provider.CURSOR: CursorProvider,
+            Provider.COPILOT: CopilotProvider,
+            Provider.PI: PiProvider,
+        }
+        cls = cls_map.get(session.provider)
+        if cls is None:
+            return None
+        return cls(base_dir=base_dir, host=host)
 
     def _render_messages(
         self, messages: list[Message], session: SessionMeta, highlight: str = ""
@@ -1536,6 +1555,9 @@ class SeshApp(App):
 
     def action_toggle_bookmark(self) -> None:
         """Toggle bookmark on the selected session."""
+        if self._aggregation_root is not None:
+            self._set_status("Bookmarks are disabled in aggregation mode")
+            return
         tree = self.query_one("#session-tree", SessionTree)
         node = tree.cursor_node
         if node is None:
@@ -1629,6 +1651,11 @@ class SeshApp(App):
 
     def _open_session(self, session: SessionMeta) -> None:
         """Suspend sesh and launch the provider's CLI to resume the session."""
+        if session.host is not None:
+            self._set_status(
+                f"Session is from host '{session.host}' — resume on the source host"
+            )
+            return
         result = self._resume_command(session)
         if result is None:
             self._set_status(f"CLI not found for {session.provider.value}")
@@ -1657,6 +1684,9 @@ class SeshApp(App):
 
     def action_move_project(self) -> None:
         """Prompt to move the selected project and rewrite metadata."""
+        if self._aggregation_root is not None:
+            self._set_status("Move is disabled in aggregation mode")
+            return
         tree = self.query_one("#session-tree", SessionTree)
         node = tree.cursor_node
         if node is None:
@@ -1765,6 +1795,9 @@ class SeshApp(App):
 
     def action_delete_session(self) -> None:
         """Prompt to delete the selected session."""
+        if self._aggregation_root is not None:
+            self._set_status("Delete is disabled in aggregation mode")
+            return
         tree = self.query_one("#session-tree", SessionTree)
         node = tree.cursor_node
         if node is not None and isinstance(node.data, SessionMeta):
@@ -1832,8 +1865,12 @@ class SeshApp(App):
         self._set_status("Session deleted")
 
 
-def tui_main() -> None:
-    app = SeshApp()
+def tui_main(aggregation_root: Path | None = None) -> None:
+    if aggregation_root is None:
+        env = os.environ.get("SESH_AGGREGATION_ROOT")
+        if env:
+            aggregation_root = Path(env)
+    app = SeshApp(aggregation_root=aggregation_root)
     app.run()
 
 

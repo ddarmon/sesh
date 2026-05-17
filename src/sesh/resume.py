@@ -29,6 +29,10 @@ RESUME_COMMANDS: dict[Provider, list[str]] = {
 
 def is_resumable(session: SessionMeta) -> bool:
     """True if the session can in principle be resumed (no PATH check)."""
+    # Aggregation-mode sessions live on another host; the upstream CLI
+    # expects its own local state, so resume is not meaningful here.
+    if session.host is not None:
+        return False
     if (
         session.provider == Provider.CURSOR
         and session.source_path

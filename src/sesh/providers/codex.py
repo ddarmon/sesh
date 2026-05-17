@@ -141,13 +141,24 @@ def _rewrite_codex_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> bool
 class CodexProvider(SessionProvider):
     """Provider for OpenAI Codex CLI sessions."""
 
-    def __init__(self, cache=None) -> None:
+    def __init__(
+        self,
+        cache=None,
+        base_dir: Path | None = None,
+        host: str | None = None,
+    ) -> None:
         self._index: dict[str, list[dict]] | None = None
         self._cache = cache
+        self._base_dir = base_dir
+        self.host = host
+
+    @property
+    def _codex_dir(self) -> Path:
+        return CODEX_DIR if self._base_dir is None else self._base_dir / ".codex" / "sessions"
 
     def discover_projects(self) -> Iterator[tuple[str, str]]:
         """Yield (project_path, display_name) for each Codex project."""
-        if not CODEX_DIR.is_dir():
+        if not self._codex_dir.is_dir():
             return
 
         index = self._build_index()
@@ -178,6 +189,7 @@ class CodexProvider(SessionProvider):
                 input_tokens=s.get("input_tokens"),
                 output_tokens=s.get("output_tokens"),
                 cumulative_input_tokens=s.get("cumulative_input_tokens"),
+                host=self.host,
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)
@@ -288,12 +300,13 @@ class CodexProvider(SessionProvider):
 
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Update Codex metadata when a project path changes."""
-        if not CODEX_DIR.is_dir():
+        codex_dir = self._codex_dir
+        if not codex_dir.is_dir():
             return MoveReport(provider=Provider.CODEX, success=True)
 
         files_modified = 0
         try:
-            for jsonl_file in CODEX_DIR.rglob("*.jsonl"):
+            for jsonl_file in codex_dir.rglob("*.jsonl"):
                 if _rewrite_codex_jsonl(jsonl_file, old_path, new_path):
                     files_modified += 1
         except OSError as exc:
@@ -317,12 +330,13 @@ class CodexProvider(SessionProvider):
             return self._index
 
         self._index = {}
-        if not CODEX_DIR.is_dir():
+        codex_dir = self._codex_dir
+        if not codex_dir.is_dir():
             return self._index
 
         cache = self._cache
 
-        for jsonl_file in CODEX_DIR.rglob("*.jsonl"):
+        for jsonl_file in codex_dir.rglob("*.jsonl"):
             file_str = str(jsonl_file)
 
             # Check per-file cache first

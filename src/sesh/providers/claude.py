@@ -160,12 +160,24 @@ def _rewrite_cwd_in_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> boo
 class ClaudeProvider(SessionProvider):
     """Provider for Claude Code sessions."""
 
-    def __init__(self) -> None:
+    def __init__(self, base_dir: Path | None = None, host: str | None = None) -> None:
         self._path_to_dir: dict[str, Path] = {}
+        self._base_dir = base_dir
+        self.host = host
+
+    @property
+    def _claude_dir(self) -> Path:
+        """Resolve the .claude dir, deferring to the module constant in local mode."""
+        return CLAUDE_DIR if self._base_dir is None else self._base_dir / ".claude"
+
+    @property
+    def _projects_dir(self) -> Path:
+        return PROJECTS_DIR if self._base_dir is None else self._base_dir / ".claude" / "projects"
 
     def discover_projects(self) -> Iterator[tuple[str, str]]:
         """Yield (project_path, display_name) for each Claude project."""
-        if not PROJECTS_DIR.is_dir():
+        projects_dir = self._projects_dir
+        if not projects_dir.is_dir():
             return
 
         from sesh.cache import load_project_paths, save_project_paths
@@ -173,7 +185,7 @@ class ClaudeProvider(SessionProvider):
         cached_paths = load_project_paths()
         updated = False
 
-        for entry in sorted(PROJECTS_DIR.iterdir()):
+        for entry in sorted(projects_dir.iterdir()):
             if not entry.is_dir():
                 continue
             project_name = entry.name
@@ -389,10 +401,11 @@ class ClaudeProvider(SessionProvider):
 
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Update Claude metadata when a project path changes."""
+        projects_dir = self._projects_dir
         old_encoded = encode_claude_path(old_path)
         new_encoded = encode_claude_path(new_path)
-        old_dir = PROJECTS_DIR / old_encoded
-        new_dir = PROJECTS_DIR / new_encoded
+        old_dir = projects_dir / old_encoded
+        new_dir = projects_dir / new_encoded
 
         files_modified = 0
         dirs_renamed = 0
@@ -450,10 +463,11 @@ class ClaudeProvider(SessionProvider):
         if project_path in self._path_to_dir:
             return self._path_to_dir[project_path]
 
-        if not PROJECTS_DIR.is_dir():
+        projects_dir = self._projects_dir
+        if not projects_dir.is_dir():
             return None
 
-        for entry in PROJECTS_DIR.iterdir():
+        for entry in projects_dir.iterdir():
             if not entry.is_dir():
                 continue
             resolved = _extract_project_path(entry.name, entry)
@@ -620,6 +634,7 @@ class ClaudeProvider(SessionProvider):
                 input_tokens=s["input_tokens"] or None,
                 output_tokens=s["output_tokens"] or None,
                 cumulative_input_tokens=s["cumulative_input_tokens"] or None,
+                host=self.host,
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)

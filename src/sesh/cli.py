@@ -25,11 +25,85 @@ import os
 import shutil
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 
-def _require_index():
-    """Load the index or exit with an error."""
+def _refuse_in_aggregation(args: argparse.Namespace, what: str) -> None:
+    """Exit with an error if aggregation mode is active for a destructive op."""
+    if _aggregation_root(args) is not None:
+        print(
+            f"{what} is disabled in aggregation mode. "
+            "Run on the source host instead — aggregator changes would be "
+            "overwritten by the next sync.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
+def _aggregation_root(args: argparse.Namespace | None = None) -> Path | None:
+    """Return the active aggregation root, if any.
+
+    --aggregation-root on the command line wins over SESH_AGGREGATION_ROOT.
+    Returns a Path or None; never raises if the path doesn't exist (the
+    underlying discovery just yields nothing).
+    """
+    if args is not None:
+        explicit = getattr(args, "aggregation_root", None)
+        if explicit:
+            return Path(explicit)
+    env = os.environ.get("SESH_AGGREGATION_ROOT")
+    if env:
+        return Path(env)
+    return None
+
+
+def _provider_for_session(session, agg_root: Path | None):
+    """Build a provider instance pointed at the right base_dir for a session.
+
+    In local mode (agg_root is None), constructs a default provider.
+    In aggregation mode, points the provider at the right per-host subtree
+    using session.host.
+    """
+    from sesh.models import Provider
+    from sesh.providers.claude import ClaudeProvider
+    from sesh.providers.codex import CodexProvider
+    from sesh.providers.copilot import CopilotProvider
+    from sesh.providers.cursor import CursorProvider
+    from sesh.providers.pi import PiProvider
+
+    base_dir = None
+    host = None
+    if agg_root is not None and session.host:
+        base_dir = agg_root / session.host
+        host = session.host
+
+    cls_map = {
+        Provider.CLAUDE: ClaudeProvider,
+        Provider.CODEX: CodexProvider,
+        Provider.CURSOR: CursorProvider,
+        Provider.COPILOT: CopilotProvider,
+        Provider.PI: PiProvider,
+    }
+    cls = cls_map.get(session.provider)
+    if cls is None:
+        return None
+    # Codex / Copilot / pi accept cache=; the others don't. Keep it simple:
+    # we don't need the cache for one-off message loads / deletes.
+    if cls in (CodexProvider, CopilotProvider, PiProvider):
+        return cls(base_dir=base_dir, host=host)
+    return cls(base_dir=base_dir, host=host)
+
+
+def _require_index(args: argparse.Namespace | None = None):
+    """Load the index or exit with an error.
+
+    In aggregation mode the index is rebuilt fresh on every call rather
+    than read from disk — the on-disk index is owned by local mode.
+    """
     from sesh.cache import load_index
+
+    if _aggregation_root(args) is not None:
+        return _refresh_index(args)
 
     index = load_index()
     if index is None:
@@ -65,16 +139,49 @@ def _json_out(obj) -> None:
     print()
 
 
-def _refresh_index():
-    """Run discovery, save the cache and index, and return the index dict."""
+def _refresh_index(args: argparse.Namespace | None = None):
+    """Run discovery, save the cache and index, and return the index dict.
+
+    In aggregation mode the on-disk index (which is owned by local mode)
+    is NOT overwritten — discovery results are returned in-memory only.
+    """
     from sesh.cache import SessionCache, load_index, save_index
+
     from sesh.discovery import discover_all
 
+    agg_root = _aggregation_root(args)
     cache = SessionCache()
-    projects, sessions = discover_all(cache=cache)
+    projects, sessions = discover_all(cache=cache, aggregation_root=agg_root)
     cache.save()
-    save_index(projects, sessions)
-    return load_index()
+    if agg_root is None:
+        save_index(projects, sessions)
+        return load_index()
+    return _build_in_memory_index(projects, sessions)
+
+
+def _build_in_memory_index(projects, sessions) -> dict:
+    """Return the same shape as load_index() without touching disk."""
+    from sesh.cache import _session_to_dict
+
+    proj_list = []
+    for path, proj in sorted(projects.items()):
+        proj_list.append({
+            "path": proj.path,
+            "display_name": proj.display_name,
+            "providers": sorted(p.value for p in proj.providers),
+            "session_count": proj.session_count,
+            "latest_activity": proj.latest_activity.isoformat() if proj.latest_activity else None,
+            "host": proj.host,
+        })
+    sess_list = []
+    for path, sess in sessions.items():
+        for s in sess:
+            sess_list.append(_session_to_dict(s))
+    return {
+        "refreshed_at": datetime.now(tz=timezone.utc).isoformat(),
+        "projects": proj_list,
+        "sessions": sess_list,
+    }
 
 
 def cmd_refresh(args: argparse.Namespace) -> None:
@@ -83,7 +190,7 @@ def cmd_refresh(args: argparse.Namespace) -> None:
     from sesh.discovery import discover_all
 
     cache = SessionCache()
-    projects, sessions = discover_all(cache=cache)
+    projects, sessions = discover_all(cache=cache, aggregation_root=_aggregation_root(args))
     cache.save()
     save_index(projects, sessions)
 
@@ -104,13 +211,13 @@ def cmd_refresh(args: argparse.Namespace) -> None:
 
 def cmd_projects(args: argparse.Namespace) -> None:
     """List projects from the index."""
-    index = _require_index()
+    index = _require_index(args)
     _json_out(index["projects"])
 
 
 def cmd_sessions(args: argparse.Namespace) -> None:
     """List sessions from the index, with optional filters."""
-    index = _require_index()
+    index = _require_index(args)
     sessions = index["sessions"]
 
     if args.project:
@@ -132,42 +239,26 @@ def cmd_sessions(args: argparse.Namespace) -> None:
             "input_tokens": s.get("input_tokens"),
             "output_tokens": s.get("output_tokens"),
             "cumulative_input_tokens": s.get("cumulative_input_tokens"),
+            "host": s.get("host"),
         })
 
     _json_out(out)
 
 
-def _load_session_messages(session_data: dict):
+def _load_session_messages(session_data: dict, args: argparse.Namespace | None = None):
     """Look up a session from index data and load its messages via the provider."""
     from sesh.cache import _dict_to_session
-    from sesh.models import Provider
 
     session = _dict_to_session(session_data)
-
-    if session.provider == Provider.CLAUDE:
-        from sesh.providers.claude import ClaudeProvider
-        messages = ClaudeProvider().get_messages(session)
-    elif session.provider == Provider.CODEX:
-        from sesh.providers.codex import CodexProvider
-        messages = CodexProvider().get_messages(session)
-    elif session.provider == Provider.CURSOR:
-        from sesh.providers.cursor import CursorProvider
-        messages = CursorProvider().get_messages(session)
-    elif session.provider == Provider.COPILOT:
-        from sesh.providers.copilot import CopilotProvider
-        messages = CopilotProvider().get_messages(session)
-    elif session.provider == Provider.PI:
-        from sesh.providers.pi import PiProvider
-        messages = PiProvider().get_messages(session)
-    else:
-        messages = []
-
+    agg_root = _aggregation_root(args)
+    provider = _provider_for_session(session, agg_root)
+    messages = provider.get_messages(session) if provider is not None else []
     return session, messages
 
 
 def cmd_messages(args: argparse.Namespace) -> None:
     """Load and print messages for a session."""
-    index = _require_index()
+    index = _require_index(args)
 
     # Find the session in the index
     matches = [s for s in index["sessions"] if s["id"] == args.session_id]
@@ -184,7 +275,7 @@ def cmd_messages(args: argparse.Namespace) -> None:
 
     from sesh.models import filter_messages
 
-    _session, messages = _load_session_messages(matches[0])
+    _session, messages = _load_session_messages(matches[0], args)
 
     include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
     include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
@@ -251,7 +342,7 @@ def cmd_search(args: argparse.Namespace) -> None:
 
 def cmd_clean(args: argparse.Namespace) -> None:
     """Delete sessions matching a search query."""
-    from pathlib import Path
+    _refuse_in_aggregation(args, "clean")
 
     from sesh.models import Provider, SessionMeta
     from sesh.search import ripgrep_search
@@ -365,7 +456,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
 def cmd_delete(args: argparse.Namespace) -> None:
     """Delete a single session by ID."""
-    index = _refresh_index()
+    _refuse_in_aggregation(args, "delete")
+    index = _refresh_index(args)
 
     matches = [s for s in index["sessions"] if s["id"] == args.session_id]
     if args.provider:
@@ -449,7 +541,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
 
 def cmd_resume(args: argparse.Namespace) -> None:
     """Resume a session in its provider's CLI."""
-    index = _require_index()
+    index = _require_index(args)
 
     matches = [s for s in index["sessions"] if s["id"] == args.session_id]
     if args.provider:
@@ -470,10 +562,17 @@ def cmd_resume(args: argparse.Namespace) -> None:
     session = _dict_to_session(session_data)
 
     if not is_resumable(session):
-        print(
-            "Cursor IDE sessions cannot be resumed from the CLI.",
-            file=sys.stderr,
-        )
+        if session.host is not None:
+            print(
+                f"Session from host '{session.host}' is not resumable locally "
+                "(run on the source host instead).",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "Cursor IDE sessions cannot be resumed from the CLI.",
+                file=sys.stderr,
+            )
         raise SystemExit(1)
 
     cmd_args = resume_argv(session.provider, session.id)
@@ -493,7 +592,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
 
 def cmd_export(args: argparse.Namespace) -> None:
     """Export a session to Markdown or JSON."""
-    index = _require_index()
+    index = _require_index(args)
 
     matches = [s for s in index["sessions"] if s["id"] == args.session_id]
     if args.provider:
@@ -509,7 +608,7 @@ def cmd_export(args: argparse.Namespace) -> None:
 
     from sesh.models import filter_messages
 
-    session, messages = _load_session_messages(matches[0])
+    session, messages = _load_session_messages(matches[0], args)
 
     include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
     include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
@@ -651,6 +750,7 @@ def cmd_snapshot_delete(args: argparse.Namespace) -> None:
 
 def cmd_move(args: argparse.Namespace) -> None:
     """Move a project and rewrite provider metadata."""
+    _refuse_in_aggregation(args, "move")
     from sesh.move import move_project
 
     old_path = os.path.abspath(os.path.expanduser(args.old_path))
@@ -714,6 +814,18 @@ def main() -> None:
             "  sesh snapshot save      # capture Terminal.app tabs (macOS only)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument(
+        "--aggregation-root",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Browse sessions from a multi-host aggregation root instead of $HOME. "
+            "Each immediate subdirectory is treated as one host's mirrored "
+            "$HOME (.claude/, .codex/, .pi/, ...). Read-only: resume, delete, "
+            "clean, and move are disabled. Defaults to $SESH_AGGREGATION_ROOT."
+        ),
     )
 
     sub = parser.add_subparsers(dest="command")
@@ -1037,7 +1149,7 @@ def main() -> None:
     if args.command is None:
         # No subcommand — launch the TUI
         from sesh.app import tui_main
-        tui_main()
+        tui_main(aggregation_root=_aggregation_root(args))
     elif args.command == "refresh":
         cmd_refresh(args)
     elif args.command == "projects":

@@ -10,7 +10,7 @@ def test_no_subcommand_calls_tui_main(monkeypatch) -> None:
     """'sesh' with no subcommand launches the TUI."""
     calls = {"tui": 0}
     fake_app = ModuleType("sesh.app")
-    fake_app.tui_main = lambda: calls.__setitem__("tui", calls["tui"] + 1)
+    fake_app.tui_main = lambda *a, **k: calls.__setitem__("tui", calls["tui"] + 1)
     monkeypatch.setitem(sys.modules, "sesh.app", fake_app)
     monkeypatch.setattr(sys, "argv", ["sesh"])
 

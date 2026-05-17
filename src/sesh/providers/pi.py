@@ -140,16 +140,32 @@ def _rewrite_cwd_in_pi_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> 
 class PiProvider(SessionProvider):
     """Provider for pi CLI sessions."""
 
-    def __init__(self, cache=None) -> None:
+    def __init__(
+        self,
+        cache=None,
+        base_dir: Path | None = None,
+        host: str | None = None,
+    ) -> None:
         self._path_to_dir: dict[str, Path] = {}
         self._cache = cache
+        self._base_dir = base_dir
+        self.host = host
+
+    @property
+    def _pi_dir(self) -> Path:
+        return PI_DIR if self._base_dir is None else self._base_dir / ".pi" / "agent"
+
+    @property
+    def _sessions_dir(self) -> Path:
+        return SESSIONS_DIR if self._base_dir is None else self._pi_dir / "sessions"
 
     def discover_projects(self) -> Iterator[tuple[str, str]]:
         """Yield (project_path, display_name) for each pi project."""
-        if not SESSIONS_DIR.is_dir():
+        sessions_dir = self._sessions_dir
+        if not sessions_dir.is_dir():
             return
 
-        for entry in sorted(SESSIONS_DIR.iterdir()):
+        for entry in sorted(sessions_dir.iterdir()):
             if not entry.is_dir():
                 continue
             project_path = _extract_project_path(entry)
@@ -192,6 +208,7 @@ class PiProvider(SessionProvider):
                 input_tokens=data.get("input_tokens"),
                 output_tokens=data.get("output_tokens"),
                 cumulative_input_tokens=data.get("cumulative_input_tokens"),
+                host=self.host,
             )
             result.append(session)
             if active_cache:
@@ -341,11 +358,12 @@ class PiProvider(SessionProvider):
 
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Rename the encoded dir and rewrite cwd in each session header."""
-        if not SESSIONS_DIR.is_dir():
+        sessions_dir = self._sessions_dir
+        if not sessions_dir.is_dir():
             return MoveReport(provider=Provider.PI, success=True)
 
-        old_dir = SESSIONS_DIR / encode_pi_path(old_path)
-        new_dir = SESSIONS_DIR / encode_pi_path(new_path)
+        old_dir = sessions_dir / encode_pi_path(old_path)
+        new_dir = sessions_dir / encode_pi_path(new_path)
 
         files_modified = 0
         dirs_renamed = 0
@@ -403,11 +421,12 @@ class PiProvider(SessionProvider):
                 return cached
             self._path_to_dir.pop(project_path, None)
 
-        if not SESSIONS_DIR.is_dir():
+        sessions_dir = self._sessions_dir
+        if not sessions_dir.is_dir():
             return None
 
         # Try the canonical encoding first (cheap path).
-        encoded = SESSIONS_DIR / encode_pi_path(project_path)
+        encoded = sessions_dir / encode_pi_path(project_path)
         if encoded.is_dir():
             resolved = _extract_project_path(encoded)
             if resolved == project_path:
@@ -416,7 +435,7 @@ class PiProvider(SessionProvider):
 
         # Fallback: scan all dirs (handles paths whose `-` chars made
         # the encoding lossy / ambiguous).
-        for entry in SESSIONS_DIR.iterdir():
+        for entry in sessions_dir.iterdir():
             if not entry.is_dir():
                 continue
             resolved = _extract_project_path(entry)

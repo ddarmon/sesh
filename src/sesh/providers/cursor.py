@@ -96,18 +96,46 @@ def _rewrite_store_db_blobs(store_db: Path, old_path: str, new_path: str) -> boo
 class CursorProvider(SessionProvider):
     """Provider for Cursor IDE sessions."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        base_dir: Path | None = None,
+        host: str | None = None,
+    ) -> None:
         self._workspace_map: dict[str, str] | None = None
         self._projects_dir_map: dict[str, Path] | None = None
+        self._base_dir = base_dir
+        self.host = host
+
+    @property
+    def _chats_dir(self) -> Path:
+        return CURSOR_CHATS_DIR if self._base_dir is None else self._base_dir / ".cursor" / "chats"
+
+    @property
+    def _projects_dir(self) -> Path:
+        return CURSOR_PROJECTS_DIR if self._base_dir is None else self._base_dir / ".cursor" / "projects"
+
+    @property
+    def _workspace_storage(self) -> Path:
+        # In aggregation mode look under {base_dir}/Library/... (macOS) or
+        # {base_dir}/.config/Cursor/... (Linux), mirroring the platform default.
+        if self._base_dir is None:
+            return WORKSPACE_STORAGE
+        if sys.platform == "darwin":
+            return (
+                self._base_dir / "Library" / "Application Support"
+                / "Cursor" / "User" / "workspaceStorage"
+            )
+        return self._base_dir / ".config" / "Cursor" / "User" / "workspaceStorage"
 
     def _build_workspace_map(self) -> dict[str, str]:
         """Return {project_path: workspace_hash} from workspaceStorage."""
         if self._workspace_map is not None:
             return self._workspace_map
         self._workspace_map = {}
-        if not WORKSPACE_STORAGE.is_dir():
+        workspace_storage = self._workspace_storage
+        if not workspace_storage.is_dir():
             return self._workspace_map
-        for ws_dir in WORKSPACE_STORAGE.iterdir():
+        for ws_dir in workspace_storage.iterdir():
             ws_json = ws_dir / "workspace.json"
             if not ws_json.is_file():
                 continue
@@ -126,13 +154,14 @@ class CursorProvider(SessionProvider):
         if self._projects_dir_map is not None:
             return self._projects_dir_map
         self._projects_dir_map = {}
-        if not CURSOR_PROJECTS_DIR.is_dir():
+        projects_dir = self._projects_dir
+        if not projects_dir.is_dir():
             return self._projects_dir_map
         workspace_map = self._build_workspace_map()
         # Build reverse: encoded_name -> project_path from workspace_map
         for project_path in workspace_map:
             encoded = encode_cursor_path(project_path)
-            candidate = CURSOR_PROJECTS_DIR / encoded
+            candidate = projects_dir / encoded
             if candidate.is_dir():
                 self._projects_dir_map[project_path] = candidate
         return self._projects_dir_map
@@ -146,8 +175,9 @@ class CursorProvider(SessionProvider):
         seen: set[str] = set()
 
         # 1. Existing: CLI agent sessions in ~/.cursor/chats/
-        if CURSOR_CHATS_DIR.is_dir():
-            for hash_dir in CURSOR_CHATS_DIR.iterdir():
+        chats_dir = self._chats_dir
+        if chats_dir.is_dir():
+            for hash_dir in chats_dir.iterdir():
                 if not hash_dir.is_dir():
                     continue
                 workspace = self._extract_workspace_path(hash_dir)
@@ -174,7 +204,7 @@ class CursorProvider(SessionProvider):
 
         # 1. CLI agent sessions from ~/.cursor/chats/
         md5 = hashlib.md5(project_path.encode()).hexdigest()
-        cursor_dir = CURSOR_CHATS_DIR / md5
+        cursor_dir = self._chats_dir / md5
         if cursor_dir.is_dir():
             for session_dir in cursor_dir.iterdir():
                 if not session_dir.is_dir():
@@ -204,6 +234,7 @@ class CursorProvider(SessionProvider):
                         message_count=meta.get("message_count", 0),
                         model=meta.get("model"),
                         source_path=str(store_db),
+                        host=self.host,
                     )
                     sessions.append(session)
                     if cache:
@@ -285,6 +316,7 @@ class CursorProvider(SessionProvider):
                     message_count=msg_count,
                     model=model,
                     source_path=str(transcript_path),
+                    host=self.host,
                 ))
 
         # Pick up any .txt files not matched by composer metadata
@@ -306,6 +338,7 @@ class CursorProvider(SessionProvider):
                 start_timestamp=None,
                 message_count=self._count_transcript_messages(path),
                 source_path=str(path),
+                host=self.host,
             ))
 
         return sessions
@@ -316,7 +349,7 @@ class CursorProvider(SessionProvider):
         ws_hash = workspace_map.get(project_path)
         if not ws_hash:
             return []
-        vscdb = WORKSPACE_STORAGE / ws_hash / "state.vscdb"
+        vscdb = self._workspace_storage / ws_hash / "state.vscdb"
         if not vscdb.is_file():
             return []
         try:
@@ -544,15 +577,19 @@ class CursorProvider(SessionProvider):
 
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Update Cursor metadata when a project path changes."""
+        chats_root = self._chats_dir
+        projects_root = self._projects_dir
+        workspace_storage = self._workspace_storage
+
         old_md5 = hashlib.md5(old_path.encode()).hexdigest()
         new_md5 = hashlib.md5(new_path.encode()).hexdigest()
-        old_chats_dir = CURSOR_CHATS_DIR / old_md5
-        new_chats_dir = CURSOR_CHATS_DIR / new_md5
+        old_chats_dir = chats_root / old_md5
+        new_chats_dir = chats_root / new_md5
 
         old_encoded = encode_cursor_path(old_path)
         new_encoded = encode_cursor_path(new_path)
-        old_projects_dir = CURSOR_PROJECTS_DIR / old_encoded
-        new_projects_dir = CURSOR_PROJECTS_DIR / new_encoded
+        old_projects_dir = projects_root / old_encoded
+        new_projects_dir = projects_root / new_encoded
 
         conflicts = []
         if old_chats_dir.is_dir() and new_chats_dir.exists():
@@ -599,8 +636,8 @@ class CursorProvider(SessionProvider):
 
         old_uri = workspace_uri(old_path)
         new_uri = workspace_uri(new_path)
-        if WORKSPACE_STORAGE.is_dir():
-            for ws_dir in WORKSPACE_STORAGE.iterdir():
+        if workspace_storage.is_dir():
+            for ws_dir in workspace_storage.iterdir():
                 workspace_json = ws_dir / "workspace.json"
                 if not workspace_json.is_file():
                     continue

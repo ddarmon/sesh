@@ -33,6 +33,8 @@ class Project:
     latest_activity: datetime | None = None
     # Provider-specific folder names (e.g. Claude's encoded project dir name)
     claude_project_name: str | None = None
+    # Set in aggregation mode to the per-host subdir name
+    host: str | None = None
 
 
 @dataclass
@@ -49,6 +51,7 @@ class SessionMeta:
     input_tokens: int | None = None              # Last turn's input context size
     output_tokens: int | None = None             # Total output across all turns
     cumulative_input_tokens: int | None = None   # Sum of all turns' inputs
+    host: str | None = None  # Set in aggregation mode
 
 
 @dataclass

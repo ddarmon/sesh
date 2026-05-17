@@ -271,6 +271,78 @@ real Terminal.app or `osascript` calls happen in the suite. The
 `fake_backend` and `tmp_snapshots_dir` fixtures in `tests/conftest.py`
 let cross-platform tests exercise the core, CLI, and TUI paths.
 
+## Aggregation mode (cross-machine browsing)
+
+`sesh` can browse sessions mirrored from multiple machines through a
+read-only **aggregation mode**. The user maintains a single tree
+containing per-host subtrees (one mirrored `$HOME` per host):
+
+```
+$SESH_AGGREGATION_ROOT/
+  laptop/
+    .claude/projects/...
+    .codex/sessions/...
+    .pi/agent/sessions/...
+  desktop/
+    .claude/projects/...
+    ...
+```
+
+Sync is owned by the user (rsync / Syncthing / Dropbox / etc.) ---
+`sesh` does not push or pull. Typical setup on the aggregator Mac:
+
+```bash
+rsync -a --delete laptop:.claude/  $SESH_AGGREGATION_ROOT/laptop/.claude/
+rsync -a --delete laptop:.codex/   $SESH_AGGREGATION_ROOT/laptop/.codex/
+rsync -a --delete laptop:.pi/      $SESH_AGGREGATION_ROOT/laptop/.pi/
+```
+
+Activate aggregation mode with either:
+
+-   `SESH_AGGREGATION_ROOT=/path` environment variable (ambient default,
+    intended for pi-pulse / launchd / cron).
+-   `sesh --aggregation-root /path ...` CLI flag (per-invocation
+    override).
+
+Behavior in aggregation mode:
+
+-   Local-mode providers are **not** scanned (no double-counting).
+-   Every `Project` and `SessionMeta` carries a `host` field
+    (`"laptop"`, `"desktop"`, etc., derived from the subdirectory name).
+-   `sesh sessions`, `sesh projects`, `sesh messages`, `sesh export` all
+    include `host` in their JSON output.
+-   The TUI tree shows `[host] project-name`; the status bar shows
+    `Agg:{N hosts}`.
+-   The on-disk index (`~/.cache/sesh/index.json`) is **not**
+    overwritten in aggregation mode --- it stays owned by local-mode
+    runs. Aggregation queries always rebuild fresh from the source tree.
+-   Identical project paths on different hosts stay separate. The
+    internal project key is `"{host}::{project_path}"`; consumers should
+    use the `host` field on `Project` rather than parsing the key.
+
+Disabled in aggregation mode (would only affect the aggregator's mirror,
+which the next rsync overwrites --- and resume needs the source host's
+local CLI state anyway):
+
+-   `o` / `sesh resume` --- would launch the local CLI but the source
+    state is on the other machine.
+-   `b` (bookmarks), `d` / `sesh delete`, `d`+match / `sesh clean`, `m`
+    / `sesh move` --- mutations to the mirror don't propagate back.
+
+Provider entry-points respect aggregation mode via the new constructor
+parameters `base_dir` and `host` (see `src/sesh/providers/*.py`). The
+multiplexing layer is in `discovery._discover_aggregated()`.
+
+**Caveats for v1:**
+
+-   `sesh search` (ripgrep) still reads local `$HOME` paths and is not
+    aggregation-aware. Use `sesh sessions` / `sesh messages` to scan
+    aggregated content instead.
+-   Cursor IDE sessions need the macOS `~/Library/Application Support/`
+    workspace storage path mirrored under `{host}/Library/...` to be
+    visible; CLI agent sessions in `{host}/.cursor/chats/` work
+    out-of-the-box.
+
 ## Plans
 
 Lightweight execution plans live in `.plans/` to capture the logic of
