@@ -1147,7 +1147,9 @@ class SeshApp(App):
                 badges.append("π")
             badge_str = ",".join(badges)
 
-            host_prefix = f"[{proj.host}] " if proj.host else ""
+            # Backslash-escape the opening bracket so Rich doesn't treat
+            # "[mbp]" / "[mba]" as a markup tag and strip it.
+            host_prefix = f"\\[{proj.host}] " if proj.host else ""
             label = f"{host_prefix}{proj.display_name} [{badge_str}:{len(sessions)}]"
             expand = shown_projects < 5
             project_node = tree.root.add(label, expand=expand)
