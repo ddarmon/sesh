@@ -1005,7 +1005,7 @@ class SeshApp(App):
         summary = session.summary[:50]
         model = f" [{_short_model_name(session.model)}]" if session.model else ""
         if show_project:
-            proj = self.projects.get(session.project_path)
+            proj = self.projects.get(self._proj_key(session.host, session.project_path))
             proj_name = proj.display_name if proj else session.project_path.rsplit("/", 1)[-1]
             return f"{star}{ts}  {count}{dur}{tok_str}{proj_name} — {summary}{model}"
         return f"{star}{ts}  {count}{dur}{tok_str}{summary}{model}"
@@ -1111,7 +1111,7 @@ class SeshApp(App):
                     child.data = s
 
         for proj in sorted_projects:
-            sessions = self.sessions.get(proj.path, [])
+            sessions = self.sessions.get(self._proj_key(proj.host, proj.path), [])
 
             if provider_filter:
                 sessions = [s for s in sessions if s.provider == provider_filter]
@@ -1301,6 +1301,15 @@ class SeshApp(App):
         self.call_from_thread(self._render_messages, messages, session)
         return messages
 
+    def _proj_key(self, host: str | None, project_path: str) -> str:
+        """Compute the composite key used to index self.projects / self.sessions.
+
+        Aggregation mode keys both dicts by f"{host}::{project_path}" so
+        identical paths across hosts stay separate; local mode uses the
+        bare path.
+        """
+        return f"{host}::{project_path}" if host else project_path
+
     def _provider_for(self, session: SessionMeta):
         """Build a provider instance pointed at the right base_dir for a session."""
         from sesh.providers.claude import ClaudeProvider
@@ -1464,7 +1473,7 @@ class SeshApp(App):
         badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U", Provider.COPILOT: "P", Provider.PI: "π"}
         for r in results[:100]:
             badge = badge_map.get(r.provider, "?")
-            proj = self.projects.get(r.project_path)
+            proj = self.projects.get(self._proj_key(None, r.project_path))
             proj_name = proj.display_name if proj else r.project_path.rsplit("/", 1)[-1]
             snippet = r.matched_line.replace("\n", " ")[:80]
             label = f"[{badge}] {proj_name} — {snippet}"
