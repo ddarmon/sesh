@@ -333,11 +333,12 @@ Provider entry-points respect aggregation mode via the new constructor
 parameters `base_dir` and `host` (see `src/sesh/providers/*.py`). The
 multiplexing layer is in `discovery._discover_aggregated()`.
 
+`sesh search` is aggregation-aware: in aggregation mode it runs one
+ripgrep per host subtree and every `SearchResult` carries a `host`
+field. The local-mode JSON output also includes `host` (always `null`).
+
 **Caveats for v1:**
 
--   `sesh search` (ripgrep) still reads local `$HOME` paths and is not
-    aggregation-aware. Use `sesh sessions` / `sesh messages` to scan
-    aggregated content instead.
 -   Cursor IDE sessions need the macOS `~/Library/Application Support/`
     workspace storage path mirrored under `{host}/Library/...` to be
     visible; CLI agent sessions in `{host}/.cursor/chats/` work

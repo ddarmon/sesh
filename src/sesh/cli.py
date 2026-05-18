@@ -325,7 +325,7 @@ def cmd_search(args: argparse.Namespace) -> None:
     """Full-text search via ripgrep."""
     from sesh.search import ripgrep_search
 
-    results = ripgrep_search(args.query)
+    results = ripgrep_search(args.query, aggregation_root=_aggregation_root(args))
 
     out = []
     for r in results:
@@ -335,6 +335,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             "project_path": r.project_path,
             "matched_line": r.matched_line,
             "file_path": r.file_path,
+            "host": r.host,
         })
 
     _json_out(out)

@@ -125,7 +125,7 @@ def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         search_mod,
         "ripgrep_search",
-        lambda q: [
+        lambda q, aggregation_root=None: [
             SearchResult(
                 session_id="s1",
                 provider=Provider.CODEX,
@@ -144,6 +144,46 @@ def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
             "project_path": "/repo",
             "matched_line": "needle",
             "file_path": "/tmp/x.jsonl",
+            "host": None,
+        }
+    ]
+
+
+def test_cmd_search_passes_aggregation_root(monkeypatch, capsys, tmp_path) -> None:
+    """'sesh search --aggregation-root <p>' forwards the root and emits host."""
+    import sesh.search as search_mod
+
+    captured: dict = {}
+
+    def _fake(q, aggregation_root=None):
+        captured["query"] = q
+        captured["aggregation_root"] = aggregation_root
+        return [
+            SearchResult(
+                session_id="s1",
+                provider=Provider.CLAUDE,
+                project_path="/repo",
+                matched_line="needle",
+                file_path=str(tmp_path / "laptop" / ".claude" / "a.jsonl"),
+                host="laptop",
+            )
+        ]
+
+    monkeypatch.setattr(search_mod, "ripgrep_search", _fake)
+    cli.cmd_search(_ns(query="needle", aggregation_root=tmp_path))
+
+    assert captured["query"] == "needle"
+    assert captured["aggregation_root"] == tmp_path
+
+    out = json.loads(capsys.readouterr().out)
+    assert out == [
+        {
+            "session_id": "s1",
+            "provider": "claude",
+            "project_path": "/repo",
+            "matched_line": "needle",
+            "file_path": str(tmp_path / "laptop" / ".claude" / "a.jsonl"),
+            "host": "laptop",
         }
     ]
 

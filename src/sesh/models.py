@@ -74,6 +74,7 @@ class SearchResult:
     provider: Provider
     matched_line: str
     file_path: str
+    host: str | None = None  # Set in aggregation mode
 
 
 def filter_messages(

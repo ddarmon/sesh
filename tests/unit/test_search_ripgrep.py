@@ -36,9 +36,13 @@ def test_search_cursor_transcripts_parses_and_dedups(
         ]
     )
     monkeypatch.setattr(search.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=stdout))
-    monkeypatch.setattr(search, "_decode_cursor_projects_path", lambda encoded: f"/decoded/{encoded}")
+    monkeypatch.setattr(
+        search,
+        "_decode_cursor_projects_path",
+        lambda encoded, **_: f"/decoded/{encoded}",
+    )
 
-    results = search._search_cursor_transcripts("rg", "needle")
+    results = search._search_cursor_transcripts("rg", "needle", base, None)
     assert len(results) == 1
     assert results[0].provider is Provider.CURSOR
     assert results[0].session_id == "sess1"
@@ -56,7 +60,9 @@ def test_search_cursor_stores_reads_sqlite(tmp_search_dirs) -> None:
         ],
     )
 
-    results = search._search_cursor_stores("needletoken")
+    results = search._search_cursor_stores(
+        "needletoken", tmp_search_dirs["cursor_chats"], None,
+    )
     assert len(results) == 1
     result = results[0]
     assert result.provider is Provider.CURSOR
@@ -125,7 +131,7 @@ def test_ripgrep_search_parses_jsonl_and_merges_cursor_results(
     monkeypatch.setattr(
         search,
         "_search_cursor_transcripts",
-        lambda rg, q: [
+        lambda rg, q, cursor_projects, host: [
             SearchResult(
                 session_id="cursor-txt",
                 project_path="/Users/me/cursor",
@@ -138,7 +144,7 @@ def test_ripgrep_search_parses_jsonl_and_merges_cursor_results(
     monkeypatch.setattr(
         search,
         "_search_cursor_stores",
-        lambda q: [
+        lambda q, cursor_chats, host: [
             SearchResult(
                 session_id="cursor-store",
                 project_path="/Users/me/cursor",
@@ -181,7 +187,7 @@ def test_ripgrep_search_cursor_only_regression(tmp_search_dirs, monkeypatch) -> 
     monkeypatch.setattr(
         search,
         "_search_cursor_transcripts",
-        lambda rg, q: [
+        lambda rg, q, cursor_projects, host: [
             SearchResult(
                 session_id="cursor-1",
                 project_path="/Users/me/repo",
@@ -191,7 +197,11 @@ def test_ripgrep_search_cursor_only_regression(tmp_search_dirs, monkeypatch) -> 
             )
         ],
     )
-    monkeypatch.setattr(search, "_search_cursor_stores", lambda q: [])
+    monkeypatch.setattr(
+        search,
+        "_search_cursor_stores",
+        lambda q, cursor_chats, host: [],
+    )
     monkeypatch.setattr(
         search.subprocess,
         "run",
