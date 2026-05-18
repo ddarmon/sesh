@@ -125,7 +125,7 @@ def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         search_mod,
         "ripgrep_search",
-        lambda q: [
+        lambda q, aggregation_root=None: [
             SearchResult(
                 session_id="s1",
                 provider=Provider.CODEX,
@@ -144,6 +144,7 @@ def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
             "project_path": "/repo",
             "matched_line": "needle",
             "file_path": "/tmp/x.jsonl",
+            "host": None,
         }
     ]
 

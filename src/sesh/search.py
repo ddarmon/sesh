@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from sesh.models import Provider, SearchResult
@@ -19,6 +20,63 @@ COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+@dataclass
+class _SearchRoots:
+    """Per-host (or local) scan roots for ripgrep_search.
+
+    `host` is `None` for the local-mode roots and the per-host subdir
+    name in aggregation mode. Any individual root may be `None` if it
+    doesn't exist on disk; callers should skip missing ones.
+    """
+
+    host: str | None
+    claude_projects: Path
+    codex_sessions: Path
+    cursor_projects: Path
+    cursor_chats: Path
+    copilot_sessions: Path
+    pi_sessions: Path
+
+
+def _local_roots() -> _SearchRoots:
+    """Build the local-mode scan roots from the module-level constants.
+
+    The constants stay module-level so tests can monkeypatch them
+    (see `tests/conftest.py::tmp_search_dirs`).
+    """
+    return _SearchRoots(
+        host=None,
+        claude_projects=CLAUDE_PROJECTS,
+        codex_sessions=CODEX_SESSIONS,
+        cursor_projects=CURSOR_PROJECTS,
+        cursor_chats=CURSOR_CHATS,
+        copilot_sessions=COPILOT_SESSIONS,
+        pi_sessions=PI_SESSIONS,
+    )
+
+
+def _aggregated_roots(aggregation_root: Path):
+    """Yield one `_SearchRoots` per host subdir under *aggregation_root*.
+
+    Skips hidden and non-directory entries, matching the rule in
+    `discovery._discover_aggregated`.
+    """
+    if not aggregation_root.is_dir():
+        return
+    for host_dir in sorted(aggregation_root.iterdir()):
+        if not host_dir.is_dir() or host_dir.name.startswith("."):
+            continue
+        yield _SearchRoots(
+            host=host_dir.name,
+            claude_projects=host_dir / ".claude" / "projects",
+            codex_sessions=host_dir / ".codex" / "sessions",
+            cursor_projects=host_dir / ".cursor" / "projects",
+            cursor_chats=host_dir / ".cursor" / "chats",
+            copilot_sessions=host_dir / ".copilot" / "session-state",
+            pi_sessions=host_dir / ".pi" / "agent" / "sessions",
+        )
 
 
 def _stringify_value(value) -> str:
@@ -206,27 +264,40 @@ def _extract_codex_session_id(file_path: str) -> str:
     return matches[-1] if matches else stem
 
 
-def _decode_cursor_projects_path(encoded: str) -> str:
+def _decode_cursor_projects_path(encoded: str, *, validate_locally: bool = True) -> str:
     """Reverse the Cursor path encoding: 'Users-foo-bar' -> '/Users/foo/bar'.
 
-    Falls back to the raw encoded name if the decoded path doesn't exist.
+    In local mode (validate_locally=True) falls back to the raw encoded
+    name if the decoded path doesn't exist on this machine — that probe
+    protects against folder names that legitimately contain hyphens.
+
+    In aggregation mode the source-host filesystem isn't reachable, so
+    the probe would always fail; callers pass validate_locally=False to
+    skip it and return the decoded path unconditionally.
     """
     decoded = "/" + encoded.replace("-", "/")
+    if not validate_locally:
+        return decoded
     if Path(decoded).is_dir():
         return decoded
     return encoded
 
 
-def _search_cursor_transcripts(rg: str, query: str) -> list[SearchResult]:
-    """Search .txt transcript files in ~/.cursor/projects/ via ripgrep."""
-    if not CURSOR_PROJECTS.is_dir():
+def _search_cursor_transcripts(
+    rg: str,
+    query: str,
+    cursor_projects: Path,
+    host: str | None,
+) -> list[SearchResult]:
+    """Search .txt transcript files under *cursor_projects* via ripgrep."""
+    if not cursor_projects.is_dir():
         return []
 
     cmd = [
         rg, "--json", "-i",
         "--glob", "*.txt",
         query,
-        str(CURSOR_PROJECTS),
+        str(cursor_projects),
     ]
 
     try:
@@ -263,9 +334,11 @@ def _search_cursor_transcripts(rg: str, query: str) -> list[SearchResult]:
         seen.add(dedup_key)
 
         # Decode project path from the encoded directory name
-        # Path structure: ~/.cursor/projects/{encoded}/agent-transcripts/{id}.txt
+        # Path structure: {cursor_projects}/{encoded}/agent-transcripts/{id}.txt
         encoded_name = fp.parent.parent.name
-        project_path = _decode_cursor_projects_path(encoded_name)
+        project_path = _decode_cursor_projects_path(
+            encoded_name, validate_locally=host is None,
+        )
 
         display_text = _extract_display_text(matched_text, query)
         if not display_text:
@@ -277,20 +350,25 @@ def _search_cursor_transcripts(rg: str, query: str) -> list[SearchResult]:
             provider=Provider.CURSOR,
             matched_line=display_text,
             file_path=file_path,
+            host=host,
         ))
 
     return results
 
 
-def _search_cursor_stores(query: str) -> list[SearchResult]:
-    """Search store.db files in ~/.cursor/chats/ via SQLite."""
-    if not CURSOR_CHATS.is_dir():
+def _search_cursor_stores(
+    query: str,
+    cursor_chats: Path,
+    host: str | None,
+) -> list[SearchResult]:
+    """Search store.db files under *cursor_chats* via SQLite."""
+    if not cursor_chats.is_dir():
         return []
 
     results: list[SearchResult] = []
     query_lower = query.lower()
 
-    for hash_dir in CURSOR_CHATS.iterdir():
+    for hash_dir in cursor_chats.iterdir():
         if not hash_dir.is_dir():
             continue
         for session_dir in hash_dir.iterdir():
@@ -368,6 +446,7 @@ def _search_cursor_stores(query: str) -> list[SearchResult]:
                         provider=Provider.CURSOR,
                         matched_line=matched_text,
                         file_path=str(store_db),
+                        host=host,
                     ))
 
             except (sqlite3.Error, OSError):
@@ -376,21 +455,17 @@ def _search_cursor_stores(query: str) -> list[SearchResult]:
     return results
 
 
-def ripgrep_search(query: str) -> list[SearchResult]:
-    """Run ripgrep across session files and return search results."""
-    rg = shutil.which("rg")
-    if not rg:
-        return []
-
+def _search_one_host(rg: str, query: str, roots: _SearchRoots) -> list[SearchResult]:
+    """Run all per-host searches and return tagged SearchResults."""
     search_paths = []
-    if CLAUDE_PROJECTS.is_dir():
-        search_paths.append(str(CLAUDE_PROJECTS))
-    if CODEX_SESSIONS.is_dir():
-        search_paths.append(str(CODEX_SESSIONS))
-    if COPILOT_SESSIONS.is_dir():
-        search_paths.append(str(COPILOT_SESSIONS))
-    if PI_SESSIONS.is_dir():
-        search_paths.append(str(PI_SESSIONS))
+    if roots.claude_projects.is_dir():
+        search_paths.append(str(roots.claude_projects))
+    if roots.codex_sessions.is_dir():
+        search_paths.append(str(roots.codex_sessions))
+    if roots.copilot_sessions.is_dir():
+        search_paths.append(str(roots.copilot_sessions))
+    if roots.pi_sessions.is_dir():
+        search_paths.append(str(roots.pi_sessions))
 
     results: list[SearchResult] = []
     seen_sessions: set[str] = set()
@@ -532,19 +607,48 @@ def ripgrep_search(query: str) -> list[SearchResult]:
                     provider=provider,
                     matched_line=display_text,
                     file_path=file_path,
+                    host=roots.host,
                 ))
 
     # Cursor search: transcripts (.txt) and store.db files
     cursor_seen: set[str] = set()
 
-    cursor_transcripts = _search_cursor_transcripts(rg, query) if rg else []
+    cursor_transcripts = _search_cursor_transcripts(
+        rg, query, roots.cursor_projects, roots.host,
+    )
     for r in cursor_transcripts:
         cursor_seen.add(r.session_id)
         results.append(r)
 
-    cursor_stores = _search_cursor_stores(query)
+    cursor_stores = _search_cursor_stores(query, roots.cursor_chats, roots.host)
     for r in cursor_stores:
         if r.session_id not in cursor_seen:
             results.append(r)
+
+    return results
+
+
+def ripgrep_search(
+    query: str,
+    aggregation_root: Path | None = None,
+) -> list[SearchResult]:
+    """Run ripgrep across session files and return search results.
+
+    If *aggregation_root* is set, scan each per-host subdirectory under it
+    (one rg invocation per host) and tag each result with the host name.
+    Local-mode behaviour (aggregation_root=None) is unchanged.
+    """
+    rg = shutil.which("rg")
+    if not rg:
+        return []
+
+    if aggregation_root is None:
+        roots_list = [_local_roots()]
+    else:
+        roots_list = list(_aggregated_roots(aggregation_root))
+
+    results: list[SearchResult] = []
+    for roots in roots_list:
+        results.extend(_search_one_host(rg, query, roots))
 
     return results
