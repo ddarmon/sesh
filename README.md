@@ -1,7 +1,7 @@
 # sesh
 
-Browse and search Claude Code, Codex, Cursor, and Copilot sessions in
-the terminal.
+Browse and search Claude Code, Codex, Cursor, Copilot, and pi sessions
+in the terminal.
 
 `sesh` is a TUI that discovers session logs from multiple LLM coding
 assistants, lets you browse them by project, read message threads, and
@@ -49,15 +49,15 @@ Developed and tested on macOS. The codebase uses `pathlib.Path` and
 `shutil.which()` throughout, so most of it is platform-agnostic.
 
 **Linux** -- Should work out of the box. The Claude Code, Codex, Cursor,
-and Copilot data directories use the same paths as macOS (`~/.claude`,
-`~/.codex`, `~/.cursor`, `~/.copilot`). Textual and ripgrep both support
-Linux.
+Copilot, and pi data directories use the same paths as macOS
+(`~/.claude`, `~/.codex`, `~/.cursor`, `~/.copilot`, `~/.pi`). Textual
+and ripgrep both support Linux.
 
 **Windows** -- Partially supported. The core TUI and CLI will run, but
 the Cursor provider's workspace storage path may not resolve correctly
 (it defaults to a Linux-style path instead of `AppData/Roaming/Cursor`
-on Windows). Claude Code, Codex, and Copilot path resolution should work
-via `Path.home()`. Ripgrep is available on Windows via `winget` or
+on Windows). Claude Code, Codex, Copilot, and pi path resolution should
+work via `Path.home()`. Ripgrep is available on Windows via `winget` or
 `choco install ripgrep`.
 
 ## Usage
@@ -73,21 +73,21 @@ toggles -- persist across launches.
 
 #### Keybindings
 
-| Key      | Action                                                  |
-| -------- | ------------------------------------------------------- |
-| `/`      | Focus the search bar                                    |
-| `Escape` | Clear search and return to full tree                    |
-| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot) |
-| `o`      | Open/resume the selected session in its CLI             |
-| `e`      | Export session to clipboard as Markdown                 |
-| `d`      | Delete the selected session (with confirmation)         |
-| `m`      | Move selected project path (full or metadata-only)      |
-| `t`      | Toggle tool call/result visibility                      |
-| `T`      | Toggle thinking/reasoning visibility                    |
-| `F`      | Toggle fullscreen message pane                          |
-| `S`      | Open Terminal-tab snapshots (macOS only)                |
-| `?`      | Show keyboard shortcuts help                            |
-| `q`      | Quit                                                    |
+| Key      | Action                                                     |
+| -------- | ---------------------------------------------------------- |
+| `/`      | Focus the search bar                                       |
+| `Escape` | Clear search and return to full tree                       |
+| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi) |
+| `o`      | Open/resume the selected session in its CLI                |
+| `e`      | Export session to clipboard as Markdown                    |
+| `d`      | Delete the selected session (with confirmation)            |
+| `m`      | Move selected project path (full or metadata-only)         |
+| `t`      | Toggle tool call/result visibility                         |
+| `T`      | Toggle thinking/reasoning visibility                       |
+| `F`      | Toggle fullscreen message pane                             |
+| `S`      | Open Terminal-tab snapshots (macOS only)                   |
+| `?`      | Show keyboard shortcuts help                               |
+| `q`      | Quit                                                       |
 
 Press `?` at any time to see all keyboard shortcuts:
 
@@ -118,6 +118,7 @@ Each project in the tree shows which providers have sessions for it:
 -   `X` -- Codex
 -   `U` -- Cursor
 -   `P` -- Copilot
+-   `π` -- pi
 
 Example: `myproject [C,X:12]` means 12 sessions from Claude and Codex.
 
@@ -180,14 +181,15 @@ sesh move <old-path> <new-path> --dry-run
 Press `Shift+S` in the TUI (or use `sesh snapshot save`) to capture
 every open Terminal.app tab --- its working directory and the resume
 command for any coding-agent session running inside it (Claude Code,
-Codex, Cursor, or Copilot). Reopen the snapshot later to restore the
+Codex, Cursor, Copilot, or pi). Reopen the snapshot later to restore the
 same set of tabs, each one resumed against the same session.
 
 Resume metadata is resolved at capture time: `sesh` first scans
 scrollback for explicit `claude --resume`, `codex resume`,
-`agent --resume=`, and `copilot --resume=` lines, then falls back to a
-ripgrep-based search across your indexed sessions when the explicit line
-has scrolled off. This means reopens are deterministic and fast.
+`agent --resume=`, `copilot --resume=`, and `pi --session` lines, then
+falls back to a ripgrep-based search across your indexed sessions when
+the explicit line has scrolled off. This means reopens are deterministic
+and fast.
 
 ```
 sesh snapshot save                  # capture; prints id and counts
@@ -331,6 +333,15 @@ contains `workspace.yaml` (flat key-value metadata: `id`, `cwd`,
 and session lifecycle events). Summaries come from workspace.yaml, with
 fallback to the first user message.
 
+### pi
+
+Reads `~/.pi/agent/sessions/{encoded}/` JSONL files. The encoded
+directory wraps the project path with leading and trailing `--` (e.g.
+`/Users/me/proj` → `--Users-me-proj--`). Each session is one JSONL file
+named `{ISO-timestamp}_{uuid}.jsonl`; the first line is a
+`type:"session"` header carrying the cwd. The provider always recovers
+the real cwd from that header, never from the encoded folder name.
+
 ## Cache
 
 Parsed session metadata is cached at `~/.cache/sesh/sessions.json`,
@@ -364,5 +375,6 @@ src/sesh/
     codex.py         # Codex JSONL parser
     copilot.py       # Copilot YAML+JSONL parser
     cursor.py        # Cursor SQLite parser
+    pi.py            # pi JSONL parser
 ```
 
