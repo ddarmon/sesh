@@ -242,6 +242,48 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
 
 
 @pytest.fixture()
+def tmp_aggregation_search_dirs(tmp_path: Path) -> dict[str, object]:
+    """Build a two-host aggregation tree for search tests.
+
+    Layout:
+        <tmp_path>/aggregation/
+            laptop/.claude/projects/
+            laptop/.codex/sessions/
+            laptop/.cursor/projects/
+            laptop/.cursor/chats/
+            laptop/.copilot/session-state/
+            laptop/.pi/agent/sessions/
+            desktop/...  (same shape)
+
+    Returns the root and a per-host path dict so tests can write
+    fixtures into specific hosts without monkeypatching module
+    constants — `ripgrep_search(query, aggregation_root=...)`
+    receives the root explicitly.
+    """
+    root = tmp_path / "aggregation"
+
+    def _build(host: str) -> dict[str, Path]:
+        base = root / host
+        paths = {
+            "claude_projects": base / ".claude" / "projects",
+            "codex_sessions": base / ".codex" / "sessions",
+            "cursor_projects": base / ".cursor" / "projects",
+            "cursor_chats": base / ".cursor" / "chats",
+            "copilot_sessions": base / ".copilot" / "session-state",
+            "pi_sessions": base / ".pi" / "agent" / "sessions",
+        }
+        for p in paths.values():
+            p.mkdir(parents=True, exist_ok=True)
+        return paths
+
+    return {
+        "root": root,
+        "laptop": _build("laptop"),
+        "desktop": _build("desktop"),
+    }
+
+
+@pytest.fixture()
 def tmp_snapshots_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect snapshot storage to a temp dir for tests."""
     from sesh import paths

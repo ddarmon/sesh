@@ -82,6 +82,112 @@ def test_cursor_transcript_search(tmp_search_dirs) -> None:
     assert any(r.provider is Provider.CURSOR and r.session_id == "cursor-1" for r in results)
 
 
+def test_ripgrep_search_aggregation_finds_per_host(
+    tmp_aggregation_search_dirs, tmp_search_dirs,
+) -> None:
+    """Aggregation mode scans every host subtree and tags each result with its host."""
+    _require_rg()
+
+    # Same project path on both hosts; the resulting matches must stay
+    # separate and each must carry the right host.
+    project_path = "/Users/me/agg"
+    for host in ("laptop", "desktop"):
+        host_dirs = tmp_aggregation_search_dirs[host]
+        write_jsonl(
+            host_dirs["claude_projects"] / "-Users-me-agg" / "a.jsonl",
+            [
+                {
+                    "sessionId": f"claude-{host}",
+                    "cwd": project_path,
+                    "message": {
+                        "role": "user",
+                        "content": f"Needle token from {host}",
+                    },
+                }
+            ],
+        )
+
+    # Salt the local-mode roots — they must NOT be scanned when an
+    # aggregation_root is passed.
+    write_jsonl(
+        tmp_search_dirs["claude_projects"] / "-Users-me-local" / "leak.jsonl",
+        [
+            {
+                "sessionId": "claude-local-leak",
+                "cwd": "/Users/me/local",
+                "message": {"role": "user", "content": "Needle token from LOCAL"},
+            }
+        ],
+    )
+
+    results = search.ripgrep_search(
+        "needle token",
+        aggregation_root=tmp_aggregation_search_dirs["root"],
+    )
+
+    hosts = sorted({r.host for r in results if r.host is not None})
+    assert hosts == ["desktop", "laptop"]
+
+    session_ids = {r.session_id for r in results}
+    assert "claude-laptop" in session_ids
+    assert "claude-desktop" in session_ids
+    assert "claude-local-leak" not in session_ids
+
+
+def test_ripgrep_search_aggregation_cursor(tmp_aggregation_search_dirs) -> None:
+    """Cursor transcripts + store.db search both work in aggregation mode."""
+    _require_rg()
+
+    laptop = tmp_aggregation_search_dirs["laptop"]
+    desktop = tmp_aggregation_search_dirs["desktop"]
+
+    # Cursor transcript on laptop; the decoded project path won't exist
+    # on the aggregator's filesystem but must still be returned (the
+    # validate_locally probe is suppressed in aggregation mode).
+    transcript = (
+        laptop["cursor_projects"]
+        / "Users-laptop-only-cursor"
+        / "agent-transcripts"
+        / "cursor-laptop.txt"
+    )
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(
+        "user:\nNeedle token in laptop transcript\nassistant:\nok\n"
+    )
+
+    # Cursor store.db on desktop with an embedded Workspace Path.
+    desktop_project = "/Users/me/desktop-cursor"
+    md5 = hashlib.md5(desktop_project.encode()).hexdigest()
+    create_store_db(
+        desktop["cursor_chats"] / md5 / "store-desktop-1" / "store.db",
+        blobs=[
+            {"content": f"Workspace Path: {desktop_project}\n"},
+            {"role": "user", "content": "Needle token in desktop store"},
+        ],
+    )
+
+    results = search.ripgrep_search(
+        "needle token",
+        aggregation_root=tmp_aggregation_search_dirs["root"],
+    )
+
+    transcript_hits = [
+        r for r in results
+        if r.session_id == "cursor-laptop" and r.provider is Provider.CURSOR
+    ]
+    assert len(transcript_hits) == 1
+    assert transcript_hits[0].host == "laptop"
+    assert transcript_hits[0].project_path == "/Users/laptop/only/cursor"
+
+    store_hits = [
+        r for r in results
+        if r.session_id == "store-desktop-1" and r.provider is Provider.CURSOR
+    ]
+    assert len(store_hits) == 1
+    assert store_hits[0].host == "desktop"
+    assert store_hits[0].project_path == desktop_project
+
+
 def test_cursor_store_db_search(tmp_search_dirs) -> None:
     """Cursor store.db search (SQLite-based, not rg) finds the query in blob content."""
     _require_rg()
