@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,12 @@ COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_RG_REGEX_META = re.compile(r'[\\.*+?{}()\[\]|^$]')
+
+
+def _is_literal(query: str) -> bool:
+    """True when *query* contains no regex metacharacters."""
+    return not _RG_REGEX_META.search(query)
 
 
 @dataclass
@@ -294,7 +301,8 @@ def _search_cursor_transcripts(
         return []
 
     cmd = [
-        rg, "--json", "-i",
+        rg, "--json", "-i", "-m", "1",
+        *(("-F",) if _is_literal(query) else ()),
         "--glob", "*.txt",
         query,
         str(cursor_projects),
@@ -356,6 +364,11 @@ def _search_cursor_transcripts(
     return results
 
 
+def _escape_like(s: str) -> str:
+    """Escape ``%``, ``_``, and ``!`` for a SQLite LIKE with ``ESCAPE '!'``."""
+    return s.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+
+
 def _search_cursor_stores(
     query: str,
     cursor_chats: Path,
@@ -366,6 +379,7 @@ def _search_cursor_stores(
         return []
 
     results: list[SearchResult] = []
+    like_pattern = f"%{_escape_like(query)}%"
     query_lower = query.lower()
 
     for hash_dir in cursor_chats.iterdir():
@@ -379,11 +393,37 @@ def _search_cursor_stores(
             try:
                 conn = sqlite3.connect(f"file:{store_db}?mode=ro", uri=True)
                 cur = conn.cursor()
-                cur.execute("SELECT data FROM blobs")
 
+                # Extract project path from the blob containing "Workspace Path:"
                 project_path = ""
-                matched_text = ""
+                cur.execute(
+                    "SELECT data FROM blobs"
+                    " WHERE data LIKE '%Workspace Path:%' ESCAPE '!'"
+                    " LIMIT 1",
+                )
+                for (blob_data,) in cur.fetchall():
+                    try:
+                        text = (
+                            blob_data.decode("utf-8")
+                            if isinstance(blob_data, bytes)
+                            else str(blob_data)
+                        )
+                        obj = json.loads(text)
+                        if isinstance(obj, dict):
+                            content = obj.get("content", "")
+                            if isinstance(content, str):
+                                m = re.search(r"Workspace Path: ([^\n]+)", content)
+                                if m:
+                                    project_path = m.group(1).strip()
+                    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                        pass
 
+                # Search for matching blobs using LIKE to pre-filter in C
+                matched_text = ""
+                cur.execute(
+                    "SELECT data FROM blobs WHERE data LIKE ? ESCAPE '!'",
+                    (like_pattern,),
+                )
                 for (blob_data,) in cur.fetchall():
                     if not blob_data:
                         continue
@@ -397,14 +437,7 @@ def _search_cursor_stores(
                         if not isinstance(obj, dict):
                             continue
 
-                        # Extract project path from system content
                         content = obj.get("content", "")
-                        if isinstance(content, str):
-                            m = re.search(r"Workspace Path: ([^\n]+)", content)
-                            if m and not project_path:
-                                project_path = m.group(1).strip()
-
-                        # Extract text content for matching
                         if isinstance(content, str):
                             content_text = content
                         elif isinstance(content, list):
@@ -432,8 +465,7 @@ def _search_cursor_stores(
                             matched_text = _extract_display_text(
                                 content_text, query
                             )
-                            if project_path:
-                                break  # Have both match + path
+                            break
                     except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
                         continue
 
@@ -455,7 +487,12 @@ def _search_cursor_stores(
     return results
 
 
-def _search_one_host(rg: str, query: str, roots: _SearchRoots) -> list[SearchResult]:
+def _search_one_host(
+    rg: str,
+    query: str,
+    roots: _SearchRoots,
+    cwd_lookup: dict[tuple[str, str], str] | None = None,
+) -> list[SearchResult]:
     """Run all per-host searches and return tagged SearchResults."""
     search_paths = []
     if roots.claude_projects.is_dir():
@@ -469,10 +506,12 @@ def _search_one_host(rg: str, query: str, roots: _SearchRoots) -> list[SearchRes
 
     results: list[SearchResult] = []
     seen_sessions: set[str] = set()
+    file_cwd_cache: dict[str, str] = {}
 
     if search_paths:
         cmd = [
-            rg, "--json", "-i",
+            rg, "--json", "-i", "-m", "1",
+            *(("-F",) if _is_literal(query) else ()),
             "--glob", "*.jsonl",
             query,
             *search_paths,
@@ -547,22 +586,37 @@ def _search_one_host(rg: str, query: str, roots: _SearchRoots) -> list[SearchRes
                     else:
                         session_id = _extract_codex_session_id(file_path)
 
-                # Extract project_path (cwd) for session resume
+                # Deduplicate by session — skip cwd lookup and content
+                # extraction for matches we've already seen.
+                dedup_key = f"{session_id}:{file_path}" if session_id else file_path
+                if dedup_key in seen_sessions:
+                    continue
+                seen_sessions.add(dedup_key)
+
+                # Extract project_path (cwd) for session resume.
+                # Fallback chain: entry field → index → file cache → file I/O
                 project_path = ""
                 if entry:
                     project_path = entry.get("cwd", "") or ""
                     if not project_path:
                         project_path = entry.get("payload", {}).get("cwd", "") or ""
-                # For Codex, cwd is only in the session_meta (first line); read it
+
+                if not project_path and cwd_lookup and session_id:
+                    project_path = cwd_lookup.get((session_id, provider.value), "")
+
+                if not project_path and file_path in file_cwd_cache:
+                    project_path = file_cwd_cache[file_path]
+
                 if not project_path and provider == Provider.CODEX:
                     try:
                         with open(file_path) as f:
                             first = json.loads(f.readline())
                             project_path = first.get("payload", {}).get("cwd", "") or ""
+                        if project_path:
+                            file_cwd_cache[file_path] = project_path
                     except (OSError, json.JSONDecodeError, AttributeError):
                         pass
 
-                # For pi, cwd is only in the session header (first line)
                 if not project_path and provider == Provider.PI:
                     try:
                         with open(file_path) as f:
@@ -573,15 +627,18 @@ def _search_one_host(rg: str, query: str, roots: _SearchRoots) -> list[SearchRes
                                 first = json.loads(stripped)
                                 project_path = first.get("cwd", "") or ""
                                 break
+                        if project_path:
+                            file_cwd_cache[file_path] = project_path
                     except (OSError, json.JSONDecodeError, AttributeError):
                         pass
 
-                # For Copilot, cwd is in workspace.yaml alongside events.jsonl
                 if not project_path and provider == Provider.COPILOT:
                     from sesh.providers.copilot import _parse_workspace_yaml
                     yaml_path = Path(file_path).parent / "workspace.yaml"
                     meta = _parse_workspace_yaml(yaml_path)
                     project_path = meta.get("cwd", "")
+                    if project_path:
+                        file_cwd_cache[file_path] = project_path
 
                 # Extract readable display text
                 content_text = _extract_content_text(entry, query) if entry else ""
@@ -594,12 +651,6 @@ def _search_one_host(rg: str, query: str, roots: _SearchRoots) -> list[SearchRes
                         display_text = raw_display
                     elif not display_text:
                         display_text = matched_text[:200]
-
-                # Deduplicate by session
-                dedup_key = f"{session_id}:{file_path}" if session_id else file_path
-                if dedup_key in seen_sessions:
-                    continue
-                seen_sessions.add(dedup_key)
 
                 results.append(SearchResult(
                     session_id=session_id,
@@ -631,12 +682,17 @@ def _search_one_host(rg: str, query: str, roots: _SearchRoots) -> list[SearchRes
 def ripgrep_search(
     query: str,
     aggregation_root: Path | None = None,
+    cwd_lookup: dict[tuple[str, str], str] | None = None,
 ) -> list[SearchResult]:
     """Run ripgrep across session files and return search results.
 
     If *aggregation_root* is set, scan each per-host subdirectory under it
     (one rg invocation per host) and tag each result with the host name.
     Local-mode behaviour (aggregation_root=None) is unchanged.
+
+    *cwd_lookup*, when provided, maps ``(session_id, provider_value)`` to
+    ``project_path``.  It is consulted before falling back to file I/O for
+    cwd resolution.
     """
     rg = shutil.which("rg")
     if not rg:
@@ -648,7 +704,16 @@ def ripgrep_search(
         roots_list = list(_aggregated_roots(aggregation_root))
 
     results: list[SearchResult] = []
-    for roots in roots_list:
-        results.extend(_search_one_host(rg, query, roots))
+    if len(roots_list) <= 1:
+        for roots in roots_list:
+            results.extend(_search_one_host(rg, query, roots, cwd_lookup=cwd_lookup))
+    else:
+        with ThreadPoolExecutor(max_workers=len(roots_list)) as pool:
+            futures = [
+                pool.submit(_search_one_host, rg, query, r, cwd_lookup)
+                for r in roots_list
+            ]
+            for f in as_completed(futures):
+                results.extend(f.result())
 
     return results

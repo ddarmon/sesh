@@ -138,3 +138,35 @@ def test_extract_content_text_copilot_tool_result() -> None:
     extracted = search._extract_content_text(entry, "needle")
     assert "needle" in extracted
 
+
+def test_is_literal_with_plain_text() -> None:
+    """Plain text queries (no regex metacharacters) are detected as literal."""
+    assert search._is_literal("hello world")
+    assert search._is_literal("database migration")
+    assert search._is_literal("fix the bug")
+    assert search._is_literal("CamelCase123")
+    assert search._is_literal("")
+
+
+def test_is_literal_with_regex_metacharacters() -> None:
+    """Queries containing regex metacharacters are not literal."""
+    assert not search._is_literal("foo.*bar")
+    assert not search._is_literal("hello?")
+    assert not search._is_literal("a+b")
+    assert not search._is_literal("[abc]")
+    assert not search._is_literal("a|b")
+    assert not search._is_literal("end$")
+    assert not search._is_literal("^start")
+    assert not search._is_literal("a{3}")
+    assert not search._is_literal("(group)")
+    assert not search._is_literal("back\\slash")
+
+
+def test_escape_like_escapes_wildcards() -> None:
+    """SQLite LIKE wildcards (%, _) and the escape char (!) are escaped."""
+    assert search._escape_like("100%") == "100!%"
+    assert search._escape_like("file_name") == "file!_name"
+    assert search._escape_like("wow!") == "wow!!"
+    assert search._escape_like("plain text") == "plain text"
+    assert search._escape_like("a%b_c!d") == "a!%b!_c!!d"
+

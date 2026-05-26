@@ -209,3 +209,33 @@ def test_cursor_store_db_search(tmp_search_dirs) -> None:
         and r.project_path == project_path
         for r in results
     )
+
+
+def test_parallel_host_search_returns_all_hosts(
+    tmp_aggregation_search_dirs,
+) -> None:
+    """Aggregation mode searches multiple hosts in parallel and returns results from all."""
+    _require_rg()
+
+    for host in ("laptop", "desktop"):
+        host_dirs = tmp_aggregation_search_dirs[host]
+        write_jsonl(
+            host_dirs["claude_projects"] / "-Users-me-proj" / "a.jsonl",
+            [
+                {
+                    "sessionId": f"s-{host}",
+                    "cwd": "/Users/me/proj",
+                    "message": {"role": "user", "content": f"parallel needle from {host}"},
+                }
+            ],
+        )
+
+    results = search.ripgrep_search(
+        "parallel needle",
+        aggregation_root=tmp_aggregation_search_dirs["root"],
+    )
+
+    hosts = {r.host for r in results}
+    assert "laptop" in hosts
+    assert "desktop" in hosts
+    assert len(results) == 2
