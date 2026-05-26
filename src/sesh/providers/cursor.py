@@ -13,6 +13,7 @@ import tempfile
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote
 
 from sesh.models import Message, MoveReport, Provider, SessionMeta, encode_cursor_path, workspace_uri
 from sesh.providers import SessionProvider
@@ -25,8 +26,30 @@ if sys.platform == "darwin":
         Path.home() / "Library" / "Application Support"
         / "Cursor" / "User" / "workspaceStorage"
     )
+elif sys.platform == "win32":
+    # On Windows, Cursor stores per-user state under %APPDATA%
+    # (default ``~/AppData/Roaming``). Honor the env var when set so
+    # redirected roaming profiles (corp laptops etc.) still resolve.
+    _appdata = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    WORKSPACE_STORAGE = _appdata / "Cursor" / "User" / "workspaceStorage"
 else:
     WORKSPACE_STORAGE = Path.home() / ".config" / "Cursor" / "User" / "workspaceStorage"
+
+
+def _decode_workspace_folder_uri(uri: str) -> str | None:
+    """Decode a ``workspace.json`` ``folder`` URI into a filesystem path.
+
+    Returns ``None`` if it isn't a ``file://`` URI we recognize.
+    Windows URIs include a percent-encoded drive letter
+    (``file:///c%3A/Users/...``), which we normalize to native form
+    (``C:\\Users\\...``) so paths line up with what other providers write.
+    """
+    if not uri.startswith("file:///"):
+        return None
+    path = unquote(uri[len("file://"):])
+    if len(path) >= 3 and path[0] == "/" and path[1].isalpha() and path[2] == ":":
+        return path[1].upper() + path[2:].replace("/", "\\")
+    return path
 
 
 def _stringify_tool_value(value) -> str:
@@ -38,6 +61,24 @@ def _stringify_tool_value(value) -> str:
         return json.dumps(value, indent=2)
     except TypeError:
         return str(value)
+
+
+def _iter_jsonl(path: Path) -> Iterator[dict]:
+    """Yield each JSON object from a UTF-8 JSONL file, skipping junk lines."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(entry, dict):
+                    yield entry
+    except OSError:
+        return
 
 
 def _rewrite_workspace_json(workspace_json: Path, old_uri: str, new_uri: str) -> bool:
@@ -116,8 +157,9 @@ class CursorProvider(SessionProvider):
 
     @property
     def _workspace_storage(self) -> Path:
-        # In aggregation mode look under {base_dir}/Library/... (macOS) or
-        # {base_dir}/.config/Cursor/... (Linux), mirroring the platform default.
+        # In aggregation mode mirror the local platform's layout under
+        # base_dir (macOS: Library/..., Windows: AppData/Roaming/...,
+        # Linux: .config/Cursor/...).
         if self._base_dir is None:
             return WORKSPACE_STORAGE
         if sys.platform == "darwin":
@@ -125,6 +167,8 @@ class CursorProvider(SessionProvider):
                 self._base_dir / "Library" / "Application Support"
                 / "Cursor" / "User" / "workspaceStorage"
             )
+        if sys.platform == "win32":
+            return self._base_dir / "AppData" / "Roaming" / "Cursor" / "User" / "workspaceStorage"
         return self._base_dir / ".config" / "Cursor" / "User" / "workspaceStorage"
 
     def _build_workspace_map(self) -> dict[str, str]:
@@ -142,8 +186,8 @@ class CursorProvider(SessionProvider):
             try:
                 data = json.loads(ws_json.read_text())
                 folder_uri = data.get("folder", "")
-                if folder_uri.startswith("file:///"):
-                    project_path = folder_uri[len("file://"):]
+                project_path = _decode_workspace_folder_uri(folder_uri)
+                if project_path:
                     self._workspace_map[project_path] = ws_dir.name
             except (json.JSONDecodeError, OSError):
                 continue
@@ -158,11 +202,19 @@ class CursorProvider(SessionProvider):
         if not projects_dir.is_dir():
             return self._projects_dir_map
         workspace_map = self._build_workspace_map()
-        # Build reverse: encoded_name -> project_path from workspace_map
+
+        # On Windows the encoded name's drive-letter case can drift from
+        # the on-disk dir (Cursor writes both ``C-Users-...`` and
+        # ``c-Users-...``), so look up case-insensitively there.
+        normalize = str.lower if sys.platform == "win32" else (lambda s: s)
+        existing = {
+            normalize(entry.name): entry
+            for entry in projects_dir.iterdir()
+            if entry.is_dir()
+        }
         for project_path in workspace_map:
-            encoded = encode_cursor_path(project_path)
-            candidate = projects_dir / encoded
-            if candidate.is_dir():
+            candidate = existing.get(normalize(encode_cursor_path(project_path)))
+            if candidate is not None:
                 self._projects_dir_map[project_path] = candidate
         return self._projects_dir_map
 
@@ -192,7 +244,9 @@ class CursorProvider(SessionProvider):
             if project_path in seen:
                 continue
             transcripts = proj_dir / "agent-transcripts"
-            if transcripts.is_dir() and any(transcripts.glob("*.txt")):
+            if not transcripts.is_dir():
+                continue
+            if self._collect_transcripts(transcripts):
                 seen.add(project_path)
                 display_name = Path(project_path).name or project_path
                 yield project_path, display_name
@@ -249,6 +303,27 @@ class CursorProvider(SessionProvider):
         sessions.sort(key=lambda s: s.timestamp, reverse=True)
         return sessions
 
+    @staticmethod
+    def _collect_transcripts(transcripts_dir: Path) -> dict[str, Path]:
+        """Map ``composer-id -> transcript file``.
+
+        Cursor has shipped three layouts (see entireio/cli#527, which
+        prefers the nested form when present):
+
+        * ``<id>.txt``        -- legacy plain-text transcript
+        * ``<id>.jsonl``      -- flat JSONL transcript
+        * ``<id>/<id>.jsonl`` -- nested JSONL (current default)
+        """
+        out: dict[str, Path] = {}
+        for entry in transcripts_dir.iterdir():
+            if entry.is_file() and entry.suffix in (".txt", ".jsonl"):
+                out[entry.stem] = entry
+            elif entry.is_dir():
+                nested = entry / f"{entry.name}.jsonl"
+                if nested.is_file():
+                    out[entry.name] = nested  # nested wins over a same-id flat file
+        return out
+
     def _get_ide_sessions(self, project_path: str) -> list[SessionMeta]:
         """Return IDE sessions from state.vscdb + agent-transcripts."""
         proj_dir = self._find_projects_dir(project_path)
@@ -258,13 +333,8 @@ class CursorProvider(SessionProvider):
         if not transcripts_dir.is_dir():
             return []
 
-        # Build set of available transcript files
-        txt_files: dict[str, Path] = {}
-        for f in transcripts_dir.iterdir():
-            if f.suffix == ".txt" and f.is_file():
-                txt_files[f.stem] = f
-
-        if not txt_files:
+        transcripts = self._collect_transcripts(transcripts_dir)
+        if not transcripts:
             return []
 
         # Try to get rich metadata from state.vscdb
@@ -276,9 +346,9 @@ class CursorProvider(SessionProvider):
         # Match composer metadata to transcript files
         for entry in composer_meta:
             composer_id = entry.get("composerId", "")
-            if composer_id in txt_files:
+            if composer_id in transcripts:
                 matched_ids.add(composer_id)
-                transcript_path = txt_files[composer_id]
+                transcript_path = transcripts[composer_id]
 
                 name = entry.get("name", "")
                 if not name:
@@ -319,8 +389,8 @@ class CursorProvider(SessionProvider):
                     host=self.host,
                 ))
 
-        # Pick up any .txt files not matched by composer metadata
-        for stem, path in txt_files.items():
+        # Pick up any transcripts not matched by composer metadata
+        for stem, path in transcripts.items():
             if stem in matched_ids:
                 continue
             name = self._first_user_message(path) or "Untitled Session"
@@ -369,7 +439,9 @@ class CursorProvider(SessionProvider):
 
     @staticmethod
     def _first_user_message(transcript: Path) -> str | None:
-        """Extract the first user message text from a .txt transcript."""
+        """Extract the first user message text from a transcript file."""
+        if transcript.suffix == ".jsonl":
+            return CursorProvider._first_user_message_jsonl(transcript)
         try:
             in_user = False
             lines: list[str] = []
@@ -394,8 +466,39 @@ class CursorProvider(SessionProvider):
             return None
 
     @staticmethod
+    def _first_user_message_jsonl(transcript: Path) -> str | None:
+        """Return the first user message text (truncated) from a JSONL transcript."""
+        for entry in _iter_jsonl(transcript):
+            if entry.get("role") != "user":
+                continue
+            content = (entry.get("message") or {}).get("content")
+            text = content if isinstance(content, str) else ""
+            if isinstance(content, list):
+                # Take the first text block's body.
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        if text:
+                            break
+            if not text:
+                continue
+            # The IDE wraps the user's actual prompt in <user_query>...
+            # </user_query> alongside other context; extract the prompt.
+            m = re.search(r"<user_query>\s*(.*?)\s*</user_query>", text, re.DOTALL)
+            if m:
+                text = m.group(1)
+            text = " ".join(text.split()).strip()
+            return text[:80] if text else None
+        return None
+
+    @staticmethod
     def _count_transcript_messages(transcript: Path) -> int:
-        """Count user+assistant turns in a .txt transcript."""
+        """Count user+assistant turns in a transcript file (.txt or .jsonl)."""
+        if transcript.suffix == ".jsonl":
+            return sum(
+                1 for entry in _iter_jsonl(transcript)
+                if entry.get("role") in ("user", "assistant")
+            )
         count = 0
         try:
             for line in open(transcript):
@@ -416,6 +519,8 @@ class CursorProvider(SessionProvider):
 
         if source.suffix == ".txt":
             return self._parse_txt_transcript(source)
+        if source.suffix == ".jsonl":
+            return self._parse_jsonl_transcript(source)
         return self._parse_store_db(source)
 
     @staticmethod
@@ -560,17 +665,86 @@ class CursorProvider(SessionProvider):
 
         return messages
 
+    @staticmethod
+    def _block_to_message(block: dict, role: str) -> Message | None:
+        """Convert one Anthropic-style content block to a Message.
+
+        Returns ``None`` for unknown / empty blocks so the caller can
+        skip them. Block types follow Anthropic's content-block schema
+        (``text`` / ``thinking`` / ``tool_use`` / ``tool_result``).
+        """
+        btype = block.get("type")
+        if btype == "text":
+            text = block.get("text", "")
+            return Message(
+                role=role, content=text,
+                is_system=role == "system", content_type="text",
+            ) if text.strip() else None
+        if btype == "thinking":
+            text = block.get("thinking") or block.get("text") or ""
+            return Message(
+                role="assistant", content="",
+                thinking=text, content_type="thinking",
+            ) if text.strip() else None
+        if btype == "tool_use":
+            return Message(
+                role="assistant", content="",
+                tool_name=block.get("name", ""),
+                tool_input=_stringify_tool_value(block.get("input", block.get("args", {}))),
+                content_type="tool_use",
+            )
+        if btype == "tool_result":
+            return Message(
+                role="tool", content="",
+                tool_name=block.get("name") or block.get("tool_name", ""),
+                tool_output=_stringify_tool_value(block.get("content", block.get("result", ""))),
+                content_type="tool_result",
+            )
+        return None
+
+    @staticmethod
+    def _parse_jsonl_transcript(transcript: Path) -> list[Message]:
+        """Load messages from a JSONL transcript (current IDE format).
+
+        Each line is ``{"role": ..., "message": {"content": ...}}`` where
+        content is either a plain string (treated as one ``text`` block)
+        or a list of content blocks dispatched by :meth:`_block_to_message`.
+        """
+        messages: list[Message] = []
+        for entry in _iter_jsonl(transcript):
+            role = entry.get("role", "")
+            content = (entry.get("message") or {}).get("content", "")
+            blocks = (
+                [{"type": "text", "text": content}]
+                if isinstance(content, str) else content
+            )
+            if not isinstance(blocks, list):
+                continue
+            for block in blocks:
+                if isinstance(block, dict):
+                    msg = CursorProvider._block_to_message(block, role)
+                    if msg is not None:
+                        messages.append(msg)
+        return messages
+
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a Cursor session."""
         if not session.source_path:
             return
         source = Path(session.source_path)
         if source.suffix == ".txt":
-            # IDE transcript: just remove the file
+            # Legacy IDE transcript: a single file.
             if source.is_file():
                 source.unlink()
+        elif source.suffix == ".jsonl":
+            # Current IDE transcript: <id>/<id>.jsonl -- drop the dir.
+            parent = source.parent
+            if parent.is_dir() and parent.name == session.id:
+                shutil.rmtree(parent)
+            elif source.is_file():
+                source.unlink()
         else:
-            # CLI agent store.db: remove the session directory
+            # CLI agent session: store.db lives in a per-session dir.
             session_dir = source.parent
             if session_dir.is_dir():
                 shutil.rmtree(session_dir)

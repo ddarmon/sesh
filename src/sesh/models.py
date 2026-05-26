@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -105,12 +106,14 @@ def encode_project_path(path: str) -> str:
 def encode_cursor_path(path: str) -> str:
     """Encode a path the way Cursor does for ``~/.cursor/projects/``.
 
-    Cursor strips the leading ``/`` then replaces ``/`` and spaces with
-    ``-``::
+    Every run of non-alphanumeric characters collapses to a single ``-``,
+    with leading/trailing dashes trimmed. One rule covers POSIX (``/``,
+    spaces) and Windows (``\\``, ``:``, apostrophes)::
 
-        /Users/me/My Project  ->  Users-me-My-Project
+        /Users/me/My Project              ->  Users-me-My-Project
+        C:\\Users\\me\\My Project's Files  ->  C-Users-me-My-Project-s-Files
     """
-    return path.lstrip("/").replace("/", "-").replace(" ", "-")
+    return re.sub(r"[^A-Za-z0-9]+", "-", path).strip("-")
 
 
 def encode_claude_path(path: str) -> str:
