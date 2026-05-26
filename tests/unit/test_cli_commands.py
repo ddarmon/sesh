@@ -125,7 +125,7 @@ def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         search_mod,
         "ripgrep_search",
-        lambda q, aggregation_root=None: [
+        lambda q, aggregation_root=None, **_kw: [
             SearchResult(
                 session_id="s1",
                 provider=Provider.CODEX,
@@ -155,7 +155,7 @@ def test_cmd_search_passes_aggregation_root(monkeypatch, capsys, tmp_path) -> No
 
     captured: dict = {}
 
-    def _fake(q, aggregation_root=None):
+    def _fake(q, aggregation_root=None, **_kw):
         captured["query"] = q
         captured["aggregation_root"] = aggregation_root
         return [
@@ -192,7 +192,7 @@ def test_cmd_clean_empty_results(monkeypatch, capsys) -> None:
     """'sesh clean' with no matches reports zero deletions."""
     import sesh.search as search_mod
 
-    monkeypatch.setattr(search_mod, "ripgrep_search", lambda q: [])
+    monkeypatch.setattr(search_mod, "ripgrep_search", lambda q, **_kw: [])
     cli.cmd_clean(_ns(query="needle", dry_run=False, force=True))
     out = json.loads(capsys.readouterr().out)
     assert out == {"deleted": [], "total": 0, "dry_run": False}
@@ -205,7 +205,7 @@ def test_cmd_clean_dry_run(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         search_mod,
         "ripgrep_search",
-        lambda q: [
+        lambda q, **_kw: [
             SearchResult(
                 session_id="s1",
                 provider=Provider.CLAUDE,
@@ -247,7 +247,7 @@ def test_cmd_clean_dedup_regression(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         search_mod,
         "ripgrep_search",
-        lambda q: [
+        lambda q, **_kw: [
             SearchResult(
                 session_id="sess-1",
                 provider=Provider.CLAUDE,
@@ -295,7 +295,7 @@ def test_cmd_clean_collects_errors(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         search_mod,
         "ripgrep_search",
-        lambda q: [
+        lambda q, **_kw: [
             SearchResult(
                 session_id="s1",
                 provider=Provider.CLAUDE,
@@ -740,7 +740,7 @@ def test_cmd_clean_non_tty_no_force_refuses(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         search_mod,
         "ripgrep_search",
-        lambda q: [
+        lambda q, **_kw: [
             SearchResult(
                 session_id="s1",
                 provider=Provider.CLAUDE,
@@ -775,7 +775,7 @@ def test_cmd_clean_non_tty_with_force_succeeds(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         search_mod,
         "ripgrep_search",
-        lambda q: [
+        lambda q, **_kw: [
             SearchResult(
                 session_id="s1",
                 provider=Provider.CLAUDE,
@@ -803,7 +803,7 @@ def test_cmd_clean_dry_run_skips_confirmation(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         search_mod,
         "ripgrep_search",
-        lambda q: [
+        lambda q, **_kw: [
             SearchResult(
                 session_id="s1",
                 provider=Provider.CLAUDE,

@@ -321,11 +321,33 @@ def cmd_messages(args: argparse.Namespace) -> None:
     })
 
 
+def _build_cwd_lookup() -> dict[tuple[str, str], str] | None:
+    """Build a (session_id, provider) → project_path lookup from the index."""
+    from sesh.cache import load_index
+
+    index = load_index()
+    if not index:
+        return None
+    lookup: dict[tuple[str, str], str] = {}
+    for s in index.get("sessions", []):
+        sid = s.get("id", "")
+        prov = s.get("provider", "")
+        pp = s.get("project_path", "")
+        if sid and prov and pp:
+            lookup[(sid, prov)] = pp
+    return lookup or None
+
+
 def cmd_search(args: argparse.Namespace) -> None:
     """Full-text search via ripgrep."""
     from sesh.search import ripgrep_search
 
-    results = ripgrep_search(args.query, aggregation_root=_aggregation_root(args))
+    cwd_lookup = _build_cwd_lookup()
+    results = ripgrep_search(
+        args.query,
+        aggregation_root=_aggregation_root(args),
+        cwd_lookup=cwd_lookup,
+    )
 
     out = []
     for r in results:
@@ -348,7 +370,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
     from sesh.models import Provider, SessionMeta
     from sesh.search import ripgrep_search
 
-    results = ripgrep_search(args.query)
+    results = ripgrep_search(args.query, cwd_lookup=_build_cwd_lookup())
 
     if not results:
         _json_out({"deleted": [], "total": 0, "dry_run": args.dry_run})

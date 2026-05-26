@@ -1457,10 +1457,26 @@ class SeshApp(App):
                 group="search",
             )
 
+    def _build_cwd_lookup(self) -> dict[tuple[str, str], str] | None:
+        """Build a (session_id, provider) → project_path lookup from in-memory sessions."""
+        if not self.sessions:
+            return None
+        lookup: dict[tuple[str, str], str] = {}
+        for sess_list in self.sessions.values():
+            for s in sess_list:
+                if s.id and s.project_path:
+                    lookup[(s.id, s.provider.value)] = s.project_path
+        return lookup or None
+
     def _fulltext_search(self, query: str) -> None:
         """Run ripgrep full-text search in a thread."""
         from sesh.search import ripgrep_search
-        results = ripgrep_search(query, aggregation_root=self._aggregation_root)
+        cwd_lookup = self._build_cwd_lookup()
+        results = ripgrep_search(
+            query,
+            aggregation_root=self._aggregation_root,
+            cwd_lookup=cwd_lookup,
+        )
         if results:
             self.call_from_thread(self._show_search_results, results, query)
         else:

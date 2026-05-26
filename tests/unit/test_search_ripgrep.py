@@ -218,3 +218,92 @@ def test_ripgrep_search_returns_empty_when_rg_missing(monkeypatch) -> None:
     """When rg is not on PATH, ripgrep_search returns an empty list."""
     monkeypatch.setattr(search.shutil, "which", lambda _: None)
     assert search.ripgrep_search("needle") == []
+
+
+def test_early_dedup_skips_cwd_lookup_for_duplicates(
+    tmp_search_dirs, monkeypatch,
+) -> None:
+    """When the same session appears twice in rg output, the second match
+    skips cwd file I/O entirely (dedup fires before cwd resolution)."""
+    claude_file = tmp_search_dirs["claude_projects"] / "proj" / "a.jsonl"
+    write_jsonl(
+        claude_file,
+        [
+            {"sessionId": "s1", "message": {"content": "needle one"}},
+            {"sessionId": "s1", "message": {"content": "needle two"}},
+        ],
+    )
+
+    line1 = json.dumps({"sessionId": "s1", "message": {"content": "needle one"}})
+    line2 = json.dumps({"sessionId": "s1", "message": {"content": "needle two"}})
+    stdout = "\n".join([
+        _rg_match(str(claude_file), line1),
+        _rg_match(str(claude_file), line2),
+    ])
+    monkeypatch.setattr(search.shutil, "which", lambda _: "rg")
+    monkeypatch.setattr(search.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=stdout))
+    monkeypatch.setattr(
+        search, "_search_cursor_transcripts", lambda *a, **k: [],
+    )
+    monkeypatch.setattr(
+        search, "_search_cursor_stores", lambda *a, **k: [],
+    )
+
+    results = search.ripgrep_search("needle")
+    assert len(results) == 1
+    assert results[0].session_id == "s1"
+
+
+def test_cwd_lookup_skips_file_io(tmp_search_dirs, monkeypatch) -> None:
+    """When cwd_lookup provides the project path, no file I/O is needed."""
+    codex_file = (
+        tmp_search_dirs["codex_sessions"]
+        / "123e4567-e89b-12d3-a456-426614174000.jsonl"
+    )
+    write_jsonl(codex_file, [
+        {"type": "session_meta", "payload": {"id": "codex-1", "cwd": "/should/not/read"}},
+        {"type": "event_msg", "payload": {"message": "needle"}},
+    ])
+
+    matched = json.dumps({"type": "event_msg", "payload": {"message": "needle"}})
+    stdout = _rg_match(str(codex_file), matched)
+
+    open_calls = []
+    original_open = open
+
+    def tracking_open(path, *a, **k):
+        open_calls.append(str(path))
+        return original_open(path, *a, **k)
+
+    monkeypatch.setattr("builtins.open", tracking_open)
+    monkeypatch.setattr(search.shutil, "which", lambda _: "rg")
+    monkeypatch.setattr(search.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=stdout))
+    monkeypatch.setattr(search, "_search_cursor_transcripts", lambda *a, **k: [])
+    monkeypatch.setattr(search, "_search_cursor_stores", lambda *a, **k: [])
+
+    lookup = {("123e4567-e89b-12d3-a456-426614174000", "codex"): "/from/index"}
+    results = search.ripgrep_search("needle", cwd_lookup=lookup)
+
+    assert len(results) == 1
+    assert results[0].project_path == "/from/index"
+    assert str(codex_file) not in open_calls
+
+
+def test_cursor_store_like_filters_non_matching_blobs(tmp_search_dirs) -> None:
+    """SQL LIKE pre-filters blobs so non-matching rows are not JSON-parsed in Python."""
+    store_db = tmp_search_dirs["cursor_chats"] / "hash1" / "sess1" / "store.db"
+    create_store_db(
+        store_db,
+        blobs=[
+            {"content": "Workspace Path: /Users/me/repo\nmetadata"},
+            {"role": "user", "content": "no match here"},
+            {"role": "user", "content": "this has the needle token"},
+        ],
+    )
+
+    results = search._search_cursor_stores(
+        "needle", tmp_search_dirs["cursor_chats"], None,
+    )
+    assert len(results) == 1
+    assert results[0].project_path == "/Users/me/repo"
+    assert "needle" in results[0].matched_line
