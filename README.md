@@ -142,6 +142,9 @@ sesh messages <session-id> --limit 10     # first 10 messages
 sesh messages <session-id> --include-tools  # include tool calls/results
 sesh messages <session-id> --full         # include tools + thinking
 sesh search "some query"                  # full-text search via ripgrep
+sesh delete <session-id>                  # delete a single session by ID
+sesh delete last                          # delete the most recently active session
+sesh delete last --provider pi            # delete the most recent pi session
 sesh clean "some query" --dry-run         # preview matching sessions to delete
 sesh resume <session-id>                  # resume in provider CLI
 sesh export <session-id> --format json    # export session transcript

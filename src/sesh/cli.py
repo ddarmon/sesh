@@ -477,14 +477,48 @@ def cmd_clean(args: argparse.Namespace) -> None:
     _json_out(out)
 
 
+def _timestamp_sort_key(session: dict) -> datetime:
+    """Parse a session's index timestamp into a comparable, tz-aware datetime.
+
+    Naive timestamps are treated as UTC and unparseable ones sort oldest, so
+    the key is always orderable across sessions from different providers/hosts.
+    """
+    raw = session.get("timestamp")
+    parsed: datetime | None = None
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            parsed = None
+    if parsed is None:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def cmd_delete(args: argparse.Namespace) -> None:
-    """Delete a single session by ID."""
+    """Delete a single session by ID, or the most recent one with ``last``."""
     _refuse_in_aggregation(args, "delete")
     index = _refresh_index(args)
 
-    matches = [s for s in index["sessions"] if s["id"] == args.session_id]
-    if args.provider:
-        matches = [s for s in matches if s["provider"] == args.provider]
+    if args.session_id == "last":
+        candidates = index["sessions"]
+        if args.provider:
+            candidates = [s for s in candidates if s["provider"] == args.provider]
+        if not candidates:
+            scope = f" for provider '{args.provider}'" if args.provider else ""
+            print(
+                f"No sessions found{scope} to delete. "
+                "Run 'sesh refresh' to update the index.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        matches = [max(candidates, key=_timestamp_sort_key)]
+    else:
+        matches = [s for s in index["sessions"] if s["id"] == args.session_id]
+        if args.provider:
+            matches = [s for s in matches if s["provider"] == args.provider]
 
     if not matches:
         print(
@@ -988,16 +1022,18 @@ def main() -> None:
     # delete
     p_delete = sub.add_parser(
         "delete",
-        help="Delete a single session by ID",
+        help="Delete a single session by ID (or 'last')",
         description=(
-            "Delete a session by its ID. Shows a confirmation prompt in interactive "
-            "terminals. Non-interactive invocations (piped stdin) are refused unless "
+            "Delete a session by its ID, or the most recently active session "
+            "with the literal 'last'. With --provider, 'last' is scoped to that "
+            "provider. Shows a confirmation prompt in interactive terminals. "
+            "Non-interactive invocations (piped stdin) are refused unless "
             "--force is passed. Use --dry-run to preview without deleting."
         ),
     )
     p_delete.add_argument(
         "session_id",
-        help="The session ID to delete",
+        help="The session ID to delete, or 'last' for the most recent session",
     )
     p_delete.add_argument(
         "--provider",
