@@ -172,6 +172,9 @@ the session is deleted via the provider's `delete_session` method:
 CLI equivalents:
 
 -   `sesh delete <session-id>` --- delete a single session by ID
+-   `sesh delete last` --- delete the most recently active session (the
+    one with the newest `timestamp` in the index); scope it to one
+    provider with `--provider`
 -   `sesh clean <query>` --- delete all sessions matching a search query
 
 Both commands require interactive confirmation by default. In
@@ -206,7 +209,7 @@ the index, then query it.
 | `sesh sessions [--project PATH] [--provider NAME]`                                                        | List sessions with optional filters      |
 | `sesh messages <id> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full]` | Load messages for a session              |
 | `sesh search <query>`                                                                                     | Full-text search (Claude, Codex, Cursor) |
-| `sesh delete <id> [--provider NAME] [--force] [--dry-run]`                                                | Delete a single session by ID            |
+| `sesh delete <id\|last> [--provider NAME] [--force] [--dry-run]`                                          | Delete a session by ID, or the most recent with `last` |
 | `sesh clean <query> [--force] [--dry-run]`                                                                | Delete sessions matching a search query  |
 | `sesh resume <id> [--provider NAME]`                                                                      | Resume a session in its provider's CLI   |
 | `sesh export <id> [--provider NAME] [--format md/json] [--include-tools] [--include-thinking] [--full]`   | Export a session to Markdown or JSON     |

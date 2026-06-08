@@ -730,6 +730,96 @@ def test_cmd_delete_eof_aborts(monkeypatch, capsys) -> None:
     assert "Aborted" in capsys.readouterr().err
 
 
+# --- cmd_delete 'last' tests ---
+
+
+def test_cmd_delete_last_picks_most_recent(monkeypatch, capsys) -> None:
+    """'sesh delete last' selects the session with the newest timestamp."""
+    import sesh.providers.claude as claude_mod
+    import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
+    import sesh.providers.cursor as cursor_mod
+
+    deleted_ids = []
+
+    class FakeProvider:
+        def delete_session(self, session):
+            deleted_ids.append(session.id)
+
+    index = {
+        "sessions": [
+            _session_dict(
+                id="old",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            ),
+            _session_dict(
+                id="newest",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            ),
+            _session_dict(
+                id="mid",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 3, 1, tzinfo=timezone.utc),
+            ),
+        ]
+    }
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
+    monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
+    monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
+    monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+    monkeypatch.setattr(copilot_mod, "CopilotProvider", FakeProvider)
+
+    cli.cmd_delete(_ns(session_id="last", provider=None, force=True, dry_run=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["deleted"]["session_id"] == "newest"
+    assert deleted_ids == ["newest"]
+
+
+def test_cmd_delete_last_scoped_to_provider(monkeypatch, capsys) -> None:
+    """'sesh delete last --provider' picks the newest within that provider."""
+    index = {
+        "sessions": [
+            _session_dict(
+                id="claude-new",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            ),
+            _session_dict(
+                id="codex-old",
+                provider=Provider.CODEX,
+                timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+    }
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
+
+    cli.cmd_delete(_ns(session_id="last", provider="codex", force=False, dry_run=True))
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert out["would_delete"]["session_id"] == "codex-old"
+
+
+def test_cmd_delete_last_empty_index(monkeypatch, capsys) -> None:
+    """'sesh delete last' with no sessions exits with code 1."""
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": []})
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_delete(_ns(session_id="last", provider=None, force=True, dry_run=False))
+    assert exc.value.code == 1
+    assert "No sessions found" in capsys.readouterr().err
+
+
+def test_cmd_delete_last_empty_for_provider(monkeypatch, capsys) -> None:
+    """'sesh delete last --provider' with no matching sessions names the provider."""
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_delete(_ns(session_id="last", provider="pi", force=True, dry_run=False))
+    assert exc.value.code == 1
+    assert "provider 'pi'" in capsys.readouterr().err
+
+
 # --- cmd_clean TTY guard tests ---
 
 
