@@ -303,3 +303,39 @@ def test_compact_tokens_partial_none() -> None:
     """One None input treated as zero."""
     assert _compact_tokens(5000, None) == "5K tok"
     assert _compact_tokens(None, 800) == "800 tok"
+
+
+def _set_sort_mode(app: SeshApp, mode: str) -> None:
+    app.sort_index = app.sort_options.index(mode)
+
+
+def test_sort_sessions_tokens_descending() -> None:
+    """Tokens sort orders sessions by input_tokens, largest first."""
+    app = SeshApp()
+    _set_sort_mode(app, "tokens")
+    small = make_session(id="small", input_tokens=1000)
+    big = make_session(id="big", input_tokens=50000)
+    medium = make_session(id="medium", input_tokens=18000)
+
+    result = app._sort_sessions([small, big, medium])
+
+    assert [s.id for s in result] == ["big", "medium", "small"]
+
+
+def test_sort_sessions_tokens_none_sorts_last() -> None:
+    """Sessions without token data are treated as 0 and sort last."""
+    app = SeshApp()
+    _set_sort_mode(app, "tokens")
+    no_tokens = make_session(id="no-tokens", input_tokens=None)
+    with_tokens = make_session(id="with-tokens", input_tokens=42)
+
+    result = app._sort_sessions([no_tokens, with_tokens])
+
+    assert [s.id for s in result] == ["with-tokens", "no-tokens"]
+
+
+def test_sort_options_include_tokens_mode() -> None:
+    """The s-cycle includes the tokens mode between messages and timeline."""
+    app = SeshApp()
+
+    assert app.sort_options == ["date", "name", "messages", "tokens", "timeline"]
