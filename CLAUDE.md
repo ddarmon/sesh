@@ -110,9 +110,12 @@ CLI to resume the session. Per-provider commands:
 -   **Cursor**: `agent --resume=<session-id>`
 -   **Copilot**: `copilot --resume=<session-id>`
 -   **pi**: `pi --session <session-id>`
--   **Gemini**: not resumable --- Gemini CLI's `--resume` only accepts a
-    per-project index number or `latest`, not a session ID, so
-    `is_resumable` returns False for Gemini sessions
+-   **Gemini**: `gemini --resume <session-id>` (runs in the project
+    directory --- Gemini's resume is scoped to the cwd's project).
+    Requires a recent Gemini CLI (verified on 0.46; 0.29 only accepted
+    a per-project index or `latest`). Sessions whose project path could
+    not be resolved (`gemini:{hash8}` fallback) are not resumable ---
+    there is no real cwd to run the command in
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
@@ -309,7 +312,9 @@ Resume metadata is resolved at **save time**, not at restore time:
 
 1.  Scrollback is scanned for the LAST explicit `claude --resume <id>`,
     `codex resume <id>`, `agent --resume=<id>`, `copilot --resume=<id>`,
-    or `pi --session <id>` line (`_parse_explicit_resume`).
+    `gemini --resume <uuid>` (full UUIDs only --- `latest` and index
+    numbers are not session ids), or `pi --session <id>` line
+    (`_parse_explicit_resume`).
 2.  If no explicit line is found, distinctive scrollback phrases are fed
     to `sesh.search.ripgrep_search` until one returns a result whose
     `project_path` matches the tab's CWD (`_search_recover`).

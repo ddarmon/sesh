@@ -814,6 +814,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     session_data = matches[0]
 
     from sesh.cache import _dict_to_session
+    from sesh.models import Provider
     from sesh.resume import RESUME_COMMANDS, is_resumable, resume_argv, resume_binary_name
     session = _dict_to_session(session_data)
 
@@ -828,6 +829,13 @@ def cmd_resume(args: argparse.Namespace) -> None:
             print(
                 f"{session.provider.value} sessions cannot be resumed by "
                 "session ID from the CLI.",
+                file=sys.stderr,
+            )
+        elif session.provider is Provider.GEMINI:
+            print(
+                "This Gemini session's project directory could not be "
+                "resolved (unregistered hash dir); resume must run in the "
+                "original project directory.",
                 file=sys.stderr,
             )
         else:

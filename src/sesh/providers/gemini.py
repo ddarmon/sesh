@@ -122,6 +122,19 @@ def _display_name_for(project_path: str, dir_name: str) -> str:
     return Path(project_path).name or project_path
 
 
+_HASH_DIR_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def is_unresolved_project_path(project_path: str) -> bool:
+    """True if *project_path* is the unresolved-hash tmp-dir fallback.
+
+    Sessions under such paths have no recoverable cwd, so features that
+    must run in the real project directory (resume) are unavailable.
+    """
+    p = Path(project_path)
+    return p.parent.name == "tmp" and _HASH_DIR_RE.fullmatch(p.name) is not None
+
+
 _SESSION_ID_RE = re.compile(r'"sessionId"\s*:\s*"([^"]+)"')
 
 
@@ -511,6 +524,7 @@ __all__ = [
     "PROJECTS_FILE",
     "GeminiProvider",
     "hash_gemini_path",
+    "is_unresolved_project_path",
     "read_session_id",
     "resolve_chats_project_path",
 ]

@@ -304,6 +304,16 @@ _RESUME_PATTERNS: list[tuple[Provider, re.Pattern[str]]] = [
         re.compile(r"\bcopilot\s+--resume=([A-Za-z0-9_-]+)"),
     ),
     (
+        Provider.GEMINI,
+        # gemini --resume <uuid>. Match full UUIDs only: "--resume latest"
+        # and "--resume 3" (index) are not session ids.
+        re.compile(
+            r"\bgemini\s+--resume[\s=]+\"?"
+            r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+            r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\"?"
+        ),
+    ),
+    (
         Provider.PI,
         re.compile(r"\bpi\s+--session\s+([A-Za-z0-9_-]+)"),
     ),
@@ -434,7 +444,7 @@ def _search_recover(
         candidates = [
             r for r in results
             if r.session_id
-            and r.provider in RESUME_COMMANDS  # skip non-resumable (e.g. Gemini)
+            and r.provider in RESUME_COMMANDS  # skip providers with no resume-by-id CLI
             and _normalize_path(r.project_path) == cwd_norm
         ]
         if not candidates:

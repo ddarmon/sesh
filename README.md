@@ -210,12 +210,13 @@ sesh move <old-path> <new-path> --dry-run
 Press `Shift+S` in the TUI (or use `sesh snapshot save`) to capture
 every open Terminal.app tab --- its working directory and the resume
 command for any coding-agent session running inside it (Claude Code,
-Codex, Cursor, Copilot, or pi). Reopen the snapshot later to restore the
-same set of tabs, each one resumed against the same session.
+Codex, Cursor, Copilot, Gemini, or pi). Reopen the snapshot later to
+restore the same set of tabs, each one resumed against the same session.
 
 Resume metadata is resolved at capture time: `sesh` first scans
 scrollback for explicit `claude --resume`, `codex resume`,
-`agent --resume=`, `copilot --resume=`, and `pi --session` lines, then
+`agent --resume=`, `copilot --resume=`, `gemini --resume`, and
+`pi --session` lines, then
 falls back to a ripgrep-based search across your indexed sessions when
 the explicit line has scrolled off. This means reopens are deterministic
 and fast.
@@ -382,9 +383,11 @@ pretty-printed JSON document with `sessionId`, `projectHash`,
 name from `~/.gemini/projects.json`. The hash is not invertible, so
 project paths are resolved through `projects.json` (by name and by
 hashing each listed path); unresolvable hash directories fall back to a
-`gemini:{hash8}` display name. Gemini sessions cannot be resumed by
-session ID (`gemini --resume` only accepts a per-project index or
-`latest`) and are not covered by `sesh move`.
+`gemini:{hash8}` display name. Sessions resume via
+`gemini --resume <session-id>` run in the project directory (requires a
+recent Gemini CLI --- verified on 0.46; 0.29 only accepted a per-project
+index or `latest`). Unresolved `gemini:{hash8}` sessions are not
+resumable, and Gemini is not covered by `sesh move`.
 
 ## Cache
 
