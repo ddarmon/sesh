@@ -54,3 +54,80 @@ def test_sessions_args_project_provider(monkeypatch) -> None:
 
     cli.main()
     assert seen == {"project": "/repo", "provider": "cursor"}
+
+
+def test_sessions_filter_flags_parsed(monkeypatch) -> None:
+    """--since/--until/--limit/--bookmarked are parsed and passed to cmd_sessions."""
+    seen = {}
+
+    def fake_cmd_sessions(args):
+        seen["since"] = args.since
+        seen["until"] = args.until
+        seen["limit"] = args.limit
+        seen["bookmarked"] = args.bookmarked
+
+    monkeypatch.setattr(cli, "cmd_sessions", fake_cmd_sessions)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sesh", "sessions",
+            "--since", "2026-06-01",
+            "--until", "2026-06-10",
+            "--limit", "5",
+            "--bookmarked",
+        ],
+    )
+
+    cli.main()
+    assert seen == {
+        "since": "2026-06-01",
+        "until": "2026-06-10",
+        "limit": 5,
+        "bookmarked": True,
+    }
+
+
+def test_search_filter_flags_parsed(monkeypatch) -> None:
+    """--provider and --project are parsed and passed to cmd_search."""
+    seen = {}
+
+    def fake_cmd_search(args):
+        seen["query"] = args.query
+        seen["provider"] = args.provider
+        seen["project"] = args.project
+
+    monkeypatch.setattr(cli, "cmd_search", fake_cmd_search)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sesh", "search", "needle", "--provider", "claude", "--project", "/repo"],
+    )
+
+    cli.main()
+    assert seen == {"query": "needle", "provider": "claude", "project": "/repo"}
+
+
+def test_export_output_flag_and_last_parsed(monkeypatch) -> None:
+    """'sesh export last -o FILE' parses the output path and literal 'last'."""
+    seen = {}
+
+    def fake_cmd_export(args):
+        seen["session_id"] = args.session_id
+        seen["output"] = args.output
+
+    monkeypatch.setattr(cli, "cmd_export", fake_cmd_export)
+    monkeypatch.setattr(sys, "argv", ["sesh", "export", "last", "-o", "/tmp/out.md"])
+
+    cli.main()
+    assert seen == {"session_id": "last", "output": "/tmp/out.md"}
+
+
+def test_bookmarks_dispatches(monkeypatch) -> None:
+    """'sesh bookmarks' dispatches to cmd_bookmarks."""
+    called = {"cmd": None}
+    monkeypatch.setattr(cli, "cmd_bookmarks", lambda args: called.__setitem__("cmd", "bookmarks"))
+    monkeypatch.setattr(sys, "argv", ["sesh", "bookmarks"])
+
+    cli.main()
+    assert called["cmd"] == "bookmarks"

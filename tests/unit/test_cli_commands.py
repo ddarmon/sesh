@@ -910,3 +910,469 @@ def test_cmd_clean_dry_run_skips_confirmation(monkeypatch, capsys) -> None:
     assert out["dry_run"] is True
     assert out["total"] == 1
 
+
+# --- 'last' as session ID for messages/resume/export ---
+
+
+def test_cmd_messages_last_picks_most_recent(monkeypatch, capsys) -> None:
+    """'sesh messages last' loads the session with the newest timestamp."""
+    index = {
+        "sessions": [
+            _session_dict(
+                id="old",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            ),
+            _session_dict(
+                id="newest",
+                provider=Provider.CODEX,
+                timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            ),
+        ]
+    }
+    seen = {}
+
+    def fake_load(session_data, args=None):
+        seen["id"] = session_data["id"]
+        return None, [make_message(role="user", content="hi")]
+
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    monkeypatch.setattr(cli, "_load_session_messages", fake_load)
+
+    cli.cmd_messages(
+        _ns(
+            session_id="last",
+            provider=None,
+            limit=50,
+            offset=0,
+            summary=False,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert seen["id"] == "newest"
+    assert out["total"] == 1
+
+
+def test_cmd_messages_last_scoped_to_provider(monkeypatch, capsys) -> None:
+    """'sesh messages last --provider' picks the newest within that provider."""
+    index = {
+        "sessions": [
+            _session_dict(
+                id="claude-new",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            ),
+            _session_dict(
+                id="codex-old",
+                provider=Provider.CODEX,
+                timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            ),
+        ]
+    }
+    seen = {}
+
+    def fake_load(session_data, args=None):
+        seen["id"] = session_data["id"]
+        return None, []
+
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    monkeypatch.setattr(cli, "_load_session_messages", fake_load)
+
+    cli.cmd_messages(
+        _ns(
+            session_id="last",
+            provider="codex",
+            limit=50,
+            offset=0,
+            summary=False,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+    capsys.readouterr()
+    assert seen["id"] == "codex-old"
+
+
+def test_cmd_messages_last_empty_index_exits(monkeypatch, capsys) -> None:
+    """'sesh messages last' with an empty index exits with code 1."""
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": []})
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_messages(
+            _ns(
+                session_id="last",
+                provider=None,
+                limit=50,
+                offset=0,
+                summary=False,
+                include_tools=False,
+                include_thinking=False,
+                full=False,
+            )
+        )
+    assert exc.value.code == 1
+    assert "No sessions found" in capsys.readouterr().err
+
+
+def test_cmd_resume_last_picks_most_recent(monkeypatch) -> None:
+    """'sesh resume last' execs the provider CLI for the newest session."""
+    index = {
+        "sessions": [
+            _session_dict(
+                id="old",
+                provider=Provider.CLAUDE,
+                project_path="/repo-old",
+                timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            ),
+            _session_dict(
+                id="newest",
+                provider=Provider.CLAUDE,
+                project_path="/repo-new",
+                timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            ),
+        ]
+    }
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/bin/{name}")
+
+    calls = {}
+    monkeypatch.setattr(cli.os, "chdir", lambda path: calls.__setitem__("chdir", path))
+
+    def fake_execvp(binary_path, args):
+        calls["execvp"] = (binary_path, args)
+        raise RuntimeError("exec")
+
+    monkeypatch.setattr(cli.os, "execvp", fake_execvp)
+
+    with pytest.raises(RuntimeError, match="exec"):
+        cli.cmd_resume(_ns(session_id="last", provider=None))
+
+    assert calls["chdir"] == "/repo-new"
+    assert calls["execvp"] == ("/bin/claude", ["claude", "--resume", "newest"])
+
+
+def test_cmd_export_last_picks_most_recent(monkeypatch, capsys) -> None:
+    """'sesh export last' exports the session with the newest timestamp."""
+    index = {
+        "sessions": [
+            _session_dict(
+                id="old",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            ),
+            _session_dict(
+                id="newest",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 6, 1, tzinfo=timezone.utc),
+            ),
+        ]
+    }
+
+    def fake_load(session_data, args=None):
+        return make_session(id=session_data["id"]), []
+
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    monkeypatch.setattr(cli, "_load_session_messages", fake_load)
+
+    cli.cmd_export(
+        _ns(
+            session_id="last",
+            provider=None,
+            output_format="json",
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["session_id"] == "newest"
+
+
+# --- export --output ---
+
+
+def test_cmd_export_output_writes_markdown_file(monkeypatch, capsys, tmp_path) -> None:
+    """'sesh export -o FILE' writes Markdown to the file and prints a JSON confirmation."""
+    session = make_session(id="s1", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="hello file")]
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    out_file = tmp_path / "nested" / "session.md"
+    cli.cmd_export(
+        _ns(
+            session_id="s1",
+            provider=None,
+            output_format="md",
+            output=str(out_file),
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+
+    content = out_file.read_text(encoding="utf-8")
+    assert "# Session: s1" in content
+    assert "hello file" in content
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["exported"]["session_id"] == "s1"
+    assert out["exported"]["format"] == "md"
+    assert out["exported"]["path"] == str(out_file)
+    assert out["exported"]["bytes"] == len(content.encode("utf-8"))
+
+
+def test_cmd_export_output_writes_json_file(monkeypatch, capsys, tmp_path) -> None:
+    """'sesh export --format json -o FILE' writes parseable JSON to the file."""
+    session = make_session(id="s1", provider=Provider.CODEX)
+    messages = [make_message(role="user", content="hello json")]
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    out_file = tmp_path / "session.json"
+    cli.cmd_export(
+        _ns(
+            session_id="s1",
+            provider=None,
+            output_format="json",
+            output=str(out_file),
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+
+    data = json.loads(out_file.read_text(encoding="utf-8"))
+    assert data["session_id"] == "s1"
+    assert data["messages"][0]["content"] == "hello json"
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["exported"]["format"] == "json"
+    assert out["exported"]["path"] == str(out_file)
+
+
+def test_cmd_export_output_write_error_exits(monkeypatch, capsys, tmp_path) -> None:
+    """An unwritable --output path exits with code 1 and an error on stderr."""
+    session = make_session(id="s1")
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("file, not dir")
+    out_file = blocker / "session.md"
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_export(
+            _ns(
+                session_id="s1",
+                provider=None,
+                output_format="md",
+                output=str(out_file),
+                include_tools=False,
+                include_thinking=False,
+                full=False,
+            )
+        )
+    assert exc.value.code == 1
+    assert "Export failed" in capsys.readouterr().err
+
+
+# --- sessions --since/--until/--limit ---
+
+
+def _dated_sessions_index() -> dict:
+    return {
+        "sessions": [
+            _session_dict(
+                id="jan",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 1, 15, tzinfo=timezone.utc),
+            ),
+            _session_dict(
+                id="mar",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 3, 15, tzinfo=timezone.utc),
+            ),
+            _session_dict(
+                id="jun",
+                provider=Provider.CLAUDE,
+                timestamp=datetime(2025, 6, 15, tzinfo=timezone.utc),
+            ),
+        ]
+    }
+
+
+def test_cmd_sessions_since_until_window(monkeypatch, capsys) -> None:
+    """--since/--until keep only sessions inside the (inclusive) window."""
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: _dated_sessions_index())
+    cli.cmd_sessions(
+        _ns(project=None, provider=None, since="2025-02-01", until="2025-04-01")
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert [s["id"] for s in out] == ["mar"]
+
+
+def test_cmd_sessions_since_accepts_tz_naive_timestamps(monkeypatch, capsys) -> None:
+    """Naive index timestamps compare cleanly against --since (treated as UTC)."""
+    index = {
+        "sessions": [
+            _session_dict(id="naive", provider=Provider.CLAUDE, timestamp=datetime(2025, 6, 15)),
+        ]
+    }
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    cli.cmd_sessions(_ns(project=None, provider=None, since="2025-06-01"))
+    out = json.loads(capsys.readouterr().out)
+    assert [s["id"] for s in out] == ["naive"]
+
+
+def test_cmd_sessions_limit_sorts_newest_first(monkeypatch, capsys) -> None:
+    """--limit sorts by timestamp descending before slicing."""
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: _dated_sessions_index())
+    cli.cmd_sessions(_ns(project=None, provider=None, limit=2))
+    out = json.loads(capsys.readouterr().out)
+    assert [s["id"] for s in out] == ["jun", "mar"]
+
+
+def test_cmd_sessions_invalid_since_exits(monkeypatch, capsys) -> None:
+    """A malformed --since value exits with code 1 and a helpful message."""
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: _dated_sessions_index())
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_sessions(_ns(project=None, provider=None, since="not-a-date"))
+    assert exc.value.code == 1
+    assert "Invalid --since" in capsys.readouterr().err
+
+
+# --- search --provider/--project filters ---
+
+
+def test_cmd_search_provider_and_project_filters(monkeypatch, capsys) -> None:
+    """'sesh search --provider --project' post-filters the ripgrep results."""
+    import sesh.search as search_mod
+
+    results = [
+        SearchResult(
+            session_id="s1",
+            provider=Provider.CLAUDE,
+            project_path="/repo-a",
+            matched_line="needle a",
+            file_path="/tmp/a.jsonl",
+        ),
+        SearchResult(
+            session_id="s2",
+            provider=Provider.CODEX,
+            project_path="/repo-a",
+            matched_line="needle b",
+            file_path="/tmp/b.jsonl",
+        ),
+        SearchResult(
+            session_id="s3",
+            provider=Provider.CLAUDE,
+            project_path="/repo-b",
+            matched_line="needle c",
+            file_path="/tmp/c.jsonl",
+        ),
+    ]
+    monkeypatch.setattr(search_mod, "ripgrep_search", lambda q, **_kw: results)
+
+    cli.cmd_search(_ns(query="needle", provider="claude", project="/repo-a"))
+    out = json.loads(capsys.readouterr().out)
+    assert [r["session_id"] for r in out] == ["s1"]
+
+    cli.cmd_search(_ns(query="needle", provider="claude", project=None))
+    out = json.loads(capsys.readouterr().out)
+    assert [r["session_id"] for r in out] == ["s1", "s3"]
+
+
+# --- bookmarks ---
+
+
+def test_cmd_sessions_bookmarked_filters(monkeypatch, capsys) -> None:
+    """'sesh sessions --bookmarked' keeps only bookmarked (provider, id) pairs."""
+    import sesh.bookmarks as bookmarks_mod
+
+    monkeypatch.delenv("SESH_AGGREGATION_ROOT", raising=False)
+    index = {
+        "sessions": [
+            _session_dict(id="a", provider=Provider.CLAUDE),
+            _session_dict(id="b", provider=Provider.CODEX),
+            _session_dict(id="a", provider=Provider.CODEX),
+        ]
+    }
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    monkeypatch.setattr(bookmarks_mod, "load_bookmarks", lambda: {("claude", "a")})
+
+    cli.cmd_sessions(_ns(project=None, provider=None, bookmarked=True))
+    out = json.loads(capsys.readouterr().out)
+    assert [(s["provider"], s["id"]) for s in out] == [("claude", "a")]
+
+
+def test_cmd_sessions_bookmarked_refused_in_aggregation(monkeypatch, capsys) -> None:
+    """'sesh sessions --bookmarked' is refused in aggregation mode."""
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_sessions(
+            _ns(project=None, provider=None, bookmarked=True, aggregation_root="/agg")
+        )
+    assert exc.value.code == 1
+    assert "aggregation mode" in capsys.readouterr().err
+
+
+def test_cmd_bookmarks_joins_index(monkeypatch, capsys) -> None:
+    """'sesh bookmarks' joins index metadata and flags stale bookmarks."""
+    import sesh.bookmarks as bookmarks_mod
+    import sesh.cache as cache_mod
+
+    monkeypatch.delenv("SESH_AGGREGATION_ROOT", raising=False)
+    monkeypatch.setattr(
+        bookmarks_mod,
+        "load_bookmarks",
+        lambda: {("claude", "s1"), ("codex", "gone")},
+    )
+    index = {
+        "sessions": [
+            _session_dict(
+                id="s1",
+                provider=Provider.CLAUDE,
+                project_path="/repo",
+                summary="bookmarked session",
+            )
+        ]
+    }
+    monkeypatch.setattr(cache_mod, "load_index", lambda: index)
+
+    cli.cmd_bookmarks(_ns())
+    out = json.loads(capsys.readouterr().out)
+    assert len(out) == 2
+
+    by_id = {(e["provider"], e["session_id"]): e for e in out}
+    live = by_id[("claude", "s1")]
+    assert live["in_index"] is True
+    assert live["project_path"] == "/repo"
+    assert live["summary"] == "bookmarked session"
+
+    stale = by_id[("codex", "gone")]
+    assert stale == {"session_id": "gone", "provider": "codex", "in_index": False}
+
+
+def test_cmd_bookmarks_without_index(monkeypatch, capsys) -> None:
+    """'sesh bookmarks' still lists raw entries when no index exists."""
+    import sesh.bookmarks as bookmarks_mod
+    import sesh.cache as cache_mod
+
+    monkeypatch.delenv("SESH_AGGREGATION_ROOT", raising=False)
+    monkeypatch.setattr(bookmarks_mod, "load_bookmarks", lambda: {("claude", "s1")})
+    monkeypatch.setattr(cache_mod, "load_index", lambda: None)
+
+    cli.cmd_bookmarks(_ns())
+    out = json.loads(capsys.readouterr().out)
+    assert out == [{"session_id": "s1", "provider": "claude", "in_index": False}]
+
+
+def test_cmd_bookmarks_refused_in_aggregation(monkeypatch, capsys) -> None:
+    """'sesh bookmarks' is refused in aggregation mode."""
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_bookmarks(_ns(aggregation_root="/agg"))
+    assert exc.value.code == 1
+    assert "aggregation mode" in capsys.readouterr().err

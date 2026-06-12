@@ -150,6 +150,11 @@ system clipboard. The export respects the current tool/thinking
 visibility toggles. The formatting logic lives in `export.py` and is
 shared by the TUI and the `sesh export` CLI subcommand.
 
+On the CLI, `sesh export` writes to stdout by default; pass
+`-o/--output FILE` to write the export to a file (UTF-8, both `md` and
+`json` formats). On success the command prints a small JSON confirmation
+(`{"exported": {...}}`) to stdout instead of the transcript.
+
 ## Bookmarks
 
 Pressing `b` on a session node toggles a bookmark. Bookmarked sessions
@@ -157,6 +162,17 @@ show a star in the tree and appear in a dedicated Bookmarks section at
 the top. Bookmarks persist across sessions in
 `~/.config/sesh/bookmarks.json` by default (or
 `$XDG_CONFIG_HOME/sesh/bookmarks.json`).
+
+CLI equivalents:
+
+-   `sesh bookmarks` --- list bookmarked sessions as JSON, joined
+    against the index for metadata; bookmarks whose sessions are no
+    longer in the index are still listed with `"in_index": false`
+-   `sesh sessions --bookmarked` --- filter the sessions list to
+    bookmarked sessions only
+
+Bookmarks are local-mode state, so both are disabled in aggregation
+mode (like the TUI's `b` binding).
 
 ## Session deletion
 
@@ -206,13 +222,14 @@ the index, then query it.
 | `sesh`                                                                                                    | Launch the TUI (default, no subcommand)  |
 | `sesh refresh`                                                                                            | Discover sessions and rebuild the index  |
 | `sesh projects`                                                                                           | List projects from the index             |
-| `sesh sessions [--project PATH] [--provider NAME]`                                                        | List sessions with optional filters      |
-| `sesh messages <id> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full]` | Load messages for a session              |
-| `sesh search <query>`                                                                                     | Full-text search (Claude, Codex, Cursor) |
+| `sesh sessions [--project PATH] [--provider NAME] [--since DATE] [--until DATE] [--limit N] [--bookmarked]` | List sessions with optional filters      |
+| `sesh messages <id\|last> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full]` | Load messages for a session              |
+| `sesh search <query> [--provider NAME] [--project PATH]`                                                  | Full-text search (Claude, Codex, Cursor) |
+| `sesh bookmarks`                                                                                          | List bookmarked sessions (joined with the index) |
 | `sesh delete <id\|last> [--provider NAME] [--force] [--dry-run]`                                          | Delete a session by ID, or the most recent with `last` |
 | `sesh clean <query> [--force] [--dry-run]`                                                                | Delete sessions matching a search query  |
-| `sesh resume <id> [--provider NAME]`                                                                      | Resume a session in its provider's CLI   |
-| `sesh export <id> [--provider NAME] [--format md/json] [--include-tools] [--include-thinking] [--full]`   | Export a session to Markdown or JSON     |
+| `sesh resume <id\|last> [--provider NAME]`                                                                | Resume a session in its provider's CLI   |
+| `sesh export <id\|last> [--provider NAME] [--format md/json] [-o FILE] [--include-tools] [--include-thinking] [--full]` | Export a session to Markdown or JSON     |
 | `sesh move <old> <new> [--metadata-only] [--dry-run]`                                                     | Move project path and update metadata    |
 | `sesh snapshot save`                                                                                      | Capture Terminal.app tabs (macOS only)   |
 | `sesh snapshot list`                                                                                      | List stored snapshots                    |
@@ -222,6 +239,15 @@ the index, then query it.
 
 The index is stored at `~/.cache/sesh/index.json` by default (or
 `$XDG_CACHE_HOME/sesh/index.json`).
+
+`messages`, `resume`, `export`, and `delete` all accept the literal
+`last` in place of a session ID, resolving to the most recently active
+session (the newest `timestamp` in the index); `--provider` scopes
+`last` to one provider. `sesh sessions --since/--until` accept ISO
+dates or datetimes (e.g. `2026-06-01`); timezone-naive values are
+treated as UTC, and the bounds are inclusive. `--limit N` sorts by
+timestamp descending before slicing, so it returns the N newest
+sessions.
 
 ## Terminal tab snapshots
 
@@ -331,6 +357,9 @@ local CLI state anyway):
     state is on the other machine.
 -   `b` (bookmarks), `d` / `sesh delete`, `d`+match / `sesh clean`, `m`
     / `sesh move` --- mutations to the mirror don't propagate back.
+-   `sesh bookmarks` and `sesh sessions --bookmarked` --- bookmarks are
+    local-mode state and refer to sessions on this machine, not to the
+    mirrored hosts.
 
 Provider entry-points respect aggregation mode via the new constructor
 parameters `base_dir` and `host` (see `src/sesh/providers/*.py`). The
