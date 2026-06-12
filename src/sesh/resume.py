@@ -33,6 +33,10 @@ def is_resumable(session: SessionMeta) -> bool:
     # expects its own local state, so resume is not meaningful here.
     if session.host is not None:
         return False
+    # Providers without a resume-by-id CLI (Gemini CLI only resumes by
+    # per-project index or "latest", not by session id).
+    if session.provider not in RESUME_COMMANDS:
+        return False
     if (
         session.provider == Provider.CURSOR
         and session.source_path

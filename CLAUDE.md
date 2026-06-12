@@ -64,12 +64,25 @@ The app has three layers:
 | Cursor   | `~/.cursor/chats/{md5}/*/store.db` | SQLite     |
 | Copilot  | `~/.copilot/session-state/{uuid}/` | YAML+JSONL |
 | pi       | `~/.pi/agent/sessions/{encoded}/`  | JSONL      |
+| Gemini   | `~/.gemini/tmp/{dir}/chats/`       | JSON       |
 
 The pi encoded directory wraps the cwd with leading and trailing `--`
 (e.g. `/Users/me/proj` -\> `--Users-me-proj--`). Each session is one
 JSONL file named `{ISO-timestamp}_{uuid}.jsonl`; the first line is a
 `type:"session"` header carrying the cwd. The provider always recovers
 the real cwd from that header, never from the encoded folder name.
+
+The Gemini CLI `{dir}` component is either SHA-256 of the project cwd or
+a friendly name assigned in `~/.gemini/projects.json` (a `{path: name}`
+mapping). Each session is one pretty-printed JSON file named
+`session-{YYYY-MM-DDTHH-MM}-{shortid}.json` carrying `sessionId`,
+`projectHash`, `startTime`, `lastUpdated`, `messages`, and an optional
+`summary`. The hash is not invertible, so the provider resolves real
+paths through `projects.json` (by name and by hashing each known path);
+unresolvable hash dirs fall back to the tmp directory path with a
+`gemini:{hash8}` display name. Because the files are single JSON
+documents (not JSONL), they are parsed with `json.load` on demand
+rather than line-by-line.
 
 App-managed files follow XDG base directories (absolute `XDG_*` env vars
 are honored; empty/relative values fall back to defaults):
@@ -97,6 +110,9 @@ CLI to resume the session. Per-provider commands:
 -   **Cursor**: `agent --resume=<session-id>`
 -   **Copilot**: `copilot --resume=<session-id>`
 -   **pi**: `pi --session <session-id>`
+-   **Gemini**: not resumable --- Gemini CLI's `--resume` only accepts a
+    per-project index number or `latest`, not a session ID, so
+    `is_resumable` returns False for Gemini sessions
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
@@ -134,6 +150,10 @@ discovery and cached alongside other metadata. Per-provider sources:
     LAST turn's `input + cacheRead + cacheWrite`; `output_tokens` sums
     `output` across turns; `cumulative_input_tokens` sums per-turn
     `input + cacheRead + cacheWrite` across the whole session
+-   **Gemini**: per-`gemini`-message `tokens` blocks. `input_tokens` is
+    the LAST turn's `input` (which already includes cached tokens);
+    `output_tokens` sums `output + thoughts` across turns;
+    `cumulative_input_tokens` sums per-turn `input` across the session
 -   **Cursor**: no token data available
 
 The `sesh sessions` CLI output includes three token fields:
@@ -184,6 +204,7 @@ the session is deleted via the provider's `delete_session` method:
 -   **Cursor**: removes the session directory (parent of `store.db`)
 -   **Copilot**: removes the session directory
 -   **pi**: deletes the session JSONL file
+-   **Gemini**: deletes the session JSON file
 
 CLI equivalents:
 
@@ -211,6 +232,10 @@ CLI equivalent:
 -   `sesh move <old-path> <new-path>`
 -   `sesh move <old-path> <new-path> --metadata-only`
 -   `sesh move <old-path> <new-path> --dry-run`
+
+Gemini sessions are not covered by project move: the format stores the
+cwd only as a SHA-256 `projectHash` inside every session file, so a move
+would require rewriting whole JSON documents plus `projects.json`.
 
 ## CLI subcommands (JSON output)
 
@@ -438,8 +463,9 @@ environment.
 
 -   All path-dependent modules are monkeypatched via `conftest.py`
     fixtures (`tmp_cache_dir`, `tmp_claude_dir`, `tmp_codex_dir`,
-    `tmp_cursor_dirs`, `tmp_search_dirs`, `tmp_move_dirs`). Always use
-    these instead of touching real home-directory paths.
+    `tmp_cursor_dirs`, `tmp_gemini_dir`, `tmp_search_dirs`,
+    `tmp_move_dirs`). Always use these instead of touching real
+    home-directory paths.
 -   An autouse `isolate_app_preferences` fixture stubs
     `load_preferences`/`save_preferences` on the app module so tests
     never read or write real preference files.

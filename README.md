@@ -1,7 +1,7 @@
 # sesh
 
-Browse and search Claude Code, Codex, Cursor, Copilot, and pi sessions
-in the terminal.
+Browse and search Claude Code, Codex, Cursor, Copilot, pi, and Gemini
+CLI sessions in the terminal.
 
 `sesh` is a TUI that discovers session logs from multiple LLM coding
 assistants, lets you browse them by project, read message threads, and
@@ -49,15 +49,15 @@ Developed and tested on macOS. The codebase uses `pathlib.Path` and
 `shutil.which()` throughout, so most of it is platform-agnostic.
 
 **Linux** -- Should work out of the box. The Claude Code, Codex, Cursor,
-Copilot, and pi data directories use the same paths as macOS
-(`~/.claude`, `~/.codex`, `~/.cursor`, `~/.copilot`, `~/.pi`). Textual
-and ripgrep both support Linux.
+Copilot, pi, and Gemini data directories use the same paths as macOS
+(`~/.claude`, `~/.codex`, `~/.cursor`, `~/.copilot`, `~/.pi`,
+`~/.gemini`). Textual and ripgrep both support Linux.
 
 **Windows** -- Partially supported. The core TUI and CLI will run, but
 the Cursor provider's workspace storage path may not resolve correctly
 (it defaults to a Linux-style path instead of `AppData/Roaming/Cursor`
-on Windows). Claude Code, Codex, Copilot, and pi path resolution should
-work via `Path.home()`. Ripgrep is available on Windows via `winget` or
+on Windows). Claude Code, Codex, Copilot, pi, and Gemini path
+resolution should work via `Path.home()`. Ripgrep is available on Windows via `winget` or
 `choco install ripgrep`.
 
 ## Usage
@@ -77,7 +77,7 @@ toggles -- persist across launches.
 | -------- | ---------------------------------------------------------- |
 | `/`      | Focus the search bar                                       |
 | `Escape` | Clear search and return to full tree                       |
-| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi) |
+| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi/Gemini) |
 | `o`      | Open/resume the selected session in its CLI                |
 | `e`      | Export session to clipboard as Markdown                    |
 | `d`      | Delete the selected session (with confirmation)            |
@@ -119,6 +119,7 @@ Each project in the tree shows which providers have sessions for it:
 -   `U` -- Cursor
 -   `P` -- Copilot
 -   `π` -- pi
+-   `G` -- Gemini CLI
 
 Example: `myproject [C,X:12]` means 12 sessions from Claude and Codex.
 
@@ -247,6 +248,7 @@ $SESH_AGGREGATION_ROOT/
     .claude/projects/...
     .codex/sessions/...
     .pi/agent/sessions/...
+    .gemini/tmp/...
   desktop/
     .claude/projects/...
     ...
@@ -259,6 +261,7 @@ Sync is your responsibility (rsync, Syncthing, Dropbox, whatever) ---
 rsync -a --delete user@host2:.claude/  $SESH_AGGREGATION_ROOT/host2/.claude/
 rsync -a --delete user@host2:.codex/   $SESH_AGGREGATION_ROOT/host2/.codex/
 rsync -a --delete user@host2:.pi/      $SESH_AGGREGATION_ROOT/host2/.pi/
+rsync -a --delete user@host2:.gemini/  $SESH_AGGREGATION_ROOT/host2/.gemini/
 ```
 
 Enable with either the env var (ambient default for scripts/cron) or the
@@ -370,6 +373,19 @@ named `{ISO-timestamp}_{uuid}.jsonl`; the first line is a
 `type:"session"` header carrying the cwd. The provider always recovers
 the real cwd from that header, never from the encoded folder name.
 
+### Gemini CLI
+
+Reads `~/.gemini/tmp/{dir}/chats/session-*.json`. Each session is one
+pretty-printed JSON document with `sessionId`, `projectHash`,
+`startTime`, `lastUpdated`, `messages`, and an optional `summary`. The
+`{dir}` component is either SHA-256 of the project cwd or a friendly
+name from `~/.gemini/projects.json`. The hash is not invertible, so
+project paths are resolved through `projects.json` (by name and by
+hashing each listed path); unresolvable hash directories fall back to a
+`gemini:{hash8}` display name. Gemini sessions cannot be resumed by
+session ID (`gemini --resume` only accepts a per-project index or
+`latest`) and are not covered by `sesh move`.
+
 ## Cache
 
 Parsed session metadata is cached at `~/.cache/sesh/sessions.json`,
@@ -404,5 +420,6 @@ src/sesh/
     copilot.py       # Copilot YAML+JSONL parser
     cursor.py        # Cursor SQLite parser
     pi.py            # pi JSONL parser
+    gemini.py        # Gemini CLI JSON parser
 ```
 

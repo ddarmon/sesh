@@ -89,6 +89,38 @@ def write_copilot_events(path: Path, events: list[dict]) -> None:
             f.write(json.dumps(event) + "\n")
 
 
+def write_gemini_session(
+    path: Path,
+    *,
+    session_id: str = "11111111-2222-3333-4444-555555555555",
+    project_hash: str = "deadbeef" * 8,
+    start_time: str = "2026-01-01T00:00:00.000Z",
+    last_updated: str = "2026-01-01T01:00:00.000Z",
+    messages: list[dict] | None = None,
+    summary: str | None = None,
+) -> None:
+    """Write a Gemini CLI chats/session-*.json fixture file."""
+    data: dict = {
+        "sessionId": session_id,
+        "projectHash": project_hash,
+        "startTime": start_time,
+        "lastUpdated": last_updated,
+        "messages": messages or [],
+    }
+    if summary is not None:
+        data["summary"] = summary
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def write_gemini_projects(gemini_dir: Path, projects: dict[str, str]) -> None:
+    """Write ~/.gemini/projects.json ({path: name}) for tests."""
+    gemini_dir.mkdir(parents=True, exist_ok=True)
+    with open(gemini_dir / "projects.json", "w") as f:
+        json.dump({"projects": projects}, f)
+
+
 def make_snapshot_resume(**overrides):
     """Build a SnapshotResume for tests."""
     from sesh.snapshots import SnapshotResume

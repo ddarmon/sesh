@@ -35,6 +35,13 @@ def test_is_resumable_true_for_cursor_store_db() -> None:
     assert resume.is_resumable(s) is True
 
 
+def test_is_resumable_false_for_gemini() -> None:
+    """Gemini CLI only resumes by per-project index / 'latest', not by id."""
+    s = make_session(provider=Provider.GEMINI, source_path="/x/chats/session-a.json")
+    assert resume.is_resumable(s) is False
+    assert Provider.GEMINI not in resume.RESUME_COMMANDS
+
+
 def test_resume_binary_available_uses_shutil_which(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(resume.shutil, "which", lambda b: "/fake/path" if b == "claude" else None)
     assert resume.resume_binary_available(Provider.CLAUDE) is True

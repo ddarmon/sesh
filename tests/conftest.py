@@ -215,6 +215,18 @@ def tmp_pi_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
+def tmp_gemini_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from sesh.providers import gemini
+
+    gemini_dir = tmp_path / ".gemini"
+    tmp_dir = gemini_dir / "tmp"
+    monkeypatch.setattr(gemini, "GEMINI_DIR", gemini_dir)
+    monkeypatch.setattr(gemini, "TMP_DIR", tmp_dir)
+    monkeypatch.setattr(gemini, "PROJECTS_FILE", gemini_dir / "projects.json")
+    return gemini_dir
+
+
+@pytest.fixture()
 def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     from sesh import search
 
@@ -231,6 +243,8 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     monkeypatch.setattr(search, "CURSOR_CHATS", cursor_chats)
     pi_sessions = tmp_path / ".pi" / "agent" / "sessions"
     monkeypatch.setattr(search, "PI_SESSIONS", pi_sessions)
+    gemini_tmp = tmp_path / ".gemini" / "tmp"
+    monkeypatch.setattr(search, "GEMINI_TMP", gemini_tmp)
     return {
         "claude_projects": claude_projects,
         "codex_sessions": codex_sessions,
@@ -238,6 +252,7 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         "cursor_chats": cursor_chats,
         "copilot_sessions": copilot_sessions,
         "pi_sessions": pi_sessions,
+        "gemini_tmp": gemini_tmp,
     }
 
 
@@ -271,6 +286,7 @@ def tmp_aggregation_search_dirs(tmp_path: Path) -> dict[str, object]:
             "cursor_chats": base / ".cursor" / "chats",
             "copilot_sessions": base / ".copilot" / "session-state",
             "pi_sessions": base / ".pi" / "agent" / "sessions",
+            "gemini_tmp": base / ".gemini" / "tmp",
         }
         for p in paths.values():
             p.mkdir(parents=True, exist_ok=True)

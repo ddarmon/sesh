@@ -130,6 +130,29 @@ def test_search_recover_picks_matching_cwd(monkeypatch: pytest.MonkeyPatch, tmp_
     assert r.matched_phrase is not None
 
 
+def test_search_recover_skips_non_resumable_providers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Gemini matches must not be chosen — there is no resume-by-id CLI."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    text = "this is a long enough line of regular english to qualify probably yeah"
+
+    fake_results = [
+        SearchResult(
+            session_id="gem-id",
+            project_path=str(proj),
+            provider=Provider.GEMINI,
+            matched_line="x",
+            file_path=str(tmp_path / "session-a.json"),
+        ),
+    ]
+    monkeypatch.setattr("sesh.search.ripgrep_search", lambda q: fake_results)
+
+    r = snapshots_core._search_recover(text, str(proj), index_mtimes=None)
+    assert r is None
+
+
 def test_search_recover_tiebreaks_by_index_mtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()

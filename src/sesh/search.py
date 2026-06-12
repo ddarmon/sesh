@@ -19,6 +19,7 @@ CURSOR_PROJECTS = Path.home() / ".cursor" / "projects"
 CURSOR_CHATS = Path.home() / ".cursor" / "chats"
 COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
+GEMINI_TMP = Path.home() / ".gemini" / "tmp"
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _RG_REGEX_META = re.compile(r'[\\.*+?{}()\[\]|^$]')
@@ -45,6 +46,7 @@ class _SearchRoots:
     cursor_chats: Path
     copilot_sessions: Path
     pi_sessions: Path
+    gemini_tmp: Path
 
 
 def _local_roots() -> _SearchRoots:
@@ -61,6 +63,7 @@ def _local_roots() -> _SearchRoots:
         cursor_chats=CURSOR_CHATS,
         copilot_sessions=COPILOT_SESSIONS,
         pi_sessions=PI_SESSIONS,
+        gemini_tmp=GEMINI_TMP,
     )
 
 
@@ -83,6 +86,7 @@ def _aggregated_roots(aggregation_root: Path):
             cursor_chats=host_dir / ".cursor" / "chats",
             copilot_sessions=host_dir / ".copilot" / "session-state",
             pi_sessions=host_dir / ".pi" / "agent" / "sessions",
+            gemini_tmp=host_dir / ".gemini" / "tmp",
         )
 
 
@@ -356,6 +360,93 @@ def _search_cursor_transcripts(
             session_id=session_id,
             project_path=project_path,
             provider=Provider.CURSOR,
+            matched_line=display_text,
+            file_path=file_path,
+            host=host,
+        ))
+
+    return results
+
+
+def _search_gemini(
+    rg: str,
+    query: str,
+    gemini_tmp: Path,
+    host: str | None,
+) -> list[SearchResult]:
+    """Search Gemini CLI session JSON files under *gemini_tmp* via ripgrep.
+
+    Gemini chats are pretty-printed JSON (not JSONL), so the matched line
+    is a fragment; session id and project path are recovered from the
+    file head and the directory layout instead of the matched line.
+    """
+    if not gemini_tmp.is_dir():
+        return []
+
+    from sesh.providers.gemini import read_session_id, resolve_chats_project_path
+
+    cmd = [
+        rg, "--json", "-i", "-m", "1",
+        *(("-F",) if _is_literal(query) else ()),
+        "--glob", "session-*.json",
+        query,
+        str(gemini_tmp),
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    project_path_cache: dict[str, str] = {}
+    gemini_dir = gemini_tmp.parent
+
+    for line in proc.stdout.splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") != "match":
+            continue
+
+        match_data = data.get("data", {})
+        file_path = match_data.get("path", {}).get("text", "")
+        matched_text = match_data.get("lines", {}).get("text", "").strip()
+
+        if not file_path or not matched_text:
+            continue
+
+        fp = Path(file_path)
+        # Layout: {gemini_tmp}/{project-dir}/chats/session-*.json
+        if fp.parent.name != "chats":
+            continue
+
+        if file_path in seen:
+            continue
+        seen.add(file_path)
+
+        session_id = read_session_id(fp) or fp.stem
+
+        project_dir = fp.parent.parent
+        dir_key = project_dir.name
+        if dir_key not in project_path_cache:
+            project_path_cache[dir_key] = resolve_chats_project_path(
+                project_dir, gemini_dir
+            )
+        project_path = project_path_cache[dir_key]
+
+        display_text = _extract_display_text(matched_text, query)
+        if not display_text:
+            display_text = matched_text[:200]
+
+        results.append(SearchResult(
+            session_id=session_id,
+            project_path=project_path,
+            provider=Provider.GEMINI,
             matched_line=display_text,
             file_path=file_path,
             host=host,
@@ -675,6 +766,9 @@ def _search_one_host(
     for r in cursor_stores:
         if r.session_id not in cursor_seen:
             results.append(r)
+
+    # Gemini search: pretty-printed JSON session files (separate rg pass)
+    results.extend(_search_gemini(rg, query, roots.gemini_tmp, roots.host))
 
     return results
 

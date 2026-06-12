@@ -433,7 +433,9 @@ def _search_recover(
             continue
         candidates = [
             r for r in results
-            if r.session_id and _normalize_path(r.project_path) == cwd_norm
+            if r.session_id
+            and r.provider in RESUME_COMMANDS  # skip non-resumable (e.g. Gemini)
+            and _normalize_path(r.project_path) == cwd_norm
         ]
         if not candidates:
             continue

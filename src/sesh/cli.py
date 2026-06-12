@@ -83,6 +83,7 @@ def _provider_for_session(session, agg_root: Path | None):
     from sesh.providers.codex import CodexProvider
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
+    from sesh.providers.gemini import GeminiProvider
     from sesh.providers.pi import PiProvider
 
     base_dir = None
@@ -97,14 +98,12 @@ def _provider_for_session(session, agg_root: Path | None):
         Provider.CURSOR: CursorProvider,
         Provider.COPILOT: CopilotProvider,
         Provider.PI: PiProvider,
+        Provider.GEMINI: GeminiProvider,
     }
     cls = cls_map.get(session.provider)
     if cls is None:
         return None
-    # Codex / Copilot / pi accept cache=; the others don't. Keep it simple:
-    # we don't need the cache for one-off message loads / deletes.
-    if cls in (CodexProvider, CopilotProvider, PiProvider):
-        return cls(base_dir=base_dir, host=host)
+    # We don't need the cache for one-off message loads / deletes.
     return cls(base_dir=base_dir, host=host)
 
 
@@ -560,6 +559,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
             source_path = str(Path(r.file_path).parent)
         elif r.provider == Provider.PI:
             source_path = r.file_path
+        elif r.provider == Provider.GEMINI:
+            source_path = r.file_path
         else:
             continue
 
@@ -589,6 +590,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
     from sesh.providers.codex import CodexProvider
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
+    from sesh.providers.gemini import GeminiProvider
     from sesh.providers.pi import PiProvider
 
     providers_map = {
@@ -597,6 +599,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
         Provider.CURSOR: CursorProvider(),
         Provider.COPILOT: CopilotProvider(),
         Provider.PI: PiProvider(),
+        Provider.GEMINI: GeminiProvider(),
     }
 
     deleted = []
@@ -772,6 +775,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
     from sesh.providers.codex import CodexProvider
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
+    from sesh.providers.gemini import GeminiProvider
     from sesh.providers.pi import PiProvider
 
     providers_map = {
@@ -780,6 +784,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
         Provider.CURSOR: CursorProvider(),
         Provider.COPILOT: CopilotProvider(),
         Provider.PI: PiProvider(),
+        Provider.GEMINI: GeminiProvider(),
     }
 
     session = _dict_to_session(session_data)
@@ -809,7 +814,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     session_data = matches[0]
 
     from sesh.cache import _dict_to_session
-    from sesh.resume import is_resumable, resume_argv, resume_binary_name
+    from sesh.resume import RESUME_COMMANDS, is_resumable, resume_argv, resume_binary_name
     session = _dict_to_session(session_data)
 
     if not is_resumable(session):
@@ -817,6 +822,12 @@ def cmd_resume(args: argparse.Namespace) -> None:
             print(
                 f"Session from host '{session.host}' is not resumable locally "
                 "(run on the source host instead).",
+                file=sys.stderr,
+            )
+        elif session.provider not in RESUME_COMMANDS:
+            print(
+                f"{session.provider.value} sessions cannot be resumed by "
+                "session ID from the CLI.",
                 file=sys.stderr,
             )
         else:
@@ -1133,7 +1144,7 @@ def main() -> None:
     p_sessions.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
         help="Filter to sessions from this provider (claude, codex, cursor, copilot)",
     )
     p_sessions.add_argument(
@@ -1212,7 +1223,7 @@ def main() -> None:
     p_messages.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_messages.add_argument(
@@ -1329,7 +1340,7 @@ def main() -> None:
     p_delete.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_delete.add_argument(
@@ -1361,7 +1372,7 @@ def main() -> None:
     p_resume.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
 
@@ -1394,7 +1405,7 @@ def main() -> None:
     p_export.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_export.add_argument(

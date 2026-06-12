@@ -50,7 +50,7 @@ async def test_app_mounts_expected_widgets(app):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_provider_filter_cycles_on_f(app):
-    """Pressing 'f' cycles through provider filters: All -> Claude -> Codex -> Cursor -> Copilot -> pi."""
+    """Pressing 'f' cycles through provider filters: All -> Claude -> Codex -> Cursor -> Copilot -> pi -> Gemini."""
     sesh_app, pilot = app
 
     assert sesh_app.current_filter is None
@@ -69,6 +69,9 @@ async def test_provider_filter_cycles_on_f(app):
 
     await pilot.press("f")
     assert sesh_app.current_filter == Provider.PI
+
+    await pilot.press("f")
+    assert sesh_app.current_filter == Provider.GEMINI
 
     await pilot.press("f")
     assert sesh_app.current_filter is None
