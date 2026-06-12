@@ -131,3 +131,22 @@ def test_bookmarks_dispatches(monkeypatch) -> None:
 
     cli.main()
     assert called["cmd"] == "bookmarks"
+
+
+def test_stats_args_project_provider(monkeypatch) -> None:
+    """'sesh stats' dispatches to cmd_stats with --project/--provider parsed."""
+    seen = {}
+
+    def fake_cmd_stats(args):
+        seen["project"] = args.project
+        seen["provider"] = args.provider
+
+    monkeypatch.setattr(cli, "cmd_stats", fake_cmd_stats)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["sesh", "stats", "--project", "/repo", "--provider", "claude"],
+    )
+
+    cli.main()
+    assert seen == {"project": "/repo", "provider": "claude"}

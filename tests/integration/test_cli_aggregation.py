@@ -87,6 +87,23 @@ def test_projects_lists_per_host_entries(
     assert hosts == ["desktop", "laptop"]
 
 
+def test_stats_includes_host_in_project_rollups(
+    monkeypatch, capsys, tmp_aggregation_root: Path
+) -> None:
+    """`sesh --aggregation-root X stats` rolls up per (host, project) pair."""
+    monkeypatch.delenv("SESH_AGGREGATION_ROOT", raising=False)
+    cli.cmd_stats(_ns(aggregation_root=str(tmp_aggregation_root)))
+
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["totals"]["sessions"] == 2
+    rollups = sorted((p["host"], p["project_path"]) for p in data["projects"])
+    assert rollups == [
+        ("desktop", "/Users/me/proj-b"),
+        ("laptop", "/Users/me/proj-a"),
+    ]
+
+
 def test_env_var_sets_aggregation_root(
     monkeypatch, capsys, tmp_aggregation_root: Path
 ) -> None:

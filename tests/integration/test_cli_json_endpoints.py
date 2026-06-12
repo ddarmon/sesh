@@ -97,6 +97,43 @@ def test_sessions_filter(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
+def test_stats_endpoint(tmp_path: Path) -> None:
+    """'sesh stats' aggregates the index into totals plus provider/project rollups."""
+    _write_claude_fixture(tmp_path, "/Users/me/repo1")
+    _write_claude_fixture(tmp_path, "/Users/me/repo2")
+
+    refresh = _run_cli(tmp_path, "refresh")
+    assert refresh.returncode == 0, refresh.stderr
+
+    stats = _run_cli(tmp_path, "stats")
+    assert stats.returncode == 0, stats.stderr
+    data = json.loads(stats.stdout)
+
+    assert data["totals"]["sessions"] == 2
+    # The fixture sessions carry no usage data.
+    assert data["totals"]["sessions_with_tokens"] == 0
+    assert data["totals"]["output_tokens"] == 0
+    assert data["totals"]["cumulative_input_tokens"] == 0
+    assert data["totals"]["earliest"] is not None
+    assert data["totals"]["latest"] is not None
+
+    assert [p["provider"] for p in data["providers"]] == ["claude"]
+    assert data["providers"][0]["sessions"] == 2
+
+    assert [p["project_path"] for p in data["projects"]] == [
+        "/Users/me/repo1",
+        "/Users/me/repo2",
+    ]
+    assert all(p["host"] is None for p in data["projects"])
+
+    filtered = _run_cli(tmp_path, "stats", "--project", "/Users/me/repo1")
+    assert filtered.returncode == 0, filtered.stderr
+    filtered_data = json.loads(filtered.stdout)
+    assert filtered_data["totals"]["sessions"] == 1
+    assert [p["project_path"] for p in filtered_data["projects"]] == ["/Users/me/repo1"]
+
+
+@pytest.mark.integration
 def test_messages_roundtrip(tmp_path: Path) -> None:
     """'sesh messages' reads back the fixture data written to Claude JSONL."""
     session_id = _write_claude_fixture(tmp_path)

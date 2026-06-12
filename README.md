@@ -140,6 +140,9 @@ sesh sessions --since 2026-06-01          # only sessions on/after a date
 sesh sessions --until 2026-06-10          # only sessions on/before a date
 sesh sessions --limit 5                   # the 5 newest sessions
 sesh sessions --bookmarked                # only bookmarked sessions
+sesh stats                                # aggregate session statistics
+sesh stats --provider claude              # stats for one provider
+sesh stats --project /path/to/project     # stats for one project
 sesh messages <session-id>                # read messages
 sesh messages last                        # messages for the most recent session
 sesh messages <session-id> --summary      # user messages only
@@ -170,6 +173,19 @@ sesh snapshot delete <id> --force          # delete a snapshot
 ```
 
 Run `sesh --help` or `sesh <command> --help` for full details.
+
+### Session statistics
+
+`sesh stats` aggregates the index into per-provider and per-project
+rollups plus an overall totals block. Each rollup reports the session
+count, total `output_tokens`, total `cumulative_input_tokens` (falling
+back to `input_tokens` for sessions without a cumulative figure), and
+the earliest/latest session timestamps. Sessions without token data
+(e.g. Cursor) still count toward `sessions` but are tracked separately
+via `sessions_with_tokens`, so token averages stay honest. Use
+`--provider` / `--project` to narrow the input set. In aggregation mode
+each per-project rollup carries a `host` field, and identical paths on
+different hosts stay separate.
 
 ### Move project paths
 

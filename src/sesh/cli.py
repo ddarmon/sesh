@@ -10,6 +10,7 @@ Workflow:
     sesh refresh          # discover sessions and build the index
     sesh projects         # list projects (from index)
     sesh sessions         # list sessions (from index)
+    sesh stats            # aggregate session statistics (from index)
     sesh messages <id>    # read messages for a session
     sesh search <query>   # full-text search via ripgrep
     sesh bookmarks        # list bookmarked sessions
@@ -280,6 +281,95 @@ def cmd_sessions(args: argparse.Namespace) -> None:
         })
 
     _json_out(out)
+
+
+def cmd_stats(args: argparse.Namespace) -> None:
+    """Aggregate session statistics from the index."""
+    index = _require_index(args)
+    sessions = index["sessions"]
+
+    if args.project:
+        sessions = [s for s in sessions if s["project_path"] == args.project]
+    if args.provider:
+        sessions = [s for s in sessions if s["provider"] == args.provider]
+
+    def _parse_ts(s: dict) -> datetime | None:
+        raw = s.get("timestamp")
+        if not isinstance(raw, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _new_bucket() -> dict:
+        return {
+            "sessions": 0,
+            "sessions_with_tokens": 0,
+            "output_tokens": 0,
+            "cumulative_input_tokens": 0,
+            "earliest": None,
+            "latest": None,
+            "_earliest_dt": None,
+            "_latest_dt": None,
+        }
+
+    def _accumulate(bucket: dict, s: dict) -> None:
+        bucket["sessions"] += 1
+
+        output = s.get("output_tokens")
+        cumulative = s.get("cumulative_input_tokens")
+        if cumulative is None:
+            # Many providers report only the last turn's context size.
+            cumulative = s.get("input_tokens")
+        if output is not None or cumulative is not None:
+            bucket["sessions_with_tokens"] += 1
+            bucket["output_tokens"] += output or 0
+            bucket["cumulative_input_tokens"] += cumulative or 0
+
+        ts = _parse_ts(s)
+        if ts is not None:
+            if bucket["_earliest_dt"] is None or ts < bucket["_earliest_dt"]:
+                bucket["_earliest_dt"] = ts
+                bucket["earliest"] = s["timestamp"]
+            if bucket["_latest_dt"] is None or ts > bucket["_latest_dt"]:
+                bucket["_latest_dt"] = ts
+                bucket["latest"] = s["timestamp"]
+
+    def _finalize(bucket: dict) -> dict:
+        bucket.pop("_earliest_dt", None)
+        bucket.pop("_latest_dt", None)
+        return bucket
+
+    totals = _new_bucket()
+    by_provider: dict[str, dict] = {}
+    # Keyed by (host, project_path) so identical paths on different hosts
+    # stay separate in aggregation mode (matches the index's project key).
+    by_project: dict[tuple[str | None, str], dict] = {}
+
+    for s in sessions:
+        _accumulate(totals, s)
+        _accumulate(by_provider.setdefault(s["provider"], _new_bucket()), s)
+        proj_key = (s.get("host"), s["project_path"])
+        _accumulate(by_project.setdefault(proj_key, _new_bucket()), s)
+
+    providers_out = [
+        {"provider": name, **_finalize(by_provider[name])}
+        for name in sorted(by_provider)
+    ]
+    projects_out = [
+        {"project_path": path, "host": host, **_finalize(by_project[(host, path)])}
+        for host, path in sorted(by_project, key=lambda k: (k[1], k[0] or ""))
+    ]
+
+    _json_out({
+        "totals": _finalize(totals),
+        "providers": providers_out,
+        "projects": projects_out,
+    })
 
 
 def _load_session_messages(session_data: dict, args: argparse.Namespace | None = None):
@@ -978,6 +1068,7 @@ def main() -> None:
             "  sesh refresh            # discover sessions and build the index\n"
             "  sesh projects           # list all projects\n"
             "  sesh sessions           # list all sessions\n"
+            "  sesh stats              # aggregate session statistics\n"
             "  sesh messages <id>      # read a session's messages\n"
             "  sesh search <query>     # full-text search across sessions\n"
             "  sesh bookmarks          # list bookmarked sessions\n"
@@ -1074,6 +1165,32 @@ def main() -> None:
         "--bookmarked",
         action="store_true",
         help="Only bookmarked sessions (disabled in aggregation mode)",
+    )
+
+    # stats
+    p_stats = sub.add_parser(
+        "stats",
+        help="Aggregate session statistics as JSON",
+        description=(
+            "Aggregate session counts, token totals, and activity ranges from "
+            "the index: per-provider and per-project rollups plus an overall "
+            "totals block. Token sums only cover sessions that report token "
+            "data (counted separately as sessions_with_tokens); "
+            "cumulative_input_tokens falls back to input_tokens for sessions "
+            "without a cumulative figure. Use --project or --provider to "
+            "narrow the input set."
+        ),
+    )
+    p_stats.add_argument(
+        "--project",
+        metavar="PATH",
+        help="Only aggregate sessions for this project path",
+    )
+    p_stats.add_argument(
+        "--provider",
+        metavar="NAME",
+        choices=["claude", "codex", "cursor", "copilot", "pi"],
+        help="Only aggregate sessions from this provider (claude, codex, cursor, copilot, pi)",
     )
 
     # messages
@@ -1403,6 +1520,8 @@ def main() -> None:
         cmd_projects(args)
     elif args.command == "sessions":
         cmd_sessions(args)
+    elif args.command == "stats":
+        cmd_stats(args)
     elif args.command == "messages":
         cmd_messages(args)
     elif args.command == "search":

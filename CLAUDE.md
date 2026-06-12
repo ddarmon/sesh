@@ -223,6 +223,7 @@ the index, then query it.
 | `sesh refresh`                                                                                            | Discover sessions and rebuild the index  |
 | `sesh projects`                                                                                           | List projects from the index             |
 | `sesh sessions [--project PATH] [--provider NAME] [--since DATE] [--until DATE] [--limit N] [--bookmarked]` | List sessions with optional filters      |
+| `sesh stats [--project PATH] [--provider NAME]`                                                           | Aggregate session statistics from the index |
 | `sesh messages <id\|last> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full]` | Load messages for a session              |
 | `sesh search <query> [--provider NAME] [--project PATH]`                                                  | Full-text search (Claude, Codex, Cursor) |
 | `sesh bookmarks`                                                                                          | List bookmarked sessions (joined with the index) |
@@ -338,8 +339,8 @@ Behavior in aggregation mode:
 -   Local-mode providers are **not** scanned (no double-counting).
 -   Every `Project` and `SessionMeta` carries a `host` field
     (`"laptop"`, `"desktop"`, etc., derived from the subdirectory name).
--   `sesh sessions`, `sesh projects`, `sesh messages`, `sesh export` all
-    include `host` in their JSON output.
+-   `sesh sessions`, `sesh projects`, `sesh stats`, `sesh messages`,
+    `sesh export` all include `host` in their JSON output.
 -   The TUI tree shows `[host] project-name`; the status bar shows
     `Agg:{N hosts}`.
 -   The on-disk index (`~/.cache/sesh/index.json`) is **not**
