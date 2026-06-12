@@ -16,7 +16,9 @@ DEFAULT_PREFERENCES = {
     "fullscreen": False,
 }
 
-_VALID_PROVIDER_FILTERS = {None, "claude", "codex", "cursor", "copilot"}
+_VALID_PROVIDER_FILTERS = {
+    None, "claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode",
+}
 _VALID_SORT_MODES = {"date", "name", "messages", "tokens", "timeline"}
 
 

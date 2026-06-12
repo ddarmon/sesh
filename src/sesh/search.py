@@ -19,6 +19,8 @@ CURSOR_PROJECTS = Path.home() / ".cursor" / "projects"
 CURSOR_CHATS = Path.home() / ".cursor" / "chats"
 COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
+GEMINI_TMP = Path.home() / ".gemini" / "tmp"
+OPENCODE_DATA = Path.home() / ".local" / "share" / "opencode"
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _RG_REGEX_META = re.compile(r'[\\.*+?{}()\[\]|^$]')
@@ -45,6 +47,8 @@ class _SearchRoots:
     cursor_chats: Path
     copilot_sessions: Path
     pi_sessions: Path
+    gemini_tmp: Path
+    opencode_data: Path
 
 
 def _local_roots() -> _SearchRoots:
@@ -61,6 +65,8 @@ def _local_roots() -> _SearchRoots:
         cursor_chats=CURSOR_CHATS,
         copilot_sessions=COPILOT_SESSIONS,
         pi_sessions=PI_SESSIONS,
+        gemini_tmp=GEMINI_TMP,
+        opencode_data=OPENCODE_DATA,
     )
 
 
@@ -83,6 +89,8 @@ def _aggregated_roots(aggregation_root: Path):
             cursor_chats=host_dir / ".cursor" / "chats",
             copilot_sessions=host_dir / ".copilot" / "session-state",
             pi_sessions=host_dir / ".pi" / "agent" / "sessions",
+            gemini_tmp=host_dir / ".gemini" / "tmp",
+            opencode_data=host_dir / ".local" / "share" / "opencode",
         )
 
 
@@ -364,6 +372,93 @@ def _search_cursor_transcripts(
     return results
 
 
+def _search_gemini(
+    rg: str,
+    query: str,
+    gemini_tmp: Path,
+    host: str | None,
+) -> list[SearchResult]:
+    """Search Gemini CLI session JSON files under *gemini_tmp* via ripgrep.
+
+    Gemini chats are pretty-printed JSON (not JSONL), so the matched line
+    is a fragment; session id and project path are recovered from the
+    file head and the directory layout instead of the matched line.
+    """
+    if not gemini_tmp.is_dir():
+        return []
+
+    from sesh.providers.gemini import read_session_id, resolve_chats_project_path
+
+    cmd = [
+        rg, "--json", "-i", "-m", "1",
+        *(("-F",) if _is_literal(query) else ()),
+        "--glob", "session-*.json",
+        query,
+        str(gemini_tmp),
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    project_path_cache: dict[str, str] = {}
+    gemini_dir = gemini_tmp.parent
+
+    for line in proc.stdout.splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") != "match":
+            continue
+
+        match_data = data.get("data", {})
+        file_path = match_data.get("path", {}).get("text", "")
+        matched_text = match_data.get("lines", {}).get("text", "").strip()
+
+        if not file_path or not matched_text:
+            continue
+
+        fp = Path(file_path)
+        # Layout: {gemini_tmp}/{project-dir}/chats/session-*.json
+        if fp.parent.name != "chats":
+            continue
+
+        if file_path in seen:
+            continue
+        seen.add(file_path)
+
+        session_id = read_session_id(fp) or fp.stem
+
+        project_dir = fp.parent.parent
+        dir_key = project_dir.name
+        if dir_key not in project_path_cache:
+            project_path_cache[dir_key] = resolve_chats_project_path(
+                project_dir, gemini_dir
+            )
+        project_path = project_path_cache[dir_key]
+
+        display_text = _extract_display_text(matched_text, query)
+        if not display_text:
+            display_text = matched_text[:200]
+
+        results.append(SearchResult(
+            session_id=session_id,
+            project_path=project_path,
+            provider=Provider.GEMINI,
+            matched_line=display_text,
+            file_path=file_path,
+            host=host,
+        ))
+
+    return results
+
+
 def _escape_like(s: str) -> str:
     """Escape ``%``, ``_``, and ``!`` for a SQLite LIKE with ``ESCAPE '!'``."""
     return s.replace("!", "!!").replace("%", "!%").replace("_", "!_")
@@ -483,6 +578,204 @@ def _search_cursor_stores(
 
             except (sqlite3.Error, OSError):
                 continue
+
+    return results
+
+
+def _opencode_part_candidates(obj: dict) -> list[str]:
+    """Pull searchable text out of an opencode part/message/session JSON."""
+    candidates: list[str] = []
+    text = obj.get("text", "")
+    if isinstance(text, str) and text:
+        candidates.append(text)
+    title = obj.get("title", "")
+    if isinstance(title, str) and title:
+        candidates.append(title)
+    state = obj.get("state")
+    if isinstance(state, dict):
+        inp = state.get("input")
+        if inp:
+            candidates.append(_stringify_value(inp))
+        for key in ("output", "error"):
+            val = state.get(key, "")
+            if isinstance(val, str) and val:
+                candidates.append(val)
+    return candidates
+
+
+def _opencode_session_info_path(storage: Path, session_id: str) -> Path | None:
+    """Locate ``storage/session/{projectID}/{session_id}.json``."""
+    if not session_id:
+        return None
+    return next(storage.glob(f"session/*/{session_id}.json"), None)
+
+
+def _search_opencode_storage(
+    rg: str,
+    query: str,
+    opencode_data: Path,
+    host: str | None,
+) -> list[SearchResult]:
+    """Search the legacy opencode JSON storage tree via ripgrep."""
+    storage = opencode_data / "storage"
+    if not storage.is_dir():
+        return []
+
+    cmd = [
+        rg, "--json", "-i", "-m", "1",
+        *(("-F",) if _is_literal(query) else ()),
+        "--glob", "*.json",
+        query,
+        str(storage),
+    ]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    query_lower = query.lower()
+
+    for line in proc.stdout.splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") != "match":
+            continue
+
+        match_data = data.get("data", {})
+        file_path = match_data.get("path", {}).get("text", "")
+        matched_text = match_data.get("lines", {}).get("text", "").strip()
+        if not file_path or not matched_text:
+            continue
+
+        fp = Path(file_path)
+        try:
+            rel = fp.relative_to(storage)
+        except ValueError:
+            continue
+        kind = rel.parts[0] if rel.parts else ""
+        if kind not in ("session", "message", "part"):
+            continue
+
+        # Opencode JSON files are pretty-printed; load the file to get IDs.
+        try:
+            with open(fp) as f:
+                obj = json.load(f)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+
+        if kind == "session":
+            session_id = obj.get("id") or fp.stem
+        else:
+            session_id = obj.get("sessionID", "")
+            if not session_id and kind == "message":
+                session_id = fp.parent.name
+            if not session_id and kind == "part" and len(rel.parts) == 4:
+                # Older nested layout: part/{sessionID}/{messageID}/{partID}.json
+                session_id = rel.parts[1]
+        if not session_id or session_id in seen:
+            continue
+        seen.add(session_id)
+
+        # Resolve the project path from the session info file.
+        project_path = ""
+        info_path = (
+            fp if kind == "session"
+            else _opencode_session_info_path(storage, session_id)
+        )
+        if info_path is not None:
+            info = obj if kind == "session" else None
+            if info is None:
+                try:
+                    with open(info_path) as f:
+                        info = json.load(f)
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    info = None
+            if isinstance(info, dict):
+                project_path = info.get("directory", "") or ""
+
+        candidates = _opencode_part_candidates(obj)
+        content_text = ""
+        if candidates:
+            matches = [c for c in candidates if query_lower in c.lower()]
+            content_text = max(matches, key=len) if matches else max(candidates, key=len)
+        display_text = _extract_display_text(content_text, query)
+        if not display_text or query_lower not in display_text.lower():
+            raw_display = _extract_display_text(matched_text, query)
+            if raw_display and query_lower in raw_display.lower():
+                display_text = raw_display
+            elif not display_text:
+                display_text = matched_text[:200]
+
+        results.append(SearchResult(
+            session_id=session_id,
+            project_path=project_path,
+            provider=Provider.OPENCODE,
+            matched_line=display_text,
+            file_path=str(info_path) if info_path is not None else file_path,
+            host=host,
+        ))
+
+    return results
+
+
+def _search_opencode_db(
+    query: str,
+    opencode_data: Path,
+    host: str | None,
+) -> list[SearchResult]:
+    """Search opencode SQLite databases (part content) via LIKE."""
+    if not opencode_data.is_dir():
+        return []
+
+    results: list[SearchResult] = []
+    like_pattern = f"%{_escape_like(query)}%"
+    query_lower = query.lower()
+
+    for db_path in sorted(opencode_data.glob("opencode*.db")):
+        if not db_path.is_file():
+            continue
+        seen: set[str] = set()
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT p.session_id, p.data, s.directory FROM part p"
+                " LEFT JOIN session s ON s.id = p.session_id"
+                " WHERE p.data LIKE ? ESCAPE '!'",
+                (like_pattern,),
+            )
+            for session_id, part_data, directory in cur:
+                if not session_id or session_id in seen:
+                    continue
+                try:
+                    obj = json.loads(part_data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                candidates = _opencode_part_candidates(obj)
+                matches = [c for c in candidates if query_lower in c.lower()]
+                if not matches:
+                    continue
+                seen.add(session_id)
+                results.append(SearchResult(
+                    session_id=session_id,
+                    project_path=directory or "",
+                    provider=Provider.OPENCODE,
+                    matched_line=_extract_display_text(max(matches, key=len), query),
+                    file_path=str(db_path),
+                    host=host,
+                ))
+            conn.close()
+        except (sqlite3.Error, OSError):
+            continue
 
     return results
 
@@ -674,6 +967,18 @@ def _search_one_host(
     cursor_stores = _search_cursor_stores(query, roots.cursor_chats, roots.host)
     for r in cursor_stores:
         if r.session_id not in cursor_seen:
+            results.append(r)
+
+    # Gemini search: pretty-printed JSON session files (separate rg pass)
+    results.extend(_search_gemini(rg, query, roots.gemini_tmp, roots.host))
+
+    # opencode: SQLite databases first, then the legacy JSON storage tree
+    opencode_seen: set[str] = set()
+    for r in _search_opencode_db(query, roots.opencode_data, roots.host):
+        opencode_seen.add(r.session_id)
+        results.append(r)
+    for r in _search_opencode_storage(rg, query, roots.opencode_data, roots.host):
+        if r.session_id not in opencode_seen:
             results.append(r)
 
     return results

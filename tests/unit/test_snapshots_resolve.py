@@ -58,6 +58,22 @@ def test_parse_explicit_resume_finds_pi() -> None:
     assert r.cmd_args == ["pi", "--session", "11111111-2222-3333-4444-555555555555"]
 
 
+def test_parse_explicit_resume_finds_gemini_uuid() -> None:
+    sid = "11111111-2222-3333-4444-555555555555"
+    text = f"gemini --resume {sid}"
+    r = snapshots_core._parse_explicit_resume(text)
+    assert r is not None
+    assert r.provider == Provider.GEMINI
+    assert r.session_id == sid
+    assert r.cmd_args == ["gemini", "--resume", sid]
+
+
+def test_parse_explicit_resume_ignores_gemini_latest_and_index() -> None:
+    """`--resume latest` and `--resume 3` are not session ids."""
+    assert snapshots_core._parse_explicit_resume("gemini --resume latest") is None
+    assert snapshots_core._parse_explicit_resume("gemini --resume 3") is None
+
+
 def test_parse_explicit_resume_takes_last_match() -> None:
     text = "claude --resume old-id\nlater output\nclaude --resume new-id"
     r = snapshots_core._parse_explicit_resume(text)
@@ -128,6 +144,59 @@ def test_search_recover_picks_matching_cwd(monkeypatch: pytest.MonkeyPatch, tmp_
     assert r.session_id == "match-id"
     assert r.source == "search"
     assert r.matched_phrase is not None
+
+
+def test_search_recover_picks_gemini_results(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Gemini is resume-by-id capable (CLI >= 0.46), so its matches count."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    text = "this is a long enough line of regular english to qualify probably yeah"
+
+    fake_results = [
+        SearchResult(
+            session_id="gem-id",
+            project_path=str(proj),
+            provider=Provider.GEMINI,
+            matched_line="x",
+            file_path=str(tmp_path / "session-a.json"),
+        ),
+    ]
+    monkeypatch.setattr("sesh.search.ripgrep_search", lambda q: fake_results)
+
+    r = snapshots_core._search_recover(text, str(proj), index_mtimes=None)
+    assert r is not None
+    assert r.session_id == "gem-id"
+    assert r.cmd_args == ["gemini", "--resume", "gem-id"]
+
+
+def test_search_recover_skips_non_resumable_providers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Providers absent from RESUME_COMMANDS must never be chosen."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    text = "this is a long enough line of regular english to qualify probably yeah"
+
+    fake_results = [
+        SearchResult(
+            session_id="gem-id",
+            project_path=str(proj),
+            provider=Provider.GEMINI,
+            matched_line="x",
+            file_path=str(tmp_path / "session-a.json"),
+        ),
+    ]
+    monkeypatch.setattr("sesh.search.ripgrep_search", lambda q: fake_results)
+    # Simulate a provider with no resume-by-id CLI.
+    commands = {
+        k: v for k, v in snapshots_core.RESUME_COMMANDS.items() if k != Provider.GEMINI
+    }
+    monkeypatch.setattr(snapshots_core, "RESUME_COMMANDS", commands)
+
+    r = snapshots_core._search_recover(text, str(proj), index_mtimes=None)
+    assert r is None
 
 
 def test_search_recover_tiebreaks_by_index_mtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

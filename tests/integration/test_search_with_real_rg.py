@@ -239,3 +239,85 @@ def test_parallel_host_search_returns_all_hosts(
     assert "laptop" in hosts
     assert "desktop" in hosts
     assert len(results) == 2
+
+
+def test_ripgrep_search_finds_gemini_session_json(tmp_search_dirs, tmp_path: Path) -> None:
+    """Real rg binary finds a query term inside a Gemini session JSON file."""
+    _require_rg()
+    from tests.helpers import write_gemini_projects, write_gemini_session
+
+    gemini_tmp = tmp_search_dirs["gemini_tmp"]
+    write_gemini_projects(gemini_tmp.parent, {"/Users/me/gem": "gem"})
+    write_gemini_session(
+        gemini_tmp / "gem" / "chats" / "session-2026-01-01T00-00-gem1.json",
+        session_id="gemini-session-1",
+        messages=[
+            {
+                "id": "u1",
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "user",
+                "content": [{"text": "Needle token in Gemini"}],
+            }
+        ],
+    )
+
+    results = search.ripgrep_search("needle token")
+    gemini_hits = [r for r in results if r.provider is Provider.GEMINI]
+    assert len(gemini_hits) == 1
+    assert gemini_hits[0].session_id == "gemini-session-1"
+    assert gemini_hits[0].project_path == "/Users/me/gem"
+
+
+def test_ripgrep_search_gemini_unresolved_hash_uses_tmp_dir(tmp_search_dirs) -> None:
+    """Unresolvable hash dirs fall back to the tmp dir path, matching discovery."""
+    _require_rg()
+    from tests.helpers import write_gemini_session
+
+    gemini_tmp = tmp_search_dirs["gemini_tmp"]
+    hashed = "ab" * 32
+    write_gemini_session(
+        gemini_tmp / hashed / "chats" / "session-2026-01-01T00-00-gem2.json",
+        session_id="gemini-session-2",
+        messages=[
+            {
+                "id": "u1",
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "user",
+                "content": [{"text": "hashed needle here"}],
+            }
+        ],
+    )
+
+    results = search.ripgrep_search("hashed needle")
+    gemini_hits = [r for r in results if r.provider is Provider.GEMINI]
+    assert len(gemini_hits) == 1
+    assert gemini_hits[0].project_path == str(gemini_tmp / hashed)
+
+
+def test_aggregated_search_includes_gemini_host(tmp_aggregation_search_dirs) -> None:
+    """Aggregation mode scans each host's ~/.gemini/tmp and tags the host."""
+    _require_rg()
+    from tests.helpers import write_gemini_session
+
+    laptop_gemini = tmp_aggregation_search_dirs["laptop"]["gemini_tmp"]
+    write_gemini_session(
+        laptop_gemini / ("cd" * 32) / "chats" / "session-2026-01-01T00-00-agg1.json",
+        session_id="gemini-agg-1",
+        messages=[
+            {
+                "id": "u1",
+                "timestamp": "2026-01-01T00:00:01.000Z",
+                "type": "user",
+                "content": [{"text": "aggregated gemini needle"}],
+            }
+        ],
+    )
+
+    results = search.ripgrep_search(
+        "aggregated gemini needle",
+        aggregation_root=tmp_aggregation_search_dirs["root"],
+    )
+    gemini_hits = [r for r in results if r.provider is Provider.GEMINI]
+    assert len(gemini_hits) == 1
+    assert gemini_hits[0].host == "laptop"
+    assert gemini_hits[0].session_id == "gemini-agg-1"

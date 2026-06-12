@@ -18,12 +18,18 @@ from sesh.models import Provider, SessionMeta
 
 
 # Pure mapping: no shutil.which here.
+# Gemini resume-by-UUID needs a recent Gemini CLI (verified on 0.46;
+# 0.29 only accepted a per-project index or "latest"). It is scoped to
+# the current project, so the command must run in the project directory
+# (both the CLI and TUI launch paths already chdir there).
 RESUME_COMMANDS: dict[Provider, list[str]] = {
     Provider.CLAUDE: ["claude", "--resume", "{id}"],
     Provider.CODEX: ["codex", "resume", "{id}"],
     Provider.CURSOR: ["agent", "--resume={id}"],
     Provider.COPILOT: ["copilot", "--resume={id}"],
     Provider.PI: ["pi", "--session", "{id}"],
+    Provider.GEMINI: ["gemini", "--resume", "{id}"],
+    Provider.OPENCODE: ["opencode", "--session", "{id}"],
 }
 
 
@@ -33,6 +39,16 @@ def is_resumable(session: SessionMeta) -> bool:
     # expects its own local state, so resume is not meaningful here.
     if session.host is not None:
         return False
+    # Providers without a resume-by-id CLI.
+    if session.provider not in RESUME_COMMANDS:
+        return False
+    # Gemini resume only sees the cwd's own project; unresolved-hash
+    # sessions have no real project directory to run it from.
+    if session.provider == Provider.GEMINI:
+        from sesh.providers.gemini import is_unresolved_project_path
+
+        if is_unresolved_project_path(session.project_path):
+            return False
     if (
         session.provider == Provider.CURSOR
         and session.source_path

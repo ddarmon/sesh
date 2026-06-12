@@ -86,10 +86,21 @@ def test_discover_all_merges_projects_and_sorts_sessions(monkeypatch) -> None:
         def get_sessions(self, project_path: str, cache=None):
             return []
 
+    class FakeGeminiProvider:
+        def __init__(self, cache=None):
+            pass
+
+        def discover_projects(self):
+            return iter([])
+
+        def get_sessions(self, project_path: str, cache=None):
+            return []
+
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
     import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
+    import sesh.providers.gemini as gemini_mod
     import sesh.providers.pi as pi_mod
 
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeClaudeProvider)
@@ -97,6 +108,7 @@ def test_discover_all_merges_projects_and_sorts_sessions(monkeypatch) -> None:
     monkeypatch.setattr(cursor_mod, "CursorProvider", FakeCursorProvider)
     monkeypatch.setattr(copilot_mod, "CopilotProvider", FakeCopilotProvider)
     monkeypatch.setattr(pi_mod, "PiProvider", FakePiProvider)
+    monkeypatch.setattr(gemini_mod, "GeminiProvider", FakeGeminiProvider)
 
     projects, sessions = discovery.discover_all(cache=cache_obj)
 
@@ -160,10 +172,21 @@ def test_discover_all_ignores_provider_exceptions(monkeypatch) -> None:
         def get_sessions(self, project_path: str, cache=None):
             return []
 
+    class NullGeminiProvider:
+        def __init__(self, cache=None):
+            pass
+
+        def discover_projects(self):
+            return iter([])
+
+        def get_sessions(self, project_path: str, cache=None):
+            return []
+
     import sesh.providers.claude as claude_mod
     import sesh.providers.codex as codex_mod
     import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
+    import sesh.providers.gemini as gemini_mod
     import sesh.providers.pi as pi_mod
 
     monkeypatch.setattr(claude_mod, "ClaudeProvider", GoodClaudeProvider)
@@ -171,6 +194,7 @@ def test_discover_all_ignores_provider_exceptions(monkeypatch) -> None:
     monkeypatch.setattr(cursor_mod, "CursorProvider", BadCursorProvider)
     monkeypatch.setattr(copilot_mod, "CopilotProvider", NullCopilotProvider)
     monkeypatch.setattr(pi_mod, "PiProvider", NullPiProvider)
+    monkeypatch.setattr(gemini_mod, "GeminiProvider", NullGeminiProvider)
 
     projects, sessions = discovery.discover_all()
     assert set(projects) == {"/repo", "/cursor"}

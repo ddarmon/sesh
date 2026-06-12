@@ -817,7 +817,7 @@ class SeshApp(App):
         self.projects: dict[str, Project] = {}
         self.sessions: dict[str, list[SessionMeta]] = {}
         self.current_filter: Provider | None = None
-        self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT, Provider.PI]
+        self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT, Provider.PI, Provider.GEMINI, Provider.OPENCODE]
         self.filter_index = 0
         self.sort_options = ["date", "name", "messages", "tokens", "timeline"]
         self.sort_index = 0
@@ -1147,6 +1147,10 @@ class SeshApp(App):
                 badges.append("P")
             if Provider.PI in prov_set:
                 badges.append("π")
+            if Provider.GEMINI in prov_set:
+                badges.append("G")
+            if Provider.OPENCODE in prov_set:
+                badges.append("O")
             badge_str = ",".join(badges)
 
             # Backslash-escape the opening bracket so Rich doesn't treat
@@ -1320,6 +1324,8 @@ class SeshApp(App):
         from sesh.providers.codex import CodexProvider
         from sesh.providers.copilot import CopilotProvider
         from sesh.providers.cursor import CursorProvider
+        from sesh.providers.gemini import GeminiProvider
+        from sesh.providers.opencode import OpencodeProvider
         from sesh.providers.pi import PiProvider
 
         base_dir = None
@@ -1334,6 +1340,8 @@ class SeshApp(App):
             Provider.CURSOR: CursorProvider,
             Provider.COPILOT: CopilotProvider,
             Provider.PI: PiProvider,
+            Provider.GEMINI: GeminiProvider,
+            Provider.OPENCODE: OpencodeProvider,
         }
         cls = cls_map.get(session.provider)
         if cls is None:
@@ -1490,7 +1498,7 @@ class SeshApp(App):
         tree.clear()
 
         node = tree.root.add(f"Search: '{query}' ({len(results)} matches)", expand=True)
-        badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U", Provider.COPILOT: "P", Provider.PI: "π"}
+        badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U", Provider.COPILOT: "P", Provider.PI: "π", Provider.GEMINI: "G", Provider.OPENCODE: "O"}
         for r in results[:100]:
             badge = badge_map.get(r.provider, "?")
             proj = self.projects.get(self._proj_key(r.host, r.project_path))
@@ -1843,6 +1851,8 @@ class SeshApp(App):
         from sesh.providers.codex import CodexProvider
         from sesh.providers.copilot import CopilotProvider
         from sesh.providers.cursor import CursorProvider
+        from sesh.providers.gemini import GeminiProvider
+        from sesh.providers.opencode import OpencodeProvider
         from sesh.providers.pi import PiProvider
 
         providers_map: dict[Provider, type] = {
@@ -1851,6 +1861,8 @@ class SeshApp(App):
             Provider.CURSOR: CursorProvider,
             Provider.COPILOT: CopilotProvider,
             Provider.PI: PiProvider,
+            Provider.GEMINI: GeminiProvider,
+            Provider.OPENCODE: OpencodeProvider,
         }
 
         provider_cls = providers_map.get(session.provider)

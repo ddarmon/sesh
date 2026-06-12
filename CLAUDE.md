@@ -64,12 +64,43 @@ The app has three layers:
 | Cursor   | `~/.cursor/chats/{md5}/*/store.db` | SQLite     |
 | Copilot  | `~/.copilot/session-state/{uuid}/` | YAML+JSONL |
 | pi       | `~/.pi/agent/sessions/{encoded}/`  | JSONL      |
+| Gemini   | `~/.gemini/tmp/{dir}/chats/`       | JSON       |
+| opencode | `~/.local/share/opencode/`         | SQLite+JSON |
 
 The pi encoded directory wraps the cwd with leading and trailing `--`
 (e.g. `/Users/me/proj` -\> `--Users-me-proj--`). Each session is one
 JSONL file named `{ISO-timestamp}_{uuid}.jsonl`; the first line is a
 `type:"session"` header carrying the cwd. The provider always recovers
 the real cwd from that header, never from the encoded folder name.
+
+The Gemini CLI `{dir}` component is either SHA-256 of the project cwd or
+a friendly name assigned in `~/.gemini/projects.json` (a `{path: name}`
+mapping). Each session is one pretty-printed JSON file named
+`session-{YYYY-MM-DDTHH-MM}-{shortid}.json` carrying `sessionId`,
+`projectHash`, `startTime`, `lastUpdated`, `messages`, and an optional
+`summary`. The hash is not invertible, so the provider resolves real
+paths through `projects.json` (by name and by hashing each known path);
+unresolvable hash dirs fall back to the tmp directory path with a
+`gemini:{hash8}` display name. Because the files are single JSON
+documents (not JSONL), they are parsed with `json.load` on demand
+rather than line-by-line.
+
+opencode has two on-disk formats, both supported by the provider
+(sessions found in SQLite take precedence over the same ID in JSON):
+
+-   **SQLite** (current opencode, 2026+): `opencode.db` /
+    `opencode-{channel}.db` in the data dir, with `session`, `message`,
+    and `part` tables. `message.data` / `part.data` are JSON columns
+    holding the V1 message/part payloads.
+-   **Legacy JSON storage** (2025-era):
+    `storage/session/{projectID}/{sessionID}.json` (session info),
+    `storage/message/{sessionID}/{messageID}.json` (message info), and
+    `storage/part/{messageID}/{partID}.json` (content parts; the older
+    nested `storage/part/{sessionID}/{messageID}/` layout is also
+    read).
+
+The opencode project path comes from the session's `directory` field,
+never from project IDs or folder names.
 
 App-managed files follow XDG base directories (absolute `XDG_*` env vars
 are honored; empty/relative values fall back to defaults):
@@ -97,6 +128,13 @@ CLI to resume the session. Per-provider commands:
 -   **Cursor**: `agent --resume=<session-id>`
 -   **Copilot**: `copilot --resume=<session-id>`
 -   **pi**: `pi --session <session-id>`
+-   **Gemini**: `gemini --resume <session-id>` (runs in the project
+    directory --- Gemini's resume is scoped to the cwd's project).
+    Requires a recent Gemini CLI (verified on 0.46; 0.29 only accepted
+    a per-project index or `latest`). Sessions whose project path could
+    not be resolved (`gemini:{hash8}` fallback) are not resumable ---
+    there is no real cwd to run the command in
+-   **opencode**: `opencode --session <session-id>`
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
@@ -134,6 +172,16 @@ discovery and cached alongside other metadata. Per-provider sources:
     LAST turn's `input + cacheRead + cacheWrite`; `output_tokens` sums
     `output` across turns; `cumulative_input_tokens` sums per-turn
     `input + cacheRead + cacheWrite` across the whole session
+-   **Gemini**: per-`gemini`-message `tokens` blocks. `input_tokens` is
+    the LAST turn's `input` (which already includes cached tokens);
+    `output_tokens` sums `output + thoughts` across turns;
+    `cumulative_input_tokens` sums per-turn `input` across the session
+-   **opencode**: per-assistant-message `tokens` blocks
+    (`input`/`output`/`cache.read`/`cache.write`). `input_tokens` is the
+    LAST turn's `input + cache.read + cache.write`; `output_tokens` sums
+    `output` across turns. In the SQLite format the session row's
+    cumulative `tokens_*` columns provide `output_tokens` and
+    `cumulative_input_tokens` directly
 -   **Cursor**: no token data available
 
 The `sesh sessions` CLI output includes three token fields:
@@ -184,6 +232,10 @@ the session is deleted via the provider's `delete_session` method:
 -   **Cursor**: removes the session directory (parent of `store.db`)
 -   **Copilot**: removes the session directory
 -   **pi**: deletes the session JSONL file
+-   **Gemini**: deletes the session JSON file
+-   **opencode**: deletes the session/message/part rows from the
+    SQLite DB, or the session JSON plus its message/part files in the
+    legacy storage tree
 
 CLI equivalents:
 
@@ -211,6 +263,10 @@ CLI equivalent:
 -   `sesh move <old-path> <new-path>`
 -   `sesh move <old-path> <new-path> --metadata-only`
 -   `sesh move <old-path> <new-path> --dry-run`
+
+Gemini sessions are not covered by project move: the format stores the
+cwd only as a SHA-256 `projectHash` inside every session file, so a move
+would require rewriting whole JSON documents plus `projects.json`.
 
 ## CLI subcommands (JSON output)
 
@@ -284,7 +340,9 @@ Resume metadata is resolved at **save time**, not at restore time:
 
 1.  Scrollback is scanned for the LAST explicit `claude --resume <id>`,
     `codex resume <id>`, `agent --resume=<id>`, `copilot --resume=<id>`,
-    or `pi --session <id>` line (`_parse_explicit_resume`).
+    `gemini --resume <uuid>` (full UUIDs only --- `latest` and index
+    numbers are not session ids), or `pi --session <id>` line
+    (`_parse_explicit_resume`).
 2.  If no explicit line is found, distinctive scrollback phrases are fed
     to `sesh.search.ripgrep_search` until one returns a result whose
     `project_path` matches the tab's CWD (`_search_recover`).
@@ -325,6 +383,7 @@ Sync is owned by the user (rsync / Syncthing / Dropbox / etc.) ---
 rsync -a --delete laptop:.claude/  $SESH_AGGREGATION_ROOT/laptop/.claude/
 rsync -a --delete laptop:.codex/   $SESH_AGGREGATION_ROOT/laptop/.codex/
 rsync -a --delete laptop:.pi/      $SESH_AGGREGATION_ROOT/laptop/.pi/
+rsync -a --delete laptop:.local/share/opencode/  $SESH_AGGREGATION_ROOT/laptop/.local/share/opencode/
 ```
 
 Activate aggregation mode with either:
@@ -376,6 +435,9 @@ field. The local-mode JSON output also includes `host` (always `null`).
     workspace storage path mirrored under `{host}/Library/...` to be
     visible; CLI agent sessions in `{host}/.cursor/chats/` work
     out-of-the-box.
+-   opencode lives under `.local/share/opencode` rather than a
+    top-level dotdir, so the mirror needs that subpath
+    (`{host}/.local/share/opencode/`).
 
 ## Plans
 
@@ -438,8 +500,9 @@ environment.
 
 -   All path-dependent modules are monkeypatched via `conftest.py`
     fixtures (`tmp_cache_dir`, `tmp_claude_dir`, `tmp_codex_dir`,
-    `tmp_cursor_dirs`, `tmp_search_dirs`, `tmp_move_dirs`). Always use
-    these instead of touching real home-directory paths.
+    `tmp_cursor_dirs`, `tmp_gemini_dir`, `tmp_search_dirs`,
+    `tmp_move_dirs`). Always use these instead of touching real
+    home-directory paths.
 -   An autouse `isolate_app_preferences` fixture stubs
     `load_preferences`/`save_preferences` on the app module so tests
     never read or write real preference files.

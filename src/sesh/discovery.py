@@ -65,6 +65,14 @@ def _local_providers(cache) -> list:
     except Exception:
         pass
 
+    try:
+        from sesh.providers.gemini import GeminiProvider
+        providers_list.append(GeminiProvider(cache=cache))
+        from sesh.providers.opencode import OpencodeProvider
+        providers_list.append(OpencodeProvider(cache=cache))
+    except Exception:
+        pass
+
     return providers_list
 
 
@@ -95,6 +103,14 @@ def _aggregated_providers(host_dir: Path, host: str, cache) -> list:
     try:
         from sesh.providers.pi import PiProvider
         providers_list.append(PiProvider(cache=cache, base_dir=host_dir, host=host))
+    except Exception:
+        pass
+
+    try:
+        from sesh.providers.gemini import GeminiProvider
+        providers_list.append(GeminiProvider(cache=cache, base_dir=host_dir, host=host))
+        from sesh.providers.opencode import OpencodeProvider
+        providers_list.append(OpencodeProvider(cache=cache, base_dir=host_dir, host=host))
     except Exception:
         pass
 
