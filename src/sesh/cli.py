@@ -12,6 +12,7 @@ Workflow:
     sesh sessions         # list sessions (from index)
     sesh messages <id>    # read messages for a session
     sesh search <query>   # full-text search via ripgrep
+    sesh bookmarks        # list bookmarked sessions
     sesh delete <id>      # delete a single session by ID
     sesh clean <query>    # delete sessions matching a query
     sesh                  # launch the TUI (default)
@@ -35,6 +36,18 @@ def _refuse_in_aggregation(args: argparse.Namespace, what: str) -> None:
             f"{what} is disabled in aggregation mode. "
             "Run on the source host instead — aggregator changes would be "
             "overwritten by the next sync.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
+def _refuse_bookmarks_in_aggregation(args: argparse.Namespace) -> None:
+    """Exit with an error if bookmarks are requested in aggregation mode."""
+    if _aggregation_root(args) is not None:
+        print(
+            "bookmarks are disabled in aggregation mode. "
+            "Bookmarks are local-mode state and refer to sessions on this "
+            "machine, not to the mirrored hosts.",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -217,6 +230,10 @@ def cmd_projects(args: argparse.Namespace) -> None:
 
 def cmd_sessions(args: argparse.Namespace) -> None:
     """List sessions from the index, with optional filters."""
+    bookmarked_only = getattr(args, "bookmarked", False)
+    if bookmarked_only:
+        _refuse_bookmarks_in_aggregation(args)
+
     index = _require_index(args)
     sessions = index["sessions"]
 
@@ -224,6 +241,26 @@ def cmd_sessions(args: argparse.Namespace) -> None:
         sessions = [s for s in sessions if s["project_path"] == args.project]
     if args.provider:
         sessions = [s for s in sessions if s["provider"] == args.provider]
+
+    since = getattr(args, "since", None)
+    if since:
+        since_dt = _parse_cli_timestamp(since, "--since")
+        sessions = [s for s in sessions if _timestamp_sort_key(s) >= since_dt]
+    until = getattr(args, "until", None)
+    if until:
+        until_dt = _parse_cli_timestamp(until, "--until")
+        sessions = [s for s in sessions if _timestamp_sort_key(s) <= until_dt]
+
+    if bookmarked_only:
+        from sesh.bookmarks import load_bookmarks
+
+        marked = load_bookmarks()
+        sessions = [s for s in sessions if (s["provider"], s["id"]) in marked]
+
+    limit = getattr(args, "limit", None)
+    if limit is not None:
+        sessions = sorted(sessions, key=_timestamp_sort_key, reverse=True)
+        sessions = sessions[: max(limit, 0)]
 
     # Strip source_path from output (internal detail)
     out = []
@@ -260,18 +297,8 @@ def cmd_messages(args: argparse.Namespace) -> None:
     """Load and print messages for a session."""
     index = _require_index(args)
 
-    # Find the session in the index
-    matches = [s for s in index["sessions"] if s["id"] == args.session_id]
-    if args.provider:
-        matches = [s for s in matches if s["provider"] == args.provider]
-
-    if not matches:
-        print(
-            f"Session '{args.session_id}' not found. "
-            "Run 'sesh refresh' to update the index.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+    # Find the session in the index ('last' = most recently active)
+    matches = _resolve_session_matches(index, args.session_id, args.provider)
 
     from sesh.models import filter_messages
 
@@ -349,8 +376,15 @@ def cmd_search(args: argparse.Namespace) -> None:
         cwd_lookup=cwd_lookup,
     )
 
+    provider_filter = getattr(args, "provider", None)
+    project_filter = getattr(args, "project", None)
+
     out = []
     for r in results:
+        if provider_filter and r.provider.value != provider_filter:
+            continue
+        if project_filter and r.project_path != project_filter:
+            continue
         out.append({
             "session_id": r.session_id,
             "provider": r.provider.value,
@@ -359,6 +393,51 @@ def cmd_search(args: argparse.Namespace) -> None:
             "file_path": r.file_path,
             "host": r.host,
         })
+
+    _json_out(out)
+
+
+def cmd_bookmarks(args: argparse.Namespace) -> None:
+    """List bookmarked sessions as JSON, joined against the index."""
+    _refuse_bookmarks_in_aggregation(args)
+
+    from sesh.bookmarks import load_bookmarks
+    from sesh.cache import load_index
+
+    marked = load_bookmarks()
+
+    # Join against the index when one exists; bookmarks are still listed
+    # (flagged in_index=false) when the index is missing or stale.
+    by_key: dict[tuple[str, str], dict] = {}
+    index = load_index()
+    if index:
+        for s in index.get("sessions", []):
+            by_key[(s["provider"], s["id"])] = s
+
+    out = []
+    for provider, session_id in sorted(marked):
+        s = by_key.get((provider, session_id))
+        if s is None:
+            out.append({
+                "session_id": session_id,
+                "provider": provider,
+                "in_index": False,
+            })
+        else:
+            out.append({
+                "session_id": session_id,
+                "provider": provider,
+                "in_index": True,
+                "project_path": s["project_path"],
+                "summary": s["summary"],
+                "timestamp": s["timestamp"],
+                "message_count": s["message_count"],
+                "model": s["model"],
+                "input_tokens": s.get("input_tokens"),
+                "output_tokens": s.get("output_tokens"),
+                "cumulative_input_tokens": s.get("cumulative_input_tokens"),
+                "host": s.get("host"),
+            })
 
     _json_out(out)
 
@@ -497,36 +576,72 @@ def _timestamp_sort_key(session: dict) -> datetime:
     return parsed
 
 
+def _parse_cli_timestamp(value: str, flag: str) -> datetime:
+    """Parse an ISO date/datetime CLI argument into a tz-aware datetime.
+
+    Naive values are treated as UTC so they compare cleanly against
+    `_timestamp_sort_key` results. Exits with an error on bad input.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        print(
+            f"Invalid {flag} value '{value}': expected an ISO date like "
+            "2026-06-01 or 2026-06-01T12:00:00.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _resolve_session_matches(
+    index: dict, session_id: str, provider: str | None
+) -> list[dict]:
+    """Resolve a session ID (or the literal ``last``) to index entries.
+
+    For ``last``, returns a single-element list containing the most
+    recently active session (the newest ``timestamp`` in the index),
+    optionally scoped to one provider. For a regular ID, returns every
+    matching entry so callers can apply their own ambiguity policy.
+    Exits with an error when nothing matches.
+    """
+    sessions = index["sessions"]
+
+    if session_id == "last":
+        candidates = sessions
+        if provider:
+            candidates = [s for s in candidates if s["provider"] == provider]
+        if not candidates:
+            scope = f" for provider '{provider}'" if provider else ""
+            print(
+                f"No sessions found{scope}. "
+                "Run 'sesh refresh' to update the index.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        return [max(candidates, key=_timestamp_sort_key)]
+
+    matches = [s for s in sessions if s["id"] == session_id]
+    if provider:
+        matches = [s for s in matches if s["provider"] == provider]
+    if not matches:
+        print(
+            f"Session '{session_id}' not found. "
+            "Run 'sesh refresh' to update the index.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return matches
+
+
 def cmd_delete(args: argparse.Namespace) -> None:
     """Delete a single session by ID, or the most recent one with ``last``."""
     _refuse_in_aggregation(args, "delete")
     index = _refresh_index(args)
 
-    if args.session_id == "last":
-        candidates = index["sessions"]
-        if args.provider:
-            candidates = [s for s in candidates if s["provider"] == args.provider]
-        if not candidates:
-            scope = f" for provider '{args.provider}'" if args.provider else ""
-            print(
-                f"No sessions found{scope} to delete. "
-                "Run 'sesh refresh' to update the index.",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        matches = [max(candidates, key=_timestamp_sort_key)]
-    else:
-        matches = [s for s in index["sessions"] if s["id"] == args.session_id]
-        if args.provider:
-            matches = [s for s in matches if s["provider"] == args.provider]
-
-    if not matches:
-        print(
-            f"Session '{args.session_id}' not found. "
-            "Run 'sesh refresh' to update the index.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+    matches = _resolve_session_matches(index, args.session_id, args.provider)
 
     if len(matches) > 1:
         providers = ", ".join(sorted(set(m["provider"] for m in matches)))
@@ -600,18 +715,7 @@ def cmd_resume(args: argparse.Namespace) -> None:
     """Resume a session in its provider's CLI."""
     index = _require_index(args)
 
-    matches = [s for s in index["sessions"] if s["id"] == args.session_id]
-    if args.provider:
-        matches = [s for s in matches if s["provider"] == args.provider]
-
-    if not matches:
-        print(
-            f"Session '{args.session_id}' not found. "
-            "Run 'sesh refresh' to update the index.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
+    matches = _resolve_session_matches(index, args.session_id, args.provider)
     session_data = matches[0]
 
     from sesh.cache import _dict_to_session
@@ -648,20 +752,10 @@ def cmd_resume(args: argparse.Namespace) -> None:
 
 
 def cmd_export(args: argparse.Namespace) -> None:
-    """Export a session to Markdown or JSON."""
+    """Export a session to Markdown or JSON, to stdout or a file."""
     index = _require_index(args)
 
-    matches = [s for s in index["sessions"] if s["id"] == args.session_id]
-    if args.provider:
-        matches = [s for s in matches if s["provider"] == args.provider]
-
-    if not matches:
-        print(
-            f"Session '{args.session_id}' not found. "
-            "Run 'sesh refresh' to update the index.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+    matches = _resolve_session_matches(index, args.session_id, args.provider)
 
     from sesh.models import filter_messages
 
@@ -694,18 +788,41 @@ def cmd_export(args: argparse.Namespace) -> None:
                 entry["thinking"] = m.thinking
             out_messages.append(entry)
 
-        _json_out({
+        content = json.dumps({
             "session_id": session.id,
             "provider": session.provider.value,
             "project_path": session.project_path,
             "model": session.model,
             "timestamp": session.timestamp.isoformat(),
             "messages": out_messages,
-        })
+        }, indent=2) + "\n"
     else:
         from sesh.export import format_session_markdown
 
-        print(format_session_markdown(session, messages))
+        content = format_session_markdown(session, messages) + "\n"
+
+    output = getattr(args, "output", None)
+    if output is None:
+        sys.stdout.write(content)
+        return
+
+    out_path = Path(os.path.abspath(os.path.expanduser(output)))
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        print(f"Export failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    _json_out({
+        "exported": {
+            "session_id": session.id,
+            "provider": session.provider.value,
+            "format": args.output_format,
+            "path": str(out_path),
+            "bytes": len(content.encode("utf-8")),
+        }
+    })
 
 
 def cmd_snapshot_save(args: argparse.Namespace) -> None:
@@ -863,6 +980,7 @@ def main() -> None:
             "  sesh sessions           # list all sessions\n"
             "  sesh messages <id>      # read a session's messages\n"
             "  sesh search <query>     # full-text search across sessions\n"
+            "  sesh bookmarks          # list bookmarked sessions\n"
             "  sesh delete <id>        # delete a single session by ID\n"
             "  sesh clean <query>      # delete sessions matching a query\n"
             "  sesh resume <id>        # resume a session in its provider's CLI\n"
@@ -912,7 +1030,8 @@ def main() -> None:
         help="List sessions as JSON, with optional filters",
         description=(
             "Print sessions from the index as a JSON array. "
-            "Use --project or --provider to narrow results."
+            "Use --project, --provider, --since, --until, --bookmarked, "
+            "and --limit to narrow results."
         ),
     )
     p_sessions.add_argument(
@@ -926,20 +1045,52 @@ def main() -> None:
         choices=["claude", "codex", "cursor", "copilot", "pi"],
         help="Filter to sessions from this provider (claude, codex, cursor, copilot)",
     )
+    p_sessions.add_argument(
+        "--since",
+        metavar="DATE",
+        help=(
+            "Only sessions at or after this ISO date/datetime "
+            "(e.g. 2026-06-01; naive values are treated as UTC)"
+        ),
+    )
+    p_sessions.add_argument(
+        "--until",
+        metavar="DATE",
+        help=(
+            "Only sessions at or before this ISO date/datetime "
+            "(e.g. 2026-06-01; naive values are treated as UTC)"
+        ),
+    )
+    p_sessions.add_argument(
+        "--limit",
+        type=int,
+        metavar="N",
+        help=(
+            "Return at most N sessions, newest first "
+            "(sorted by timestamp descending before slicing)"
+        ),
+    )
+    p_sessions.add_argument(
+        "--bookmarked",
+        action="store_true",
+        help="Only bookmarked sessions (disabled in aggregation mode)",
+    )
 
     # messages
     p_messages = sub.add_parser(
         "messages",
         help="Load messages for a session as JSON",
         description=(
-            "Load and print messages for a given session ID. "
+            "Load and print messages for a given session ID, or for the most "
+            "recently active session with the literal 'last' (with --provider, "
+            "'last' is scoped to that provider). "
             "System messages are always excluded. "
             "Use --summary to see only user messages."
         ),
     )
     p_messages.add_argument(
         "session_id",
-        help="The session ID to load messages for",
+        help="The session ID to load messages for, or 'last' for the most recent session",
     )
     p_messages.add_argument(
         "--provider",
@@ -992,6 +1143,29 @@ def main() -> None:
     p_search.add_argument(
         "query",
         help="The search term or regex pattern",
+    )
+    p_search.add_argument(
+        "--provider",
+        metavar="NAME",
+        choices=["claude", "codex", "cursor", "copilot", "pi"],
+        help="Only return matches from this provider",
+    )
+    p_search.add_argument(
+        "--project",
+        metavar="PATH",
+        help="Only return matches for this project path",
+    )
+
+    # bookmarks
+    sub.add_parser(
+        "bookmarks",
+        help="List bookmarked sessions as JSON",
+        description=(
+            "Print bookmarked sessions as a JSON array, joined against the "
+            "index for metadata. Bookmarks whose sessions are no longer in "
+            "the index are still listed, flagged with \"in_index\": false. "
+            "Disabled in aggregation mode (bookmarks are local-mode state)."
+        ),
     )
 
     # clean
@@ -1057,13 +1231,15 @@ def main() -> None:
         "resume",
         help="Resume a session in its provider's CLI",
         description=(
-            "Look up a session by ID and launch the provider's CLI to resume it. "
+            "Look up a session by ID — or the most recently active session "
+            "with the literal 'last' (with --provider, 'last' is scoped to "
+            "that provider) — and launch the provider's CLI to resume it. "
             "Replaces the sesh process with the provider CLI (claude, codex, agent, or copilot)."
         ),
     )
     p_resume.add_argument(
         "session_id",
-        help="The session ID to resume",
+        help="The session ID to resume, or 'last' for the most recent session",
     )
     p_resume.add_argument(
         "--provider",
@@ -1077,14 +1253,26 @@ def main() -> None:
         "export",
         help="Export a session to Markdown or JSON",
         description=(
-            "Export all messages from a session to stdout. "
-            "System messages are excluded. "
+            "Export all messages from a session to stdout, or to a file with "
+            "-o/--output. Accepts a session ID or the literal 'last' for the "
+            "most recently active session (with --provider, 'last' is scoped "
+            "to that provider). System messages are excluded. "
             "Default format is Markdown; use --format json for JSON."
         ),
     )
     p_export.add_argument(
         "session_id",
-        help="The session ID to export",
+        help="The session ID to export, or 'last' for the most recent session",
+    )
+    p_export.add_argument(
+        "-o",
+        "--output",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Write the export to this file (UTF-8) instead of stdout; "
+            "prints a small JSON confirmation on success"
+        ),
     )
     p_export.add_argument(
         "--provider",
@@ -1219,6 +1407,8 @@ def main() -> None:
         cmd_messages(args)
     elif args.command == "search":
         cmd_search(args)
+    elif args.command == "bookmarks":
+        cmd_bookmarks(args)
     elif args.command == "clean":
         cmd_clean(args)
     elif args.command == "delete":

@@ -162,3 +162,27 @@ def test_local_mode_still_works(monkeypatch, capsys, tmp_claude_dir: Path) -> No
     data = json.loads(capsys.readouterr().out)
     # All entries should be host=None in local mode
     assert all(s["host"] is None for s in data)
+
+
+def test_bookmarks_refused_in_aggregation_mode(
+    monkeypatch, capsys, tmp_aggregation_root: Path
+) -> None:
+    """`sesh bookmarks` exits non-zero with a clear message in aggregation mode."""
+    monkeypatch.delenv("SESH_AGGREGATION_ROOT", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_bookmarks(_ns(aggregation_root=str(tmp_aggregation_root)))
+    assert exc.value.code == 1
+    assert "aggregation mode" in capsys.readouterr().err
+
+
+def test_sessions_bookmarked_refused_in_aggregation_mode(
+    monkeypatch, capsys, tmp_aggregation_root: Path
+) -> None:
+    """`sesh sessions --bookmarked` is refused in aggregation mode."""
+    monkeypatch.delenv("SESH_AGGREGATION_ROOT", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_sessions(
+            _ns(aggregation_root=str(tmp_aggregation_root), bookmarked=True)
+        )
+    assert exc.value.code == 1
+    assert "aggregation mode" in capsys.readouterr().err

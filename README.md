@@ -136,19 +136,28 @@ sesh projects                             # list all projects
 sesh sessions                             # list all sessions
 sesh sessions --project /path/to/project  # filter by project
 sesh sessions --provider claude           # filter by provider
+sesh sessions --since 2026-06-01          # only sessions on/after a date
+sesh sessions --until 2026-06-10          # only sessions on/before a date
+sesh sessions --limit 5                   # the 5 newest sessions
+sesh sessions --bookmarked                # only bookmarked sessions
 sesh messages <session-id>                # read messages
+sesh messages last                        # messages for the most recent session
 sesh messages <session-id> --summary      # user messages only
 sesh messages <session-id> --limit 10     # first 10 messages
 sesh messages <session-id> --include-tools  # include tool calls/results
 sesh messages <session-id> --full         # include tools + thinking
 sesh search "some query"                  # full-text search via ripgrep
+sesh search "some query" --provider claude --project /path  # filter results
+sesh bookmarks                            # list bookmarked sessions
 sesh delete <session-id>                  # delete a single session by ID
 sesh delete last                          # delete the most recently active session
 sesh delete last --provider pi            # delete the most recent pi session
 sesh clean "some query" --dry-run         # preview matching sessions to delete
 sesh resume <session-id>                  # resume in provider CLI
+sesh resume last                          # resume the most recent session
 sesh export <session-id> --format json    # export session transcript
 sesh export <session-id> --full           # export with tools + thinking
+sesh export last -o transcript.md         # export the most recent session to a file
 sesh move /old/path /new/path --dry-run   # preview project move changes
 sesh move /old/path /new/path             # full move + metadata rewrite
 sesh move /old/path /new/path --metadata-only  # metadata rewrite only
@@ -273,8 +282,8 @@ summaries:
 
 ```
 sesh refresh
-sesh sessions | jq '[.[] | select(.timestamp > "2026-02-09")] | sort_by(.timestamp) | reverse'
-sesh messages <session-id> --summary
+sesh sessions --since 2026-02-09 --limit 20   # newest first
+sesh messages last --summary                  # or any <session-id>
 ```
 
 **"Find all sessions where I worked on authentication"**
