@@ -1,7 +1,7 @@
 # sesh
 
-Browse and search Claude Code, Codex, Cursor, Copilot, pi, and Gemini
-CLI sessions in the terminal.
+Browse and search Claude Code, Codex, Cursor, Copilot, pi, Gemini CLI,
+and opencode sessions in the terminal.
 
 `sesh` is a TUI that discovers session logs from multiple LLM coding
 assistants, lets you browse them by project, read message threads, and
@@ -49,9 +49,10 @@ Developed and tested on macOS. The codebase uses `pathlib.Path` and
 `shutil.which()` throughout, so most of it is platform-agnostic.
 
 **Linux** -- Should work out of the box. The Claude Code, Codex, Cursor,
-Copilot, pi, and Gemini data directories use the same paths as macOS
-(`~/.claude`, `~/.codex`, `~/.cursor`, `~/.copilot`, `~/.pi`,
-`~/.gemini`). Textual and ripgrep both support Linux.
+Copilot, pi, Gemini, and opencode data directories use the same paths
+as macOS (`~/.claude`, `~/.codex`, `~/.cursor`, `~/.copilot`, `~/.pi`,
+`~/.gemini`, `~/.local/share/opencode`). Textual and ripgrep both
+support Linux.
 
 **Windows** -- Partially supported. The core TUI and CLI will run, but
 the Cursor provider's workspace storage path may not resolve correctly
@@ -77,7 +78,7 @@ toggles -- persist across launches.
 | -------- | ---------------------------------------------------------- |
 | `/`      | Focus the search bar                                       |
 | `Escape` | Clear search and return to full tree                       |
-| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi/Gemini) |
+| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi/Gemini/opencode) |
 | `o`      | Open/resume the selected session in its CLI                |
 | `e`      | Export session to clipboard as Markdown                    |
 | `d`      | Delete the selected session (with confirmation)            |
@@ -120,6 +121,7 @@ Each project in the tree shows which providers have sessions for it:
 -   `P` -- Copilot
 -   `π` -- pi
 -   `G` -- Gemini CLI
+-   `O` -- opencode
 
 Example: `myproject [C,X:12]` means 12 sessions from Claude and Codex.
 
@@ -210,13 +212,14 @@ sesh move <old-path> <new-path> --dry-run
 Press `Shift+S` in the TUI (or use `sesh snapshot save`) to capture
 every open Terminal.app tab --- its working directory and the resume
 command for any coding-agent session running inside it (Claude Code,
-Codex, Cursor, Copilot, Gemini, or pi). Reopen the snapshot later to
-restore the same set of tabs, each one resumed against the same session.
+Codex, Cursor, Copilot, Gemini, pi, or opencode). Reopen the snapshot
+later to restore the same set of tabs, each one resumed against the
+same session.
 
 Resume metadata is resolved at capture time: `sesh` first scans
 scrollback for explicit `claude --resume`, `codex resume`,
-`agent --resume=`, `copilot --resume=`, `gemini --resume`, and
-`pi --session` lines, then
+`agent --resume=`, `copilot --resume=`, `gemini --resume`,
+`pi --session`, and `opencode --session` lines, then
 falls back to a ripgrep-based search across your indexed sessions when
 the explicit line has scrolled off. This means reopens are deterministic
 and fast.
@@ -263,6 +266,7 @@ rsync -a --delete user@host2:.claude/  $SESH_AGGREGATION_ROOT/host2/.claude/
 rsync -a --delete user@host2:.codex/   $SESH_AGGREGATION_ROOT/host2/.codex/
 rsync -a --delete user@host2:.pi/      $SESH_AGGREGATION_ROOT/host2/.pi/
 rsync -a --delete user@host2:.gemini/  $SESH_AGGREGATION_ROOT/host2/.gemini/
+rsync -a --delete user@host2:.local/share/opencode/  $SESH_AGGREGATION_ROOT/host2/.local/share/opencode/
 ```
 
 Enable with either the env var (ambient default for scripts/cron) or the
@@ -388,6 +392,25 @@ hashing each listed path); unresolvable hash directories fall back to a
 recent Gemini CLI --- verified on 0.46; 0.29 only accepted a per-project
 index or `latest`). Unresolved `gemini:{hash8}` sessions are not
 resumable, and Gemini is not covered by `sesh move`.
+
+### opencode
+
+Reads `~/.local/share/opencode/`. Two on-disk formats are supported and
+merged (SQLite wins when a session ID appears in both):
+
+-   **SQLite** (current opencode): `opencode.db` (or
+    `opencode-{channel}.db`) with `session`, `message`, and `part`
+    tables. The session row's `directory` column carries the real
+    project path.
+-   **Legacy JSON storage** (2025-era opencode):
+    `storage/session/{projectID}/{sessionID}.json` session metadata,
+    `storage/message/{sessionID}/*.json` message records, and
+    `storage/part/{messageID}/*.json` content parts (an older nested
+    `storage/part/{sessionID}/{messageID}/` layout is also handled).
+
+Summaries come from the session `title`; tokens from per-assistant
+message `tokens` blocks (input + cache read/write for context size,
+summed `output` across turns). Resume uses `opencode --session <id>`.
 
 ## Cache
 

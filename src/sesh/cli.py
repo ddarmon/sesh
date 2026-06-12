@@ -84,6 +84,7 @@ def _provider_for_session(session, agg_root: Path | None):
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
     from sesh.providers.gemini import GeminiProvider
+    from sesh.providers.opencode import OpencodeProvider
     from sesh.providers.pi import PiProvider
 
     base_dir = None
@@ -99,6 +100,7 @@ def _provider_for_session(session, agg_root: Path | None):
         Provider.COPILOT: CopilotProvider,
         Provider.PI: PiProvider,
         Provider.GEMINI: GeminiProvider,
+        Provider.OPENCODE: OpencodeProvider,
     }
     cls = cls_map.get(session.provider)
     if cls is None:
@@ -561,6 +563,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
             source_path = r.file_path
         elif r.provider == Provider.GEMINI:
             source_path = r.file_path
+        elif r.provider == Provider.OPENCODE:
+            source_path = r.file_path
         else:
             continue
 
@@ -591,6 +595,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
     from sesh.providers.gemini import GeminiProvider
+    from sesh.providers.opencode import OpencodeProvider
     from sesh.providers.pi import PiProvider
 
     providers_map = {
@@ -600,6 +605,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
         Provider.COPILOT: CopilotProvider(),
         Provider.PI: PiProvider(),
         Provider.GEMINI: GeminiProvider(),
+        Provider.OPENCODE: OpencodeProvider(),
     }
 
     deleted = []
@@ -776,6 +782,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
     from sesh.providers.gemini import GeminiProvider
+    from sesh.providers.opencode import OpencodeProvider
     from sesh.providers.pi import PiProvider
 
     providers_map = {
@@ -785,6 +792,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
         Provider.COPILOT: CopilotProvider(),
         Provider.PI: PiProvider(),
         Provider.GEMINI: GeminiProvider(),
+        Provider.OPENCODE: OpencodeProvider(),
     }
 
     session = _dict_to_session(session_data)
@@ -1152,7 +1160,7 @@ def main() -> None:
     p_sessions.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
         help="Filter to sessions from this provider (claude, codex, cursor, copilot)",
     )
     p_sessions.add_argument(
@@ -1231,7 +1239,7 @@ def main() -> None:
     p_messages.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_messages.add_argument(
@@ -1348,7 +1356,7 @@ def main() -> None:
     p_delete.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_delete.add_argument(
@@ -1380,7 +1388,7 @@ def main() -> None:
     p_resume.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
 
@@ -1413,7 +1421,7 @@ def main() -> None:
     p_export.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini"],
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_export.add_argument(

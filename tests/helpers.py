@@ -196,3 +196,129 @@ def make_index(projects, sessions) -> dict:
         ],
         "sessions": [_session_to_dict(s) for s in session_items],
     }
+
+
+def write_opencode_json(path: Path, obj: dict) -> None:
+    """Write a pretty-printed opencode storage JSON file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+
+
+def write_opencode_storage_session(
+    data_dir: Path,
+    *,
+    session_id: str = "ses_001",
+    project_id: str = "proj_001",
+    directory: str = "/Users/me/repo",
+    title: str = "Fix the bug",
+    created: int = 1750000000000,
+    updated: int = 1750000600000,
+    messages: list[dict] | None = None,
+    parts: dict[str, list[dict]] | None = None,
+) -> Path:
+    """Create one session in the legacy opencode JSON storage layout.
+
+    *messages* is a list of message-info dicts (each needs at least
+    ``id`` and ``role``); *parts* maps message id -> list of part dicts.
+    Returns the session info file path.
+    """
+    storage = data_dir / "storage"
+    info_file = storage / "session" / project_id / f"{session_id}.json"
+    write_opencode_json(info_file, {
+        "id": session_id,
+        "projectID": project_id,
+        "directory": directory,
+        "title": title,
+        "version": "1.0.0",
+        "time": {"created": created, "updated": updated},
+    })
+    for msg in messages or []:
+        mid = msg["id"]
+        write_opencode_json(storage / "message" / session_id / f"{mid}.json", msg)
+        for part in (parts or {}).get(mid, []):
+            pid = part.get("id", f"prt_{mid}")
+            write_opencode_json(storage / "part" / mid / f"{pid}.json", part)
+    return info_file
+
+
+def create_opencode_db(
+    db_path: Path,
+    sessions: list[dict],
+    messages: list[dict] | None = None,
+    parts: list[dict] | None = None,
+) -> None:
+    """Create a minimal opencode SQLite database.
+
+    *sessions* rows need: id, directory, title, time_created,
+    time_updated; optional model (dict), tokens_* ints.
+    *messages* rows need: id, session_id, data (dict).
+    *parts* rows need: id, message_id, session_id, data (dict).
+    """
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE session ("
+            " id TEXT PRIMARY KEY, project_id TEXT, directory TEXT,"
+            " title TEXT, time_created INTEGER, time_updated INTEGER,"
+            " model TEXT, tokens_input INTEGER DEFAULT 0,"
+            " tokens_output INTEGER DEFAULT 0,"
+            " tokens_reasoning INTEGER DEFAULT 0,"
+            " tokens_cache_read INTEGER DEFAULT 0,"
+            " tokens_cache_write INTEGER DEFAULT 0)"
+        )
+        conn.execute(
+            "CREATE TABLE message ("
+            " id TEXT PRIMARY KEY,"
+            " session_id TEXT NOT NULL"
+            "  REFERENCES session(id) ON DELETE CASCADE,"
+            " time_created INTEGER, data TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE part ("
+            " id TEXT PRIMARY KEY,"
+            " message_id TEXT NOT NULL"
+            "  REFERENCES message(id) ON DELETE CASCADE,"
+            " session_id TEXT NOT NULL, time_created INTEGER,"
+            " data TEXT NOT NULL)"
+        )
+        for s in sessions:
+            model = s.get("model")
+            conn.execute(
+                "INSERT INTO session (id, project_id, directory, title,"
+                " time_created, time_updated, model, tokens_input,"
+                " tokens_output, tokens_reasoning, tokens_cache_read,"
+                " tokens_cache_write) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    s["id"], s.get("project_id", "proj"), s["directory"],
+                    s.get("title", ""), s.get("time_created", 0),
+                    s.get("time_updated", 0),
+                    json.dumps(model) if model else None,
+                    s.get("tokens_input", 0), s.get("tokens_output", 0),
+                    s.get("tokens_reasoning", 0),
+                    s.get("tokens_cache_read", 0),
+                    s.get("tokens_cache_write", 0),
+                ),
+            )
+        for m in messages or []:
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data)"
+                " VALUES (?,?,?,?)",
+                (
+                    m["id"], m["session_id"], m.get("time_created", 0),
+                    json.dumps(m["data"]),
+                ),
+            )
+        for p in parts or []:
+            conn.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created,"
+                " data) VALUES (?,?,?,?,?)",
+                (
+                    p["id"], p["message_id"], p["session_id"],
+                    p.get("time_created", 0), json.dumps(p["data"]),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()

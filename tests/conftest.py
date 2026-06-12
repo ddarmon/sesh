@@ -227,6 +227,15 @@ def tmp_gemini_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
+def tmp_opencode_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from sesh.providers import opencode
+
+    data_dir = tmp_path / ".local" / "share" / "opencode"
+    monkeypatch.setattr(opencode, "OPENCODE_DATA_DIR", data_dir)
+    return data_dir
+
+
+@pytest.fixture()
 def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     from sesh import search
 
@@ -245,6 +254,8 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     monkeypatch.setattr(search, "PI_SESSIONS", pi_sessions)
     gemini_tmp = tmp_path / ".gemini" / "tmp"
     monkeypatch.setattr(search, "GEMINI_TMP", gemini_tmp)
+    opencode_data = tmp_path / ".local" / "share" / "opencode"
+    monkeypatch.setattr(search, "OPENCODE_DATA", opencode_data)
     return {
         "claude_projects": claude_projects,
         "codex_sessions": codex_sessions,
@@ -253,6 +264,7 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         "copilot_sessions": copilot_sessions,
         "pi_sessions": pi_sessions,
         "gemini_tmp": gemini_tmp,
+        "opencode_data": opencode_data,
     }
 
 
@@ -287,6 +299,7 @@ def tmp_aggregation_search_dirs(tmp_path: Path) -> dict[str, object]:
             "copilot_sessions": base / ".copilot" / "session-state",
             "pi_sessions": base / ".pi" / "agent" / "sessions",
             "gemini_tmp": base / ".gemini" / "tmp",
+            "opencode_data": base / ".local" / "share" / "opencode",
         }
         for p in paths.values():
             p.mkdir(parents=True, exist_ok=True)
@@ -377,6 +390,11 @@ def tmp_move_dirs(
     monkeypatch.setattr(pi_mod, "PI_DIR", pi_sessions.parent)
     monkeypatch.setattr(pi_mod, "SESSIONS_DIR", pi_sessions)
 
+    opencode_data = tmp_path / ".local" / "share" / "opencode"
+    monkeypatch.setattr(move, "OPENCODE_DATA_DIR", opencode_data)
+    from sesh.providers import opencode as opencode_mod
+    monkeypatch.setattr(opencode_mod, "OPENCODE_DATA_DIR", opencode_data)
+
     cache_dir = tmp_path / "cache" / "sesh"
     monkeypatch.setattr(move, "CACHE_FILE", cache_dir / "sessions.json")
     monkeypatch.setattr(move, "INDEX_FILE", cache_dir / "index.json")
@@ -390,5 +408,6 @@ def tmp_move_dirs(
         "copilot_sessions": copilot_sessions,
         "workspace_storage": workspace_storage,
         "pi_sessions": pi_sessions,
+        "opencode_data": opencode_data,
         "cache_dir": cache_dir,
     }

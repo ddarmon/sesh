@@ -317,6 +317,10 @@ _RESUME_PATTERNS: list[tuple[Provider, re.Pattern[str]]] = [
         Provider.PI,
         re.compile(r"\bpi\s+--session\s+([A-Za-z0-9_-]+)"),
     ),
+    (
+        Provider.OPENCODE,
+        re.compile(r"\bopencode\s+--session\s+([A-Za-z0-9_-]+)"),
+    ),
 ]
 
 

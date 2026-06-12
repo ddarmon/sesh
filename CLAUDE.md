@@ -65,6 +65,7 @@ The app has three layers:
 | Copilot  | `~/.copilot/session-state/{uuid}/` | YAML+JSONL |
 | pi       | `~/.pi/agent/sessions/{encoded}/`  | JSONL      |
 | Gemini   | `~/.gemini/tmp/{dir}/chats/`       | JSON       |
+| opencode | `~/.local/share/opencode/`         | SQLite+JSON |
 
 The pi encoded directory wraps the cwd with leading and trailing `--`
 (e.g. `/Users/me/proj` -\> `--Users-me-proj--`). Each session is one
@@ -83,6 +84,23 @@ unresolvable hash dirs fall back to the tmp directory path with a
 `gemini:{hash8}` display name. Because the files are single JSON
 documents (not JSONL), they are parsed with `json.load` on demand
 rather than line-by-line.
+
+opencode has two on-disk formats, both supported by the provider
+(sessions found in SQLite take precedence over the same ID in JSON):
+
+-   **SQLite** (current opencode, 2026+): `opencode.db` /
+    `opencode-{channel}.db` in the data dir, with `session`, `message`,
+    and `part` tables. `message.data` / `part.data` are JSON columns
+    holding the V1 message/part payloads.
+-   **Legacy JSON storage** (2025-era):
+    `storage/session/{projectID}/{sessionID}.json` (session info),
+    `storage/message/{sessionID}/{messageID}.json` (message info), and
+    `storage/part/{messageID}/{partID}.json` (content parts; the older
+    nested `storage/part/{sessionID}/{messageID}/` layout is also
+    read).
+
+The opencode project path comes from the session's `directory` field,
+never from project IDs or folder names.
 
 App-managed files follow XDG base directories (absolute `XDG_*` env vars
 are honored; empty/relative values fall back to defaults):
@@ -116,6 +134,7 @@ CLI to resume the session. Per-provider commands:
     a per-project index or `latest`). Sessions whose project path could
     not be resolved (`gemini:{hash8}` fallback) are not resumable ---
     there is no real cwd to run the command in
+-   **opencode**: `opencode --session <session-id>`
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
@@ -157,6 +176,12 @@ discovery and cached alongside other metadata. Per-provider sources:
     the LAST turn's `input` (which already includes cached tokens);
     `output_tokens` sums `output + thoughts` across turns;
     `cumulative_input_tokens` sums per-turn `input` across the session
+-   **opencode**: per-assistant-message `tokens` blocks
+    (`input`/`output`/`cache.read`/`cache.write`). `input_tokens` is the
+    LAST turn's `input + cache.read + cache.write`; `output_tokens` sums
+    `output` across turns. In the SQLite format the session row's
+    cumulative `tokens_*` columns provide `output_tokens` and
+    `cumulative_input_tokens` directly
 -   **Cursor**: no token data available
 
 The `sesh sessions` CLI output includes three token fields:
@@ -208,6 +233,9 @@ the session is deleted via the provider's `delete_session` method:
 -   **Copilot**: removes the session directory
 -   **pi**: deletes the session JSONL file
 -   **Gemini**: deletes the session JSON file
+-   **opencode**: deletes the session/message/part rows from the
+    SQLite DB, or the session JSON plus its message/part files in the
+    legacy storage tree
 
 CLI equivalents:
 
@@ -355,6 +383,7 @@ Sync is owned by the user (rsync / Syncthing / Dropbox / etc.) ---
 rsync -a --delete laptop:.claude/  $SESH_AGGREGATION_ROOT/laptop/.claude/
 rsync -a --delete laptop:.codex/   $SESH_AGGREGATION_ROOT/laptop/.codex/
 rsync -a --delete laptop:.pi/      $SESH_AGGREGATION_ROOT/laptop/.pi/
+rsync -a --delete laptop:.local/share/opencode/  $SESH_AGGREGATION_ROOT/laptop/.local/share/opencode/
 ```
 
 Activate aggregation mode with either:
@@ -406,6 +435,9 @@ field. The local-mode JSON output also includes `host` (always `null`).
     workspace storage path mirrored under `{host}/Library/...` to be
     visible; CLI agent sessions in `{host}/.cursor/chats/` work
     out-of-the-box.
+-   opencode lives under `.local/share/opencode` rather than a
+    top-level dotdir, so the mirror needs that subpath
+    (`{host}/.local/share/opencode/`).
 
 ## Plans
 

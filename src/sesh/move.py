@@ -19,6 +19,7 @@ from sesh.providers.cursor import (
     WORKSPACE_STORAGE,
     CursorProvider,
 )
+from sesh.providers.opencode import OPENCODE_DATA_DIR, OpencodeProvider
 from sesh.providers.pi import SESSIONS_DIR as PI_SESSIONS_DIR, PiProvider, encode_pi_path
 
 
@@ -328,6 +329,41 @@ def _dry_run_copilot(old_path: str) -> MoveReport:
     )
 
 
+def _dry_run_opencode(old_path: str) -> MoveReport:
+    files_modified = 0
+
+    if OPENCODE_DATA_DIR.is_dir():
+        for db_path in sorted(OPENCODE_DATA_DIR.glob("opencode*.db")):
+            try:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                try:
+                    files_modified += conn.execute(
+                        "SELECT COUNT(*) FROM session WHERE directory = ?",
+                        (old_path,),
+                    ).fetchone()[0]
+                finally:
+                    conn.close()
+            except sqlite3.Error:
+                pass
+
+        session_root = OPENCODE_DATA_DIR / "storage" / "session"
+        if session_root.is_dir():
+            for info_file in session_root.glob("*/*.json"):
+                try:
+                    with open(info_file) as f:
+                        info = json.load(f)
+                except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(info, dict) and info.get("directory") == old_path:
+                    files_modified += 1
+
+    return MoveReport(
+        provider=Provider.OPENCODE,
+        success=True,
+        files_modified=files_modified,
+    )
+
+
 def move_project(
     old_path: str,
     new_path: str,
@@ -344,6 +380,7 @@ def move_project(
             _dry_run_cursor(old_path, new_path),
             _dry_run_copilot(old_path),
             _dry_run_pi(old_path, new_path),
+            _dry_run_opencode(old_path),
         ]
 
     if full_move:
@@ -360,6 +397,7 @@ def move_project(
         (Provider.CURSOR, CursorProvider()),
         (Provider.COPILOT, CopilotProvider()),
         (Provider.PI, PiProvider()),
+        (Provider.OPENCODE, OpencodeProvider()),
     ]
 
     reports: list[MoveReport] = []

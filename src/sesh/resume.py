@@ -29,6 +29,7 @@ RESUME_COMMANDS: dict[Provider, list[str]] = {
     Provider.COPILOT: ["copilot", "--resume={id}"],
     Provider.PI: ["pi", "--session", "{id}"],
     Provider.GEMINI: ["gemini", "--resume", "{id}"],
+    Provider.OPENCODE: ["opencode", "--session", "{id}"],
 }
 
 
