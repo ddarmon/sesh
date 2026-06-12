@@ -819,7 +819,7 @@ class SeshApp(App):
         self.current_filter: Provider | None = None
         self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT, Provider.PI]
         self.filter_index = 0
-        self.sort_options = ["date", "name", "messages", "timeline"]
+        self.sort_options = ["date", "name", "messages", "tokens", "timeline"]
         self.sort_index = 0
         self._current_messages: list[Message] = []
         self._current_session: SessionMeta | None = None
@@ -990,6 +990,8 @@ class SeshApp(App):
             return sorted(sessions, key=lambda s: s.summary.lower())
         if sort_key == "messages":
             return sorted(sessions, key=lambda s: s.message_count, reverse=True)
+        if sort_key == "tokens":
+            return sorted(sessions, key=lambda s: s.input_tokens or 0, reverse=True)
         # Default: date descending
         return sorted(sessions, key=lambda s: s.timestamp, reverse=True)
 

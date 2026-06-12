@@ -77,7 +77,7 @@ async def test_provider_filter_cycles_on_f(app):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_sort_cycles_on_s(app):
-    """Pressing 's' cycles through sort modes: date -> name -> messages -> timeline."""
+    """Pressing 's' cycles through sort modes: date -> name -> messages -> tokens -> timeline."""
     sesh_app, pilot = app
 
     assert sesh_app.sort_options[sesh_app.sort_index] == "date"
@@ -87,6 +87,9 @@ async def test_sort_cycles_on_s(app):
 
     await pilot.press("s")
     assert sesh_app.sort_options[sesh_app.sort_index] == "messages"
+
+    await pilot.press("s")
+    assert sesh_app.sort_options[sesh_app.sort_index] == "tokens"
 
     await pilot.press("s")
     assert sesh_app.sort_options[sesh_app.sort_index] == "timeline"

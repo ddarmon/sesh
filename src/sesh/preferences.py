@@ -17,7 +17,7 @@ DEFAULT_PREFERENCES = {
 }
 
 _VALID_PROVIDER_FILTERS = {None, "claude", "codex", "cursor", "copilot"}
-_VALID_SORT_MODES = {"date", "name", "messages", "timeline"}
+_VALID_SORT_MODES = {"date", "name", "messages", "tokens", "timeline"}
 
 
 def _normalize_preferences(data: object) -> dict:

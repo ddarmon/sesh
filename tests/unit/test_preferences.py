@@ -23,6 +23,24 @@ def test_save_and_load_preferences_roundtrip(tmp_cache_dir) -> None:
     assert preferences.load_preferences() == prefs
 
 
+def test_save_and_load_tokens_sort_mode_roundtrip(tmp_cache_dir) -> None:
+    """The tokens sort mode persists across save/load."""
+    prefs = dict(preferences.DEFAULT_PREFERENCES)
+    prefs["sort_mode"] = "tokens"
+
+    preferences.save_preferences(prefs)
+
+    assert preferences.load_preferences()["sort_mode"] == "tokens"
+
+
+def test_load_preferences_unknown_sort_mode_falls_back_to_default(tmp_cache_dir) -> None:
+    """An unrecognized sort_mode value degrades to the default."""
+    preferences.PREFERENCES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    preferences.PREFERENCES_FILE.write_text('{"sort_mode": "bogus"}')
+
+    assert preferences.load_preferences()["sort_mode"] == "date"
+
+
 def test_load_preferences_corrupt_json_returns_defaults(tmp_cache_dir) -> None:
     """Corrupt JSON is ignored instead of raising."""
     preferences.PREFERENCES_FILE.parent.mkdir(parents=True, exist_ok=True)
