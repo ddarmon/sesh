@@ -138,3 +138,46 @@ def test_format_session_html_renders_with_no_messages() -> None:
 
     assert out.count("<html") == 1
     assert "0 msgs" in out
+
+
+def test_format_session_html_does_not_expand_tokens_in_message_content() -> None:
+    """Template tokens in user content are NOT substituted (single-pass re.sub).
+
+    This is the core safety invariant of the substitution: message text that
+    happens to contain `__DATA__`, `__KATEX_JS__`, etc. must land in the
+    embedded JSON verbatim, never be replaced by an asset or the data payload.
+    """
+    session = make_session(id="tok", provider=Provider.CLAUDE)
+    sentinel = "SEN#__DATA__#__KATEX_JS__#__TITLE__#__HLJS_JS__#END"
+
+    out = format_session_html(session, [make_message(role="user", content=sentinel)])
+
+    # If any token were expanded, the asset/data text would split the sentinel.
+    assert sentinel in out
+
+
+def test_format_session_html_escapes_meta_header() -> None:
+    """HTML in project_path / model is escaped in the (raw-HTML) meta header."""
+    session = make_session(
+        id="x",
+        provider=Provider.CLAUDE,
+        project_path="/x/<img src=q onerror=alert(1)>",
+        model="</script><b>m</b>",
+    )
+
+    out = format_session_html(session, [])
+
+    import re
+
+    header = re.search(r'<header class="meta">(.*?)</header>', out, re.S).group(1)
+    assert "<img src=q onerror=alert(1)>" not in header
+    assert "&lt;img src=q onerror=alert(1)&gt;" in header
+    assert "</script>" not in header
+    assert "&lt;/script&gt;" in header
+
+
+def test_format_session_html_pins_markdown_html_disabled() -> None:
+    """markdown-it stays configured html:false (raw HTML escaped, not injected)."""
+    out = format_session_html(make_session(id="h", provider=Provider.CLAUDE), [])
+
+    assert "html:false" in out

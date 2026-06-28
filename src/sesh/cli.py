@@ -971,13 +971,19 @@ def cmd_view(args: argparse.Namespace) -> None:
 
     content = format_session_html(session, messages)
 
-    out_path = Path(tempfile.gettempdir()) / f"sesh-{session.id[:8]}.html"
+    # mkstemp opens with O_EXCL at mode 0600, so a predictable path can't be
+    # pre-planted as a symlink to redirect the write, and the rendered session
+    # (which may hold sensitive content) isn't left world-readable in a shared
+    # temp dir.
     try:
-        out_path.write_text(content, encoding="utf-8")
+        fd, tmp = tempfile.mkstemp(prefix=f"sesh-{session.id[:8]}-", suffix=".html")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
     except OSError as exc:
         print(f"View failed: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
+    out_path = Path(tmp)
     print(str(out_path))
     if not getattr(args, "no_open", False):
         webbrowser.open(out_path.as_uri())

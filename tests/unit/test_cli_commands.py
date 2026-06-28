@@ -1232,8 +1232,11 @@ def test_cmd_view_no_open_writes_file_and_prints_path(monkeypatch, capsys) -> No
     )
 
     path = capsys.readouterr().out.strip()
-    assert path.endswith("sesh-abcd1234.html")
     from pathlib import Path
+
+    name = Path(path).name
+    assert name.startswith("sesh-abcd1234-")  # unique mkstemp suffix appended
+    assert name.endswith(".html")
 
     content = Path(path).read_text(encoding="utf-8")
     assert "<html" in content
@@ -1264,7 +1267,72 @@ def test_cmd_view_opens_browser_by_default(monkeypatch, capsys) -> None:
 
     assert len(opened) == 1
     assert opened[0].startswith("file://")
-    assert opened[0].endswith("sesh-ffff0000.html")
+    assert "sesh-ffff0000-" in opened[0]
+    assert opened[0].endswith(".html")
+
+
+def test_cmd_view_full_includes_tools_and_thinking(monkeypatch, capsys) -> None:
+    """'sesh view --full' renders thinking and tool messages into the page."""
+    session = make_session(id="s1", provider=Provider.CLAUDE)
+    messages = [
+        make_message(role="user", content="hi"),
+        make_message(role="assistant", content="", content_type="thinking", thinking="THOUGHT-XYZ"),
+        make_message(
+            role="assistant",
+            content="",
+            content_type="tool_use",
+            tool_name="BashToolName",
+            tool_input='{"cmd":"ls"}',
+        ),
+    ]
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+    monkeypatch.setattr("webbrowser.open", lambda url: None)
+
+    cli.cmd_view(
+        _ns(
+            session_id="s1",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=True,
+            no_open=True,
+        )
+    )
+
+    from pathlib import Path
+
+    content = Path(capsys.readouterr().out.strip()).read_text(encoding="utf-8")
+    assert "THOUGHT-XYZ" in content
+    assert "BashToolName" in content
+
+
+def test_cmd_view_write_error_exits(monkeypatch, capsys) -> None:
+    """A failing temp-file write exits with code 1 and an error on stderr."""
+    import tempfile
+
+    session = make_session(id="s1", provider=Provider.CLAUDE)
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tempfile, "mkstemp", boom)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_view(
+            _ns(
+                session_id="s1",
+                provider=None,
+                include_tools=False,
+                include_thinking=False,
+                full=False,
+                no_open=True,
+            )
+        )
+    assert exc.value.code == 1
+    assert "View failed" in capsys.readouterr().err
 
 
 # --- sessions --since/--until/--limit ---

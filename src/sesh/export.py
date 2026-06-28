@@ -208,9 +208,15 @@ _HTML_TEMPLATE = r"""<!doctype html>
        katexOptions:{ throwOnError:false, macros:{"\\RR":"\\mathbb{R}","\\EE":"\\mathbb{E}"} } });
 
   // Normalize \( \) \[ \] -> $ $$ so texmath (dollars) catches them too.
+  // Split out fenced (``` / ~~~) and inline (`…`) code first and leave those
+  // segments untouched, so LaTeX-looking text inside code (incl. the json/text
+  // fences wrapping tool I/O) is shown literally rather than rendered as math.
   function normMath(t){
-    return t.replace(/\\\[([\s\S]+?)\\\]/g, (_,m)=>'$$'+m+'$$')
-            .replace(/\\\(([\s\S]+?)\\\)/g, (_,m)=>'$'+m+'$');
+    const parts = (t||'').split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/g);
+    return parts.map((seg,i)=> (i%2===1) ? seg :
+      seg.replace(/\\\[([\s\S]+?)\\\]/g, (_,m)=>'$$'+m+'$$')
+         .replace(/\\\(([\s\S]+?)\\\)/g, (_,m)=>'$'+m+'$')
+    ).join('');
   }
   const thread = document.getElementById('thread');
   for (const m of data.messages){
