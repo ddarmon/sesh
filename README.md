@@ -162,8 +162,12 @@ sesh clean "some query" --dry-run         # preview matching sessions to delete
 sesh resume <session-id>                  # resume in provider CLI
 sesh resume last                          # resume the most recent session
 sesh export <session-id> --format json    # export session transcript
+sesh export <session-id> --format html -o out.html  # self-contained HTML (Markdown + LaTeX)
 sesh export <session-id> --full           # export with tools + thinking
 sesh export last -o transcript.md         # export the most recent session to a file
+sesh view <session-id>                    # render as HTML + open in the browser
+sesh view last --full                     # view most recent, incl. tools + thinking
+sesh view <session-id> --no-open          # write the HTML file, just print its path
 sesh move /old/path /new/path --dry-run   # preview project move changes
 sesh move /old/path /new/path             # full move + metadata rewrite
 sesh move /old/path /new/path --metadata-only  # metadata rewrite only
@@ -176,6 +180,21 @@ sesh snapshot delete <id> --force          # delete a snapshot
 ```
 
 Run `sesh --help` or `sesh <command> --help` for full details.
+
+### HTML rendering (Markdown + LaTeX)
+
+`sesh export --format html` and the `sesh view` convenience command render
+a session as a **self-contained HTML page** with Markdown, fenced-code
+syntax highlighting, and **LaTeX math** (`$…$`, `$$…$$`, `\(…\)`, and
+`\[…\]` are all recognized) — so sessions read the way they do in
+ChatGPT/Claude.
+
+The renderer (KaTeX, markdown-it + markdown-it-texmath, highlight.js) is
+**vendored and inlined** into the output, so the file works completely
+offline from `file://` — no network, no CDN. `sesh view <id>` writes the
+page to a temp file and opens it in your default browser; `--no-open`
+just prints the path. Both honor the usual `--include-tools` /
+`--include-thinking` / `--full` toggles.
 
 ### Session statistics
 

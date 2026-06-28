@@ -1180,6 +1180,93 @@ def test_cmd_export_output_write_error_exits(monkeypatch, capsys, tmp_path) -> N
     assert "Export failed" in capsys.readouterr().err
 
 
+def test_cmd_export_html_format_writes_file(monkeypatch, capsys, tmp_path) -> None:
+    """'sesh export --format html -o FILE' writes a self-contained HTML doc."""
+    session = make_session(id="s1", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="hello html")]
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    out_file = tmp_path / "session.html"
+    cli.cmd_export(
+        _ns(
+            session_id="s1",
+            provider=None,
+            output_format="html",
+            output=str(out_file),
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+
+    content = out_file.read_text(encoding="utf-8")
+    assert "<html" in content
+    assert "hello html" in content
+    assert "cdn.jsdelivr.net" not in content  # assets inlined, offline
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["exported"]["format"] == "html"
+    assert out["exported"]["path"] == str(out_file)
+
+
+def test_cmd_view_no_open_writes_file_and_prints_path(monkeypatch, capsys) -> None:
+    """'sesh view --no-open' writes an HTML temp file and prints its path."""
+    session = make_session(id="abcd1234ef", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="view me")]
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="abcd1234ef")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+
+    cli.cmd_view(
+        _ns(
+            session_id="abcd1234ef",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_open=True,
+        )
+    )
+
+    path = capsys.readouterr().out.strip()
+    assert path.endswith("sesh-abcd1234.html")
+    from pathlib import Path
+
+    content = Path(path).read_text(encoding="utf-8")
+    assert "<html" in content
+    assert "view me" in content
+    assert opened == []  # --no-open suppresses the browser
+
+
+def test_cmd_view_opens_browser_by_default(monkeypatch, capsys) -> None:
+    """'sesh view' opens the rendered file in a browser via a file URI."""
+    session = make_session(id="ffff0000aa", provider=Provider.CODEX)
+    messages = [make_message(role="user", content="open me")]
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="ffff0000aa")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+
+    cli.cmd_view(
+        _ns(
+            session_id="ffff0000aa",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_open=False,
+        )
+    )
+
+    assert len(opened) == 1
+    assert opened[0].startswith("file://")
+    assert opened[0].endswith("sesh-ffff0000.html")
+
+
 # --- sessions --since/--until/--limit ---
 
 

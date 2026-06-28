@@ -199,9 +199,33 @@ visibility toggles. The formatting logic lives in `export.py` and is
 shared by the TUI and the `sesh export` CLI subcommand.
 
 On the CLI, `sesh export` writes to stdout by default; pass
-`-o/--output FILE` to write the export to a file (UTF-8, both `md` and
-`json` formats). On success the command prints a small JSON confirmation
-(`{"exported": {...}}`) to stdout instead of the transcript.
+`-o/--output FILE` to write the export to a file (UTF-8; `md`, `json`,
+and `html` formats). On success the command prints a small JSON
+confirmation (`{"exported": {...}}`) to stdout instead of the transcript.
+
+## HTML rendering (`export --format html` + `view`)
+
+`sesh export --format html` and the `sesh view <id>` convenience
+subcommand render a session as a **self-contained HTML page** with
+Markdown, syntax highlighting, and **LaTeX** math (`$…$`, `$$…$$`,
+`\(…\)`, `\[…\]`). `format_session_html(session, messages)` in
+`export.py` emits the whole document; `cmd_view` writes it to a temp file
+(`<tmpdir>/sesh-<id8>.html`), prints the path, and opens it in the
+browser unless `--no-open`. Both honor `--include-tools` /
+`--include-thinking` / `--full`.
+
+The renderer (KaTeX, markdown-it + markdown-it-texmath, highlight.js) is
+**vendored** under `src/sesh/viewer_assets/` (so it ships in the wheel —
+top-level `assets/` is not packaged) and **inlined** into the output, so
+the file works offline from `file://` with no network. KaTeX's woff2
+fonts are base64-inlined into `katex.min.css` for the same reason (which
+is why that file is ~360 KB vs. ~23 KB upstream). Assets are substituted
+into the template in a single `re.sub` pass (not chained `str.replace`)
+because a vendored file can itself contain a placeholder token like
+`__DATA__`; the embedded message JSON escapes `</` so it cannot terminate
+the data `<script>` early. All vendored libs are MIT/BSD-3 licensed;
+upstream license texts live in `viewer_assets/LICENSES/` and versions/
+sources are tracked in `viewer_assets/README.md`.
 
 ## Bookmarks
 
@@ -286,7 +310,8 @@ the index, then query it.
 | `sesh delete <id\|last> [--provider NAME] [--force] [--dry-run]`                                          | Delete a session by ID, or the most recent with `last` |
 | `sesh clean <query> [--force] [--dry-run]`                                                                | Delete sessions matching a search query  |
 | `sesh resume <id\|last> [--provider NAME]`                                                                | Resume a session in its provider's CLI   |
-| `sesh export <id\|last> [--provider NAME] [--format md/json] [-o FILE] [--include-tools] [--include-thinking] [--full]` | Export a session to Markdown or JSON     |
+| `sesh export <id\|last> [--provider NAME] [--format md/json/html] [-o FILE] [--include-tools] [--include-thinking] [--full]` | Export a session to Markdown, JSON, or HTML |
+| `sesh view <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--no-open]` | Render a session as HTML and open it in the browser |
 | `sesh move <old> <new> [--metadata-only] [--dry-run]`                                                     | Move project path and update metadata    |
 | `sesh snapshot save`                                                                                      | Capture Terminal.app tabs (macOS only)   |
 | `sesh snapshot list`                                                                                      | List stored snapshots                    |
@@ -297,8 +322,8 @@ the index, then query it.
 The index is stored at `~/.cache/sesh/index.json` by default (or
 `$XDG_CACHE_HOME/sesh/index.json`).
 
-`messages`, `resume`, `export`, and `delete` all accept the literal
-`last` in place of a session ID, resolving to the most recently active
+`messages`, `resume`, `export`, `view`, and `delete` all accept the
+literal `last` in place of a session ID, resolving to the most recently active
 session (the newest `timestamp` in the index); `--provider` scopes
 `last` to one provider. `sesh sessions --since/--until` accept ISO
 dates or datetimes (e.g. `2026-06-01`); timezone-naive values are

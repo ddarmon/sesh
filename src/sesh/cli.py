@@ -913,6 +913,10 @@ def cmd_export(args: argparse.Namespace) -> None:
             "timestamp": session.timestamp.isoformat(),
             "messages": out_messages,
         }, indent=2) + "\n"
+    elif args.output_format == "html":
+        from sesh.export import format_session_html
+
+        content = format_session_html(session, messages)
     else:
         from sesh.export import format_session_markdown
 
@@ -940,6 +944,43 @@ def cmd_export(args: argparse.Namespace) -> None:
             "bytes": len(content.encode("utf-8")),
         }
     })
+
+
+def cmd_view(args: argparse.Namespace) -> None:
+    """Render a session to a self-contained HTML file and open it in a browser."""
+    import tempfile
+    import webbrowser
+
+    index = _require_index(args)
+
+    matches = _resolve_session_matches(index, args.session_id, args.provider)
+
+    from sesh.export import format_session_html
+    from sesh.models import filter_messages
+
+    session, messages = _load_session_messages(matches[0], args)
+
+    include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
+    include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
+
+    messages = filter_messages(
+        messages,
+        include_tools=include_tools,
+        include_thinking=include_thinking,
+    )
+
+    content = format_session_html(session, messages)
+
+    out_path = Path(tempfile.gettempdir()) / f"sesh-{session.id[:8]}.html"
+    try:
+        out_path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        print(f"View failed: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    print(str(out_path))
+    if not getattr(args, "no_open", False):
+        webbrowser.open(out_path.as_uri())
 
 
 def cmd_snapshot_save(args: argparse.Namespace) -> None:
@@ -1103,6 +1144,7 @@ def main() -> None:
             "  sesh clean <query>      # delete sessions matching a query\n"
             "  sesh resume <id>        # resume a session in its provider's CLI\n"
             "  sesh export <id>        # export a session to Markdown or JSON\n"
+            "  sesh view <id>          # render a session as HTML in the browser\n"
             "  sesh move <old> <new>   # move project path + update metadata\n"
             "  sesh snapshot save      # capture Terminal.app tabs (macOS only)"
         ),
@@ -1427,9 +1469,12 @@ def main() -> None:
     p_export.add_argument(
         "--format",
         dest="output_format",
-        choices=["md", "json"],
+        choices=["md", "json", "html"],
         default="md",
-        help="Output format: md (Markdown, default) or json",
+        help=(
+            "Output format: md (Markdown, default), json, or html "
+            "(self-contained page with Markdown, code highlighting, and LaTeX)"
+        ),
     )
     p_export.add_argument(
         "--include-tools",
@@ -1445,6 +1490,50 @@ def main() -> None:
         "--full",
         action="store_true",
         help="Include all message types (tools + thinking)",
+    )
+
+    # view
+    p_view = sub.add_parser(
+        "view",
+        help="Render a session as HTML and open it in the browser",
+        description=(
+            "Render a session as a self-contained HTML page (Markdown, code "
+            "highlighting, and LaTeX math), write it to a temp file, and open "
+            "it in the default browser. Accepts a session ID or the literal "
+            "'last' for the most recently active session (with --provider, "
+            "'last' is scoped to that provider). The file works offline. "
+            "Use --no-open to just print the path."
+        ),
+    )
+    p_view.add_argument(
+        "session_id",
+        help="The session ID to view, or 'last' for the most recent session",
+    )
+    p_view.add_argument(
+        "--provider",
+        metavar="NAME",
+        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
+        help="Disambiguate if the same ID exists in multiple providers",
+    )
+    p_view.add_argument(
+        "--include-tools",
+        action="store_true",
+        help="Include tool call and result messages",
+    )
+    p_view.add_argument(
+        "--include-thinking",
+        action="store_true",
+        help="Include thinking/reasoning messages",
+    )
+    p_view.add_argument(
+        "--full",
+        action="store_true",
+        help="Include all message types (tools + thinking)",
+    )
+    p_view.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Write the HTML file and print its path without opening a browser",
     )
 
     # move
@@ -1563,6 +1652,8 @@ def main() -> None:
         cmd_resume(args)
     elif args.command == "export":
         cmd_export(args)
+    elif args.command == "view":
+        cmd_view(args)
     elif args.command == "move":
         cmd_move(args)
     elif args.command == "snapshot":
