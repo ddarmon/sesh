@@ -209,10 +209,14 @@ confirmation (`{"exported": {...}}`) to stdout instead of the transcript.
 subcommand render a session as a **self-contained HTML page** with
 Markdown, syntax highlighting, and **LaTeX** math (`$…$`, `$$…$$`,
 `\(…\)`, `\[…\]`). `format_session_html(session, messages)` in
-`export.py` emits the whole document; `cmd_view` writes it to a temp file
-(`<tmpdir>/sesh-<id8>.html`), prints the path, and opens it in the
-browser unless `--no-open`. Both honor `--include-tools` /
-`--include-thinking` / `--full`.
+`export.py` emits the whole document; `cmd_view` writes it to a secure
+temp file (`tempfile.mkstemp`, mode 0600), prints the path, and opens it
+in the browser unless `--no-open`. Both honor `--include-tools` /
+`--include-thinking` / `--full`. `cmd_view` discovers fresh via
+`_refresh_index` (like `delete`/`clean`) rather than `_require_index`, so
+a just-created session — including `last` — is viewable without a manual
+`sesh refresh`; discovery is incremental via the on-disk cache so an
+unchanged tree costs only stats.
 
 The renderer (KaTeX, markdown-it + markdown-it-texmath, highlight.js) is
 **vendored** under `src/sesh/viewer_assets/` (so it ships in the wheel —

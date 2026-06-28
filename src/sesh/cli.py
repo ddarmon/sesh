@@ -951,7 +951,10 @@ def cmd_view(args: argparse.Namespace) -> None:
     import tempfile
     import webbrowser
 
-    index = _require_index(args)
+    # Discover fresh (like delete/clean) so a just-created session — including
+    # 'last' — is viewable without a manual 'sesh refresh'. Discovery is
+    # incremental via the on-disk cache, so an unchanged tree costs only stats.
+    index = _refresh_index(args)
 
     matches = _resolve_session_matches(index, args.session_id, args.provider)
 

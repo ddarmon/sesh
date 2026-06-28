@@ -1214,7 +1214,7 @@ def test_cmd_view_no_open_writes_file_and_prints_path(monkeypatch, capsys) -> No
     """'sesh view --no-open' writes an HTML temp file and prints its path."""
     session = make_session(id="abcd1234ef", provider=Provider.CLAUDE)
     messages = [make_message(role="user", content="view me")]
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="abcd1234ef")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="abcd1234ef")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
 
     opened: list[str] = []
@@ -1248,7 +1248,7 @@ def test_cmd_view_opens_browser_by_default(monkeypatch, capsys) -> None:
     """'sesh view' opens the rendered file in a browser via a file URI."""
     session = make_session(id="ffff0000aa", provider=Provider.CODEX)
     messages = [make_message(role="user", content="open me")]
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="ffff0000aa")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="ffff0000aa")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
 
     opened: list[str] = []
@@ -1285,7 +1285,7 @@ def test_cmd_view_full_includes_tools_and_thinking(monkeypatch, capsys) -> None:
             tool_input='{"cmd":"ls"}',
         ),
     ]
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
     monkeypatch.setattr("webbrowser.open", lambda url: None)
 
@@ -1312,7 +1312,7 @@ def test_cmd_view_write_error_exits(monkeypatch, capsys) -> None:
     import tempfile
 
     session = make_session(id="s1", provider=Provider.CLAUDE)
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
 
     def boom(*a, **k):
@@ -1333,6 +1333,39 @@ def test_cmd_view_write_error_exits(monkeypatch, capsys) -> None:
         )
     assert exc.value.code == 1
     assert "View failed" in capsys.readouterr().err
+
+
+def test_cmd_view_refreshes_index_before_resolving(monkeypatch, capsys) -> None:
+    """'sesh view' discovers fresh so a just-created session needs no refresh."""
+    session = make_session(id="brandnew", provider=Provider.CLAUDE)
+    refreshed = {"called": False}
+
+    def fake_refresh(*a, **k):
+        refreshed["called"] = True
+        return {"sessions": [_session_dict(id="brandnew")]}
+
+    # _require_index (disk-only) would NOT see the new session; assert it's
+    # never consulted and that fresh discovery is what resolves the session.
+    def fail_require(*a, **k):
+        raise AssertionError("cmd_view must not use the stale disk index")
+
+    monkeypatch.setattr(cli, "_refresh_index", fake_refresh)
+    monkeypatch.setattr(cli, "_require_index", fail_require)
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+    monkeypatch.setattr("webbrowser.open", lambda url: None)
+
+    cli.cmd_view(
+        _ns(
+            session_id="brandnew",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_open=True,
+        )
+    )
+
+    assert refreshed["called"] is True
 
 
 # --- sessions --since/--until/--limit ---
