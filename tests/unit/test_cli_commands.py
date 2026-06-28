@@ -70,7 +70,7 @@ def test_cmd_sessions_filters_and_strips_source_path(monkeypatch, capsys) -> Non
 
 def test_cmd_messages_not_found_exits(monkeypatch, capsys) -> None:
     """Requesting messages for a nonexistent session ID exits with code 1."""
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": []})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": []})
     args = _ns(
         session_id="missing",
         provider=None,
@@ -97,7 +97,7 @@ def test_cmd_messages_summary_and_pagination(monkeypatch, capsys) -> None:
         make_message(role="user", content="sys", is_system=True),
         make_message(role="user", content="u2"),
     ]
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (None, messages))
 
     args = _ns(
@@ -419,7 +419,7 @@ def test_cmd_export_json_format(monkeypatch, capsys) -> None:
             tool_input='{"path":"x"}',
         ),
     ]
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
 
     cli.cmd_export(
@@ -466,7 +466,7 @@ def test_cmd_export_markdown_format(monkeypatch, capsys) -> None:
             timestamp=None,
         ),
     ]
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
 
     cli.cmd_export(
@@ -936,7 +936,7 @@ def test_cmd_messages_last_picks_most_recent(monkeypatch, capsys) -> None:
         seen["id"] = session_data["id"]
         return None, [make_message(role="user", content="hi")]
 
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
     monkeypatch.setattr(cli, "_load_session_messages", fake_load)
 
     cli.cmd_messages(
@@ -978,7 +978,7 @@ def test_cmd_messages_last_scoped_to_provider(monkeypatch, capsys) -> None:
         seen["id"] = session_data["id"]
         return None, []
 
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
     monkeypatch.setattr(cli, "_load_session_messages", fake_load)
 
     cli.cmd_messages(
@@ -999,7 +999,7 @@ def test_cmd_messages_last_scoped_to_provider(monkeypatch, capsys) -> None:
 
 def test_cmd_messages_last_empty_index_exits(monkeypatch, capsys) -> None:
     """'sesh messages last' with an empty index exits with code 1."""
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": []})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": []})
     with pytest.raises(SystemExit) as exc:
         cli.cmd_messages(
             _ns(
@@ -1015,6 +1015,36 @@ def test_cmd_messages_last_empty_index_exits(monkeypatch, capsys) -> None:
         )
     assert exc.value.code == 1
     assert "No sessions found" in capsys.readouterr().err
+
+
+def test_cmd_messages_refreshes_index_before_resolving(monkeypatch, capsys) -> None:
+    """'sesh messages' discovers fresh so a just-created session needs no refresh."""
+    refreshed = {"called": False}
+
+    def fake_refresh(*a, **k):
+        refreshed["called"] = True
+        return {"sessions": [_session_dict(id="brandnew", provider=Provider.CLAUDE)]}
+
+    def fail_require(*a, **k):
+        raise AssertionError("cmd_messages must not use the stale disk index")
+
+    monkeypatch.setattr(cli, "_refresh_index", fake_refresh)
+    monkeypatch.setattr(cli, "_require_index", fail_require)
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (None, []))
+
+    cli.cmd_messages(
+        _ns(
+            session_id="brandnew",
+            provider=None,
+            limit=50,
+            offset=0,
+            summary=False,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+    assert refreshed["called"] is True
 
 
 def test_cmd_resume_last_picks_most_recent(monkeypatch) -> None:
@@ -1074,7 +1104,7 @@ def test_cmd_export_last_picks_most_recent(monkeypatch, capsys) -> None:
     def fake_load(session_data, args=None):
         return make_session(id=session_data["id"]), []
 
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
     monkeypatch.setattr(cli, "_load_session_messages", fake_load)
 
     cli.cmd_export(
@@ -1098,7 +1128,7 @@ def test_cmd_export_output_writes_markdown_file(monkeypatch, capsys, tmp_path) -
     """'sesh export -o FILE' writes Markdown to the file and prints a JSON confirmation."""
     session = make_session(id="s1", provider=Provider.CLAUDE)
     messages = [make_message(role="user", content="hello file")]
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
 
     out_file = tmp_path / "nested" / "session.md"
@@ -1129,7 +1159,7 @@ def test_cmd_export_output_writes_json_file(monkeypatch, capsys, tmp_path) -> No
     """'sesh export --format json -o FILE' writes parseable JSON to the file."""
     session = make_session(id="s1", provider=Provider.CODEX)
     messages = [make_message(role="user", content="hello json")]
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
 
     out_file = tmp_path / "session.json"
@@ -1157,7 +1187,7 @@ def test_cmd_export_output_writes_json_file(monkeypatch, capsys, tmp_path) -> No
 def test_cmd_export_output_write_error_exits(monkeypatch, capsys, tmp_path) -> None:
     """An unwritable --output path exits with code 1 and an error on stderr."""
     session = make_session(id="s1")
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
 
     blocker = tmp_path / "not-a-dir"
@@ -1184,7 +1214,7 @@ def test_cmd_export_html_format_writes_file(monkeypatch, capsys, tmp_path) -> No
     """'sesh export --format html -o FILE' writes a self-contained HTML doc."""
     session = make_session(id="s1", provider=Provider.CLAUDE)
     messages = [make_message(role="user", content="hello html")]
-    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
 
     out_file = tmp_path / "session.html"
@@ -1208,6 +1238,36 @@ def test_cmd_export_html_format_writes_file(monkeypatch, capsys, tmp_path) -> No
     out = json.loads(capsys.readouterr().out)
     assert out["exported"]["format"] == "html"
     assert out["exported"]["path"] == str(out_file)
+
+
+def test_cmd_export_refreshes_index_before_resolving(monkeypatch, capsys) -> None:
+    """'sesh export' discovers fresh so a just-created session needs no refresh."""
+    session = make_session(id="brandnew", provider=Provider.CLAUDE)
+    refreshed = {"called": False}
+
+    def fake_refresh(*a, **k):
+        refreshed["called"] = True
+        return {"sessions": [_session_dict(id="brandnew")]}
+
+    def fail_require(*a, **k):
+        raise AssertionError("cmd_export must not use the stale disk index")
+
+    monkeypatch.setattr(cli, "_refresh_index", fake_refresh)
+    monkeypatch.setattr(cli, "_require_index", fail_require)
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+
+    cli.cmd_export(
+        _ns(
+            session_id="brandnew",
+            provider=None,
+            output_format="md",
+            output=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+    assert refreshed["called"] is True
 
 
 def test_cmd_view_no_open_writes_file_and_prints_path(monkeypatch, capsys) -> None:
