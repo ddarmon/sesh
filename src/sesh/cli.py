@@ -386,7 +386,10 @@ def _load_session_messages(session_data: dict, args: argparse.Namespace | None =
 
 def cmd_messages(args: argparse.Namespace) -> None:
     """Load and print messages for a session."""
-    index = _require_index(args)
+    # Discover fresh (like view/delete/clean) so a just-created session —
+    # including 'last' — is readable without a manual 'sesh refresh'.
+    # Discovery is incremental via the on-disk cache.
+    index = _refresh_index(args)
 
     # Find the session in the index ('last' = most recently active)
     matches = _resolve_session_matches(index, args.session_id, args.provider)
@@ -870,7 +873,10 @@ def cmd_resume(args: argparse.Namespace) -> None:
 
 def cmd_export(args: argparse.Namespace) -> None:
     """Export a session to Markdown or JSON, to stdout or a file."""
-    index = _require_index(args)
+    # Discover fresh (like view/delete/clean) so a just-created session —
+    # including 'last' — is exportable without a manual 'sesh refresh'.
+    # Discovery is incremental via the on-disk cache.
+    index = _refresh_index(args)
 
     matches = _resolve_session_matches(index, args.session_id, args.provider)
 

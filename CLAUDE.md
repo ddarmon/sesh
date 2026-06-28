@@ -329,7 +329,12 @@ The index is stored at `~/.cache/sesh/index.json` by default (or
 `messages`, `resume`, `export`, `view`, and `delete` all accept the
 literal `last` in place of a session ID, resolving to the most recently active
 session (the newest `timestamp` in the index); `--provider` scopes
-`last` to one provider. `sesh sessions --since/--until` accept ISO
+`last` to one provider. `view`, `messages`, `export`, `delete`, and
+`clean` discover fresh via `_refresh_index` before resolving (so a
+just-created session — including `last` — needs no manual `sesh
+refresh`); discovery is incremental via the on-disk cache. The remaining
+read commands (`projects`, `sessions`, `stats`, `bookmarks`) read the
+on-disk index via `_require_index` and still require a prior `refresh`. `sesh sessions --since/--until` accept ISO
 dates or datetimes (e.g. `2026-06-01`); timezone-naive values are
 treated as UTC, and the bounds are inclusive. `--limit N` sorts by
 timestamp descending before slicing, so it returns the N newest
