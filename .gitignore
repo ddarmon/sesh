@@ -4,4 +4,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-.claude/
+# Claude Code: track shared skills/hooks/settings; ignore personal/local state
+.claude/*
+!.claude/settings.json
+!.claude/skills/
+!.claude/hooks/

@@ -18,11 +18,33 @@ uv tool install . && sesh
 The package version lives in both `pyproject.toml` and
 `src/sesh/__init__.py`. Keep them in sync.
 
-Every PR merged to `main` that includes a bug fix or feature should bump
-the version:
+Version bumps happen **once per release, not per PR**. Individual
+feature/fix PRs should NOT bump the version on their own — the
+in-progress version on `main` stays put until a release is cut. When
+cutting a release, bump the version to cover everything merged to `main`
+since the last `vX.Y.Z` tag, then tag it:
 
--   bug fix: patch version
--   feature: minor version
+-   patch: only bug fixes since the last release
+-   minor: at least one feature since the last release
+
+This keeps each released version meaningful and avoids churn (and merge
+conflicts) from every PR touching the version line.
+
+### Commit prefixes
+
+PR titles / squash-merge commits on `main` use a bracketed prefix. The
+release bump is derived from the prefixes of all commits since the last
+`vX.Y.Z` tag:
+
+-   `[FEATURE]` — a feature → the next release is a **minor** bump
+-   `[BUGFIX]` — a bug fix → **patch** bump (if no features in the range)
+-   `[CHORE]` / `[DOCS]` — chores and docs → no bump on their own
+
+So a release is **minor** if the range contains any `[FEATURE]`,
+otherwise **patch** if it contains any `[BUGFIX]`. The bump and the
+release tag are produced together at release time (a `/release` workflow
+can automate deriving the bump, editing both version files, running the
+tests, tagging, and drafting the GitHub release).
 
 ## Architecture
 
