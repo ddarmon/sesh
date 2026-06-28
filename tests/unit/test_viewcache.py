@@ -44,7 +44,23 @@ def test_safe_stem_sanitizes_traversal(views_dir: Path) -> None:
 
 def test_safe_stem_empty_falls_back() -> None:
     assert viewcache._safe_stem("") == "session"
-    assert viewcache._safe_stem("...") == "session"
+    # "..." sanitizes to empty, so it falls back to a "session-" hash stem
+    # rather than a bare "session" (keeps the mapping injective).
+    dots = viewcache._safe_stem("...")
+    assert dots.startswith("session-")
+
+
+def test_safe_stem_distinct_ids_dont_collide() -> None:
+    """Ids that sanitize to the same chars stay distinct via a hash suffix."""
+    assert viewcache._safe_stem("a/b") != viewcache._safe_stem("a_b")
+
+
+def test_safe_stem_bounds_overlong_ids() -> None:
+    """A very long id maps to a bounded, distinct filename (no OSError)."""
+    long_id = "x" * 5000
+    stem = viewcache._safe_stem(long_id)
+    assert len(stem) <= viewcache._MAX_STEM + 13  # base + "-" + 12-char hash
+    assert viewcache._safe_stem(long_id) != viewcache._safe_stem("x" * 4999)
 
 
 def test_write_view_overwrites_in_place(views_dir: Path) -> None:
@@ -56,22 +72,31 @@ def test_write_view_overwrites_in_place(views_dir: Path) -> None:
 
 
 def test_write_view_permissions(views_dir: Path) -> None:
-    """File is 0600 inside a 0700 dir."""
+    """File is 0600 (written via mkstemp + atomic replace)."""
     p = viewcache.write_view("sess", "<html></html>")
     assert (p.stat().st_mode & 0o777) == 0o600
-    assert (views_dir.stat().st_mode & 0o777) == 0o700
 
 
-def test_write_view_refuses_symlink(views_dir: Path, tmp_path: Path) -> None:
-    """A symlink pre-planted at the target path is refused (O_NOFOLLOW)."""
-    if not hasattr(os, "O_NOFOLLOW"):
-        pytest.skip("O_NOFOLLOW not available on this platform")
+def test_write_view_replaces_symlink_without_following(views_dir: Path, tmp_path: Path) -> None:
+    """A symlink pre-planted at the target is replaced, never written through."""
     views_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = tmp_path / "evil.html"
     os.symlink(target, viewcache.view_path("sess"))
-    with pytest.raises(OSError):
-        viewcache.write_view("sess", "<html></html>")
+
+    p = viewcache.write_view("sess", "<html>safe</html>")
+
+    # The write went to a real regular file at the stable path, and the
+    # symlink target was never created (atomic os.replace clobbers the link).
+    assert not p.is_symlink()
+    assert p.read_text(encoding="utf-8") == "<html>safe</html>"
     assert not target.exists()
+
+
+def test_write_view_no_temp_files_left(views_dir: Path) -> None:
+    """The mkstemp scratch file is renamed away, not left behind."""
+    viewcache.write_view("sess", "<html></html>")
+    leftover = [p.name for p in views_dir.iterdir() if p.name.startswith(".tmp-")]
+    assert leftover == []
 
 
 def test_remove_view(views_dir: Path) -> None:

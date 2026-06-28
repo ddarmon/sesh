@@ -249,22 +249,27 @@ The HTML is written to a deterministic path
 re-running `sesh view` on the same session reuses the same `file://` URL
 and `webbrowser.open(url, new=0)` **refreshes the existing browser tab**
 instead of opening a new one. The id is sanitized to a traversal-safe
-filename stem.
+filename stem (with a hash suffix when sanitizing alters the id or it is
+over-long, so distinct ids never collide onto one file).
 
 These files are **pure cache** — always regenerable from the session — so
 they can be deleted at any time. The original `mkstemp` security
-properties are preserved by *relocating, not randomizing*: the dir is
-created `0700`, the file written `0600` and opened `O_NOFOLLOW` (a symlink
-pre-planted at the path is refused). Cleanup is opportunistic and needs no
-background process:
+properties are preserved by *relocating, not randomizing*: the file is
+written `0600` via a private `mkstemp` temp file in the views dir (created
+`0700` when sesh first makes it) that is then atomically `os.replace`-d
+onto the stable path. The atomic rename also makes concurrent same-session
+views safe (no truncate/interleave) and means a symlink pre-planted at the
+stable path is *replaced*, never written through. Cleanup is opportunistic
+and needs no background process:
 
--   `sweep_view_cache()` runs on every `cmd_view` and deletes any
-    `*.html` that is **both** older than `MAX_AGE_DAYS` (7) **and** not
-    among the `KEEP_NEWEST` (50) most-recently-modified files. Age ages
-    out view-once sessions; the count cap bounds the burst case (scripting
-    `sesh view` over many sessions leaves many *fresh* files no age
-    threshold would touch). Re-viewing rewrites a file (fresh mtime), so
-    active sessions survive. `now` is injectable for deterministic tests.
+-   `sweep_view_cache()` runs on every `cmd_view` and deletes any `*.html`
+    that is older than `MAX_AGE_DAYS` (7) **or** beyond the `KEEP_NEWEST`
+    (50) most-recently-modified files (a file survives only if it is both
+    fresh and recent). The two triggers are independent on purpose: age
+    ages out view-once sessions, and the count cap *also* bounds the burst
+    case (scripting `sesh view` over many sessions leaves many *fresh*
+    files no age threshold would touch). Re-viewing rewrites a file (fresh
+    mtime), so active sessions survive. `now` is injectable for tests.
 -   `remove_view(id)` drops a session's view file when the session itself
     is deleted (wired into `cmd_delete`, `cmd_clean`, and the TUI
     `_delete_session`), so a stale view of a deleted session can't linger.

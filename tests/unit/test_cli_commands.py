@@ -1452,6 +1452,64 @@ def test_cmd_view_refreshes_index_before_resolving(monkeypatch, capsys, tmp_cach
     assert refreshed["called"] is True
 
 
+def test_cmd_view_sweeps_stale_files(monkeypatch, capsys, tmp_cache_dir) -> None:
+    """'sesh view' GCs an old cached view as a side effect of rendering."""
+    import os
+
+    from sesh import viewcache
+
+    session = make_session(id="s1", provider=Provider.CLAUDE)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: None)
+
+    # A stale view from another session, well past the 7-day TTL.
+    stale = viewcache.write_view("ancient", "<html></html>")
+    old = __import__("time").time() - 30 * 86400
+    os.utime(stale, (old, old))
+
+    cli.cmd_view(
+        _ns(
+            session_id="s1",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_open=True,
+        )
+    )
+
+    assert not stale.exists()  # swept during the view
+
+
+def test_cmd_delete_removes_view_file(monkeypatch, capsys, tmp_cache_dir) -> None:
+    """Deleting a session also drops its cached HTML view."""
+    import sesh.providers.claude as claude_mod
+    import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
+    import sesh.providers.cursor as cursor_mod
+    from sesh import viewcache
+
+    class FakeProvider:
+        def delete_session(self, session):
+            pass
+
+    view = viewcache.write_view("s1", "<html></html>")
+    assert view.exists()
+
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
+    monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
+    monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+    monkeypatch.setattr(copilot_mod, "CopilotProvider", FakeProvider)
+
+    cli.cmd_delete(_ns(session_id="s1", provider=None, force=True, dry_run=False))
+
+    assert not view.exists()
+
+
 # --- sessions --since/--until/--limit ---
 
 
