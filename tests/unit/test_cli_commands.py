@@ -1270,15 +1270,15 @@ def test_cmd_export_refreshes_index_before_resolving(monkeypatch, capsys) -> Non
     assert refreshed["called"] is True
 
 
-def test_cmd_view_no_open_writes_file_and_prints_path(monkeypatch, capsys) -> None:
-    """'sesh view --no-open' writes an HTML temp file and prints its path."""
+def test_cmd_view_no_open_writes_file_and_prints_path(monkeypatch, capsys, tmp_cache_dir) -> None:
+    """'sesh view --no-open' writes a stable HTML file and prints its path."""
     session = make_session(id="abcd1234ef", provider=Provider.CLAUDE)
     messages = [make_message(role="user", content="view me")]
     monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="abcd1234ef")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
 
     opened: list[str] = []
-    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: opened.append(url))
 
     cli.cmd_view(
         _ns(
@@ -1295,8 +1295,7 @@ def test_cmd_view_no_open_writes_file_and_prints_path(monkeypatch, capsys) -> No
     from pathlib import Path
 
     name = Path(path).name
-    assert name.startswith("sesh-abcd1234-")  # unique mkstemp suffix appended
-    assert name.endswith(".html")
+    assert name == "abcd1234ef.html"  # stable per-session path, full id
 
     content = Path(path).read_text(encoding="utf-8")
     assert "<html" in content
@@ -1304,15 +1303,39 @@ def test_cmd_view_no_open_writes_file_and_prints_path(monkeypatch, capsys) -> No
     assert opened == []  # --no-open suppresses the browser
 
 
-def test_cmd_view_opens_browser_by_default(monkeypatch, capsys) -> None:
+def test_cmd_view_reuses_stable_path_across_runs(monkeypatch, capsys, tmp_cache_dir) -> None:
+    """Two views of the same session produce the same path (refresh-in-place)."""
+    session = make_session(id="abcd1234ef", provider=Provider.CLAUDE)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="abcd1234ef")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: None)
+
+    ns = lambda: _ns(  # noqa: E731
+        session_id="abcd1234ef",
+        provider=None,
+        include_tools=False,
+        include_thinking=False,
+        full=False,
+        no_open=True,
+    )
+
+    cli.cmd_view(ns())
+    first = capsys.readouterr().out.strip()
+    cli.cmd_view(ns())
+    second = capsys.readouterr().out.strip()
+
+    assert first == second
+
+
+def test_cmd_view_opens_browser_by_default(monkeypatch, capsys, tmp_cache_dir) -> None:
     """'sesh view' opens the rendered file in a browser via a file URI."""
     session = make_session(id="ffff0000aa", provider=Provider.CODEX)
     messages = [make_message(role="user", content="open me")]
     monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="ffff0000aa")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
 
-    opened: list[str] = []
-    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+    opened: list[tuple[str, int]] = []
+    monkeypatch.setattr("webbrowser.open", lambda url, new=2: opened.append((url, new)))
 
     cli.cmd_view(
         _ns(
@@ -1326,12 +1349,13 @@ def test_cmd_view_opens_browser_by_default(monkeypatch, capsys) -> None:
     )
 
     assert len(opened) == 1
-    assert opened[0].startswith("file://")
-    assert "sesh-ffff0000-" in opened[0]
-    assert opened[0].endswith(".html")
+    url, new = opened[0]
+    assert url.startswith("file://")
+    assert url.endswith("ffff0000aa.html")
+    assert new == 0  # new=0 asks the browser to reuse the existing tab
 
 
-def test_cmd_view_full_includes_tools_and_thinking(monkeypatch, capsys) -> None:
+def test_cmd_view_full_includes_tools_and_thinking(monkeypatch, capsys, tmp_cache_dir) -> None:
     """'sesh view --full' renders thinking and tool messages into the page."""
     session = make_session(id="s1", provider=Provider.CLAUDE)
     messages = [
@@ -1347,7 +1371,7 @@ def test_cmd_view_full_includes_tools_and_thinking(monkeypatch, capsys) -> None:
     ]
     monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
-    monkeypatch.setattr("webbrowser.open", lambda url: None)
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: None)
 
     cli.cmd_view(
         _ns(
@@ -1367,9 +1391,9 @@ def test_cmd_view_full_includes_tools_and_thinking(monkeypatch, capsys) -> None:
     assert "BashToolName" in content
 
 
-def test_cmd_view_write_error_exits(monkeypatch, capsys) -> None:
-    """A failing temp-file write exits with code 1 and an error on stderr."""
-    import tempfile
+def test_cmd_view_write_error_exits(monkeypatch, capsys, tmp_cache_dir) -> None:
+    """A failing view-file write exits with code 1 and an error on stderr."""
+    from sesh import viewcache
 
     session = make_session(id="s1", provider=Provider.CLAUDE)
     monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
@@ -1378,7 +1402,7 @@ def test_cmd_view_write_error_exits(monkeypatch, capsys) -> None:
     def boom(*a, **k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(tempfile, "mkstemp", boom)
+    monkeypatch.setattr(viewcache, "write_view", boom)
 
     with pytest.raises(SystemExit) as exc:
         cli.cmd_view(
@@ -1395,7 +1419,7 @@ def test_cmd_view_write_error_exits(monkeypatch, capsys) -> None:
     assert "View failed" in capsys.readouterr().err
 
 
-def test_cmd_view_refreshes_index_before_resolving(monkeypatch, capsys) -> None:
+def test_cmd_view_refreshes_index_before_resolving(monkeypatch, capsys, tmp_cache_dir) -> None:
     """'sesh view' discovers fresh so a just-created session needs no refresh."""
     session = make_session(id="brandnew", provider=Provider.CLAUDE)
     refreshed = {"called": False}
@@ -1412,7 +1436,7 @@ def test_cmd_view_refreshes_index_before_resolving(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "_refresh_index", fake_refresh)
     monkeypatch.setattr(cli, "_require_index", fail_require)
     monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
-    monkeypatch.setattr("webbrowser.open", lambda url: None)
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: None)
 
     cli.cmd_view(
         _ns(
@@ -1426,6 +1450,64 @@ def test_cmd_view_refreshes_index_before_resolving(monkeypatch, capsys) -> None:
     )
 
     assert refreshed["called"] is True
+
+
+def test_cmd_view_sweeps_stale_files(monkeypatch, capsys, tmp_cache_dir) -> None:
+    """'sesh view' GCs an old cached view as a side effect of rendering."""
+    import os
+
+    from sesh import viewcache
+
+    session = make_session(id="s1", provider=Provider.CLAUDE)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: None)
+
+    # A stale view from another session, well past the 7-day TTL.
+    stale = viewcache.write_view("ancient", "<html></html>")
+    old = __import__("time").time() - 30 * 86400
+    os.utime(stale, (old, old))
+
+    cli.cmd_view(
+        _ns(
+            session_id="s1",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_open=True,
+        )
+    )
+
+    assert not stale.exists()  # swept during the view
+
+
+def test_cmd_delete_removes_view_file(monkeypatch, capsys, tmp_cache_dir) -> None:
+    """Deleting a session also drops its cached HTML view."""
+    import sesh.providers.claude as claude_mod
+    import sesh.providers.codex as codex_mod
+    import sesh.providers.copilot as copilot_mod
+    import sesh.providers.cursor as cursor_mod
+    from sesh import viewcache
+
+    class FakeProvider:
+        def delete_session(self, session):
+            pass
+
+    view = viewcache.write_view("s1", "<html></html>")
+    assert view.exists()
+
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeProvider)
+    monkeypatch.setattr(codex_mod, "CodexProvider", FakeProvider)
+    monkeypatch.setattr(cursor_mod, "CursorProvider", FakeProvider)
+    monkeypatch.setattr(copilot_mod, "CopilotProvider", FakeProvider)
+
+    cli.cmd_delete(_ns(session_id="s1", provider=None, force=True, dry_run=False))
+
+    assert not view.exists()
 
 
 # --- sessions --since/--until/--limit ---
