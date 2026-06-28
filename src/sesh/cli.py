@@ -600,6 +600,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
     from sesh.providers.gemini import GeminiProvider
     from sesh.providers.opencode import OpencodeProvider
     from sesh.providers.pi import PiProvider
+    from sesh.viewcache import remove_view
 
     providers_map = {
         Provider.CLAUDE: ClaudeProvider(),
@@ -642,6 +643,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
         try:
             provider.delete_session(session)
+            remove_view(session.id)
             deleted.append(out_entry)
         except Exception as exc:
             out_entry["error"] = str(exc)
@@ -814,6 +816,10 @@ def cmd_delete(args: argparse.Namespace) -> None:
         print(f"Delete failed: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
+    from sesh.viewcache import remove_view
+
+    remove_view(session.id)
+
     _json_out({"deleted": info})
 
 
@@ -954,7 +960,6 @@ def cmd_export(args: argparse.Namespace) -> None:
 
 def cmd_view(args: argparse.Namespace) -> None:
     """Render a session to a self-contained HTML file and open it in a browser."""
-    import tempfile
     import webbrowser
 
     # Discover fresh (like delete/clean) so a just-created session — including
@@ -966,6 +971,7 @@ def cmd_view(args: argparse.Namespace) -> None:
 
     from sesh.export import format_session_html
     from sesh.models import filter_messages
+    from sesh.viewcache import sweep_view_cache, write_view
 
     session, messages = _load_session_messages(matches[0], args)
 
@@ -980,22 +986,22 @@ def cmd_view(args: argparse.Namespace) -> None:
 
     content = format_session_html(session, messages)
 
-    # mkstemp opens with O_EXCL at mode 0600, so a predictable path can't be
-    # pre-planted as a symlink to redirect the write, and the rendered session
-    # (which may hold sensitive content) isn't left world-readable in a shared
-    # temp dir.
+    # Write to a stable per-session path so re-running 'sesh view' reuses the
+    # same file:// URL and the browser refreshes the existing tab (with new=0)
+    # instead of opening a new one. write_view keeps the original mkstemp
+    # security properties (user-private 0700 dir, 0600 file, O_NOFOLLOW).
     try:
-        fd, tmp = tempfile.mkstemp(prefix=f"sesh-{session.id[:8]}-", suffix=".html")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
+        out_path = write_view(session.id, content)
     except OSError as exc:
         print(f"View failed: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
-    out_path = Path(tmp)
+    # Opportunistically GC stale view files (pure cache, always regenerable).
+    sweep_view_cache()
+
     print(str(out_path))
     if not getattr(args, "no_open", False):
-        webbrowser.open(out_path.as_uri())
+        webbrowser.open(out_path.as_uri(), new=0)
 
 
 def cmd_snapshot_save(args: argparse.Namespace) -> None:

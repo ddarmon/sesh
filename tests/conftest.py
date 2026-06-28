@@ -123,16 +123,18 @@ except ModuleNotFoundError:
 
 @pytest.fixture()
 def tmp_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from sesh import bookmarks, cache, paths, preferences
+    from sesh import bookmarks, cache, paths, preferences, viewcache
 
     cache_dir = tmp_path / "cache" / "sesh"
     config_dir = tmp_path / "config" / "sesh"
     monkeypatch.setattr(paths, "CACHE_DIR", cache_dir)
     monkeypatch.setattr(paths, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(paths, "VIEWS_DIR", cache_dir / "views")
     monkeypatch.setattr(cache, "CACHE_DIR", cache_dir)
     monkeypatch.setattr(cache, "CACHE_FILE", cache_dir / "sessions.json")
     monkeypatch.setattr(cache, "INDEX_FILE", cache_dir / "index.json")
     monkeypatch.setattr(cache, "PROJECT_PATHS_FILE", cache_dir / "project_paths.json")
+    monkeypatch.setattr(viewcache, "VIEWS_DIR", cache_dir / "views")
     monkeypatch.setattr(bookmarks, "BOOKMARKS_FILE", config_dir / "bookmarks.json")
     monkeypatch.setattr(preferences, "PREFERENCES_FILE", config_dir / "preferences.json")
     return cache_dir

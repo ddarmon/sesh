@@ -1875,6 +1875,10 @@ class SeshApp(App):
             self._set_status("Error deleting session")
             return
 
+        from sesh.viewcache import remove_view
+
+        remove_view(session.id)
+
         # Remove from in-memory session list
         sess_list = self.sessions.get(session.project_path, [])
         self.sessions[session.project_path] = [

@@ -127,7 +127,8 @@ never from project IDs or folder names.
 App-managed files follow XDG base directories (absolute `XDG_*` env vars
 are honored; empty/relative values fall back to defaults):
 
--   cache files (`sessions.json`, `index.json`, `project_paths.json`):
+-   cache files (`sessions.json`, `index.json`, `project_paths.json`)
+    and the `views/` HTML view cache (see HTML rendering below):
     `~/.cache/sesh/` or `$XDG_CACHE_HOME/sesh/`
 -   config files (`preferences.json`, `bookmarks.json`):
     `~/.config/sesh/` or `$XDG_CONFIG_HOME/sesh/`
@@ -231,14 +232,42 @@ confirmation (`{"exported": {...}}`) to stdout instead of the transcript.
 subcommand render a session as a **self-contained HTML page** with
 Markdown, syntax highlighting, and **LaTeX** math (`$…$`, `$$…$$`,
 `\(…\)`, `\[…\]`). `format_session_html(session, messages)` in
-`export.py` emits the whole document; `cmd_view` writes it to a secure
-temp file (`tempfile.mkstemp`, mode 0600), prints the path, and opens it
-in the browser unless `--no-open`. Both honor `--include-tools` /
-`--include-thinking` / `--full`. `cmd_view` discovers fresh via
+`export.py` emits the whole document; `cmd_view` writes it to a **stable
+per-session path** (`viewcache.write_view`), prints the path, and opens it
+in the browser (`new=0`) unless `--no-open`. Both honor `--include-tools`
+/ `--include-thinking` / `--full`. `cmd_view` discovers fresh via
 `_refresh_index` (like `delete`/`clean`) rather than `_require_index`, so
 a just-created session — including `last` — is viewable without a manual
 `sesh refresh`; discovery is incremental via the on-disk cache so an
 unchanged tree costs only stats.
+
+### View cache (`viewcache.py`)
+
+The HTML is written to a deterministic path
+(`$XDG_CACHE_HOME/sesh/views/{session-id}.html`, default
+`~/.cache/sesh/views/`) rather than a random `mkstemp` temp file, so
+re-running `sesh view` on the same session reuses the same `file://` URL
+and `webbrowser.open(url, new=0)` **refreshes the existing browser tab**
+instead of opening a new one. The id is sanitized to a traversal-safe
+filename stem.
+
+These files are **pure cache** — always regenerable from the session — so
+they can be deleted at any time. The original `mkstemp` security
+properties are preserved by *relocating, not randomizing*: the dir is
+created `0700`, the file written `0600` and opened `O_NOFOLLOW` (a symlink
+pre-planted at the path is refused). Cleanup is opportunistic and needs no
+background process:
+
+-   `sweep_view_cache()` runs on every `cmd_view` and deletes any
+    `*.html` that is **both** older than `MAX_AGE_DAYS` (7) **and** not
+    among the `KEEP_NEWEST` (50) most-recently-modified files. Age ages
+    out view-once sessions; the count cap bounds the burst case (scripting
+    `sesh view` over many sessions leaves many *fresh* files no age
+    threshold would touch). Re-viewing rewrites a file (fresh mtime), so
+    active sessions survive. `now` is injectable for deterministic tests.
+-   `remove_view(id)` drops a session's view file when the session itself
+    is deleted (wired into `cmd_delete`, `cmd_clean`, and the TUI
+    `_delete_session`), so a stale view of a deleted session can't linger.
 
 The renderer (KaTeX, markdown-it + markdown-it-texmath, highlight.js) is
 **vendored** under `src/sesh/viewer_assets/` (so it ships in the wheel —
