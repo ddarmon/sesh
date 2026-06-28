@@ -18,11 +18,17 @@ uv tool install . && sesh
 The package version lives in both `pyproject.toml` and
 `src/sesh/__init__.py`. Keep them in sync.
 
-Every PR merged to `main` that includes a bug fix or feature should bump
-the version:
+Version bumps happen **once per release, not per PR**. Individual
+feature/fix PRs should NOT bump the version on their own — the
+in-progress version on `main` stays put until a release is cut. When
+cutting a release, bump the version to cover everything merged to `main`
+since the last `vX.Y.Z` tag, then tag it:
 
--   bug fix: patch version
--   feature: minor version
+-   patch: only bug fixes since the last release
+-   minor: at least one feature since the last release
+
+This keeps each released version meaningful and avoids churn (and merge
+conflicts) from every PR touching the version line.
 
 ## Architecture
 
