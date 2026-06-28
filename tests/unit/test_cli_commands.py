@@ -1180,6 +1180,194 @@ def test_cmd_export_output_write_error_exits(monkeypatch, capsys, tmp_path) -> N
     assert "Export failed" in capsys.readouterr().err
 
 
+def test_cmd_export_html_format_writes_file(monkeypatch, capsys, tmp_path) -> None:
+    """'sesh export --format html -o FILE' writes a self-contained HTML doc."""
+    session = make_session(id="s1", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="hello html")]
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    out_file = tmp_path / "session.html"
+    cli.cmd_export(
+        _ns(
+            session_id="s1",
+            provider=None,
+            output_format="html",
+            output=str(out_file),
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+
+    content = out_file.read_text(encoding="utf-8")
+    assert "<html" in content
+    assert "hello html" in content
+    assert "cdn.jsdelivr.net" not in content  # assets inlined, offline
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["exported"]["format"] == "html"
+    assert out["exported"]["path"] == str(out_file)
+
+
+def test_cmd_view_no_open_writes_file_and_prints_path(monkeypatch, capsys) -> None:
+    """'sesh view --no-open' writes an HTML temp file and prints its path."""
+    session = make_session(id="abcd1234ef", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="view me")]
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="abcd1234ef")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+
+    cli.cmd_view(
+        _ns(
+            session_id="abcd1234ef",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_open=True,
+        )
+    )
+
+    path = capsys.readouterr().out.strip()
+    from pathlib import Path
+
+    name = Path(path).name
+    assert name.startswith("sesh-abcd1234-")  # unique mkstemp suffix appended
+    assert name.endswith(".html")
+
+    content = Path(path).read_text(encoding="utf-8")
+    assert "<html" in content
+    assert "view me" in content
+    assert opened == []  # --no-open suppresses the browser
+
+
+def test_cmd_view_opens_browser_by_default(monkeypatch, capsys) -> None:
+    """'sesh view' opens the rendered file in a browser via a file URI."""
+    session = make_session(id="ffff0000aa", provider=Provider.CODEX)
+    messages = [make_message(role="user", content="open me")]
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="ffff0000aa")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url))
+
+    cli.cmd_view(
+        _ns(
+            session_id="ffff0000aa",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_open=False,
+        )
+    )
+
+    assert len(opened) == 1
+    assert opened[0].startswith("file://")
+    assert "sesh-ffff0000-" in opened[0]
+    assert opened[0].endswith(".html")
+
+
+def test_cmd_view_full_includes_tools_and_thinking(monkeypatch, capsys) -> None:
+    """'sesh view --full' renders thinking and tool messages into the page."""
+    session = make_session(id="s1", provider=Provider.CLAUDE)
+    messages = [
+        make_message(role="user", content="hi"),
+        make_message(role="assistant", content="", content_type="thinking", thinking="THOUGHT-XYZ"),
+        make_message(
+            role="assistant",
+            content="",
+            content_type="tool_use",
+            tool_name="BashToolName",
+            tool_input='{"cmd":"ls"}',
+        ),
+    ]
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+    monkeypatch.setattr("webbrowser.open", lambda url: None)
+
+    cli.cmd_view(
+        _ns(
+            session_id="s1",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=True,
+            no_open=True,
+        )
+    )
+
+    from pathlib import Path
+
+    content = Path(capsys.readouterr().out.strip()).read_text(encoding="utf-8")
+    assert "THOUGHT-XYZ" in content
+    assert "BashToolName" in content
+
+
+def test_cmd_view_write_error_exits(monkeypatch, capsys) -> None:
+    """A failing temp-file write exits with code 1 and an error on stderr."""
+    import tempfile
+
+    session = make_session(id="s1", provider=Provider.CLAUDE)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tempfile, "mkstemp", boom)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_view(
+            _ns(
+                session_id="s1",
+                provider=None,
+                include_tools=False,
+                include_thinking=False,
+                full=False,
+                no_open=True,
+            )
+        )
+    assert exc.value.code == 1
+    assert "View failed" in capsys.readouterr().err
+
+
+def test_cmd_view_refreshes_index_before_resolving(monkeypatch, capsys) -> None:
+    """'sesh view' discovers fresh so a just-created session needs no refresh."""
+    session = make_session(id="brandnew", provider=Provider.CLAUDE)
+    refreshed = {"called": False}
+
+    def fake_refresh(*a, **k):
+        refreshed["called"] = True
+        return {"sessions": [_session_dict(id="brandnew")]}
+
+    # _require_index (disk-only) would NOT see the new session; assert it's
+    # never consulted and that fresh discovery is what resolves the session.
+    def fail_require(*a, **k):
+        raise AssertionError("cmd_view must not use the stale disk index")
+
+    monkeypatch.setattr(cli, "_refresh_index", fake_refresh)
+    monkeypatch.setattr(cli, "_require_index", fail_require)
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+    monkeypatch.setattr("webbrowser.open", lambda url: None)
+
+    cli.cmd_view(
+        _ns(
+            session_id="brandnew",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_open=True,
+        )
+    )
+
+    assert refreshed["called"] is True
+
+
 # --- sessions --since/--until/--limit ---
 
 
