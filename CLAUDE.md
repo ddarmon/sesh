@@ -30,6 +30,22 @@ since the last `vX.Y.Z` tag, then tag it:
 This keeps each released version meaningful and avoids churn (and merge
 conflicts) from every PR touching the version line.
 
+### Commit prefixes
+
+PR titles / squash-merge commits on `main` use a bracketed prefix. The
+release bump is derived from the prefixes of all commits since the last
+`vX.Y.Z` tag:
+
+-   `[FEATURE]` — a feature → the next release is a **minor** bump
+-   `[BUGFIX]` — a bug fix → **patch** bump (if no features in the range)
+-   `[CHORE]` / `[DOCS]` — chores and docs → no bump on their own
+
+So a release is **minor** if the range contains any `[FEATURE]`,
+otherwise **patch** if it contains any `[BUGFIX]`. The bump and the
+release tag are produced together at release time (a `/release` workflow
+can automate deriving the bump, editing both version files, running the
+tests, tagging, and drafting the GitHub release).
+
 ## Architecture
 
 The app has three layers:
