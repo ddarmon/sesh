@@ -1706,3 +1706,141 @@ def test_cmd_bookmarks_refused_in_aggregation(monkeypatch, capsys) -> None:
         cli.cmd_bookmarks(_ns(aggregation_root="/agg"))
     assert exc.value.code == 1
     assert "aggregation mode" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# view/export --file (loose transcript, no index)
+# ---------------------------------------------------------------------------
+def _write_loose_transcript(path) -> str:
+    """Write a minimal Claude transcript .jsonl; return its sessionId."""
+    import json as _json
+
+    sid = "loose-sid-1"
+    entries = [
+        {
+            "sessionId": sid,
+            "cwd": "/Users/me/proj",
+            "timestamp": "2025-01-15T10:00:00Z",
+            "message": {"role": "user", "content": "render me"},
+        },
+        {
+            "sessionId": sid,
+            "cwd": "/Users/me/proj",
+            "timestamp": "2025-01-15T10:01:00Z",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        },
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        for e in entries:
+            f.write(_json.dumps(e) + "\n")
+    return sid
+
+
+def test_cmd_export_file_md_bypasses_index(monkeypatch, capsys, tmp_path) -> None:
+    """export --file renders without ever touching the index."""
+    loose = tmp_path / "archived.jsonl"
+    _write_loose_transcript(loose)
+
+    def fail_refresh(*a, **k):
+        raise AssertionError("export --file must not refresh the index")
+
+    monkeypatch.setattr(cli, "_refresh_index", fail_refresh)
+
+    cli.cmd_export(
+        _ns(
+            session_id=None,
+            file=str(loose),
+            provider=None,
+            output_format="md",
+            output=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+    out = capsys.readouterr().out
+    assert "# Session: loose-sid-1" in out
+    assert "render me" in out
+
+
+def test_cmd_export_file_html_to_output(monkeypatch, capsys, tmp_path) -> None:
+    loose = tmp_path / "archived.jsonl"
+    _write_loose_transcript(loose)
+    out_file = tmp_path / "out.html"
+
+    cli.cmd_export(
+        _ns(
+            session_id=None,
+            file=str(loose),
+            provider=None,
+            output_format="html",
+            output=str(out_file),
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+        )
+    )
+    assert "<html" in out_file.read_text(encoding="utf-8")
+
+
+def test_cmd_view_file_no_open(monkeypatch, capsys, tmp_cache_dir, tmp_path) -> None:
+    loose = tmp_path / "archived.jsonl"
+    _write_loose_transcript(loose)
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: None)
+
+    cli.cmd_view(
+        _ns(
+            session_id=None,
+            file=str(loose),
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_open=True,
+        )
+    )
+    from pathlib import Path
+
+    path = capsys.readouterr().out.strip()
+    assert Path(path).name == "loose-sid-1.html"
+    assert "render me" in Path(path).read_text(encoding="utf-8")
+
+
+def test_cmd_export_file_and_session_id_conflict(capsys, tmp_path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_export(_ns(session_id="s1", file=str(tmp_path / "x.jsonl"), provider=None))
+    assert exc.value.code == 1
+    assert "not both" in capsys.readouterr().err
+
+
+def test_cmd_export_neither_id_nor_file(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_export(_ns(session_id=None, file=None, provider=None))
+    assert exc.value.code == 1
+    assert "required" in capsys.readouterr().err
+
+
+def test_cmd_view_file_missing_path(capsys, tmp_path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_view(_ns(session_id=None, file=str(tmp_path / "nope.jsonl"), provider=None))
+    assert exc.value.code == 1
+    assert "not found" in capsys.readouterr().err
+
+
+def test_cmd_view_file_wrong_suffix(capsys, tmp_path) -> None:
+    bad = tmp_path / "notes.md"
+    bad.write_text("hello", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_view(_ns(session_id=None, file=str(bad), provider=None))
+    assert exc.value.code == 1
+    assert ".jsonl" in capsys.readouterr().err
+
+
+def test_cmd_export_file_nonclaude_provider_rejected(capsys, tmp_path) -> None:
+    loose = tmp_path / "archived.jsonl"
+    _write_loose_transcript(loose)
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_export(_ns(session_id=None, file=str(loose), provider="codex"))
+    assert exc.value.code == 1
+    assert "only Claude" in capsys.readouterr().err

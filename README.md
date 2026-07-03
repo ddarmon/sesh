@@ -168,6 +168,8 @@ sesh export last -o transcript.md         # export the most recent session to a 
 sesh view <session-id>                    # render as HTML + open in the browser
 sesh view last --full                     # view most recent, incl. tools + thinking
 sesh view <session-id> --no-open          # write the HTML file, just print its path
+sesh view --file /path/archive/abc.jsonl  # render a loose/archived transcript (no index)
+sesh export --file /path/abc.jsonl --format html -o out.html  # archived transcript → HTML
 sesh move /old/path /new/path --dry-run   # preview project move changes
 sesh move /old/path /new/path             # full move + metadata rewrite
 sesh move /old/path /new/path --metadata-only  # metadata rewrite only
@@ -195,6 +197,14 @@ offline from `file://` — no network, no CDN. `sesh view <id>` writes the
 page to a temp file and opens it in your default browser; `--no-open`
 just prints the path. Both honor the usual `--include-tools` /
 `--include-thinking` / `--full` toggles.
+
+Both commands also accept `--file <path.jsonl>` in place of a session ID,
+which renders a **loose Claude Code transcript directly by path** —
+bypassing the index entirely. This is the way to view an archived or
+copied `.jsonl` that has been deleted from `~/.claude/projects/` and so
+has no index entry (the session id, project path, model, and token
+counts are recovered from the file's own records). `--file` currently
+assumes Claude JSONL format.
 
 ### Session statistics
 

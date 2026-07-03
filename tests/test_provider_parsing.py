@@ -527,3 +527,127 @@ def test_cursor_stringifies_structured_tool_result(tmp_path: Path):
     assert "[" in (tool_use.tool_input or "")
     assert isinstance(tool_result.tool_output, str)
     assert '"hits"' in (tool_result.tool_output or "")
+
+
+# ---------------------------------------------------------------------------
+# Claude loose-file loader (view/export --file)
+# ---------------------------------------------------------------------------
+def _loose_entries(session_id: str, cwd: str = "/Users/me/proj"):
+    ts = "2025-01-15T10:00:00Z"
+    ts2 = "2025-01-15T10:05:00Z"
+    return [
+        {
+            "sessionId": session_id,
+            "cwd": cwd,
+            "timestamp": ts,
+            "message": {"role": "user", "content": "Fix the bug please."},
+        },
+        {
+            "sessionId": session_id,
+            "cwd": cwd,
+            "timestamp": ts2,
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+                "content": [
+                    {"type": "thinking", "thinking": "Let me look..."},
+                    {"type": "text", "text": "Done."},
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {"p": "x"}},
+                ],
+            },
+        },
+    ]
+
+
+def test_load_loose_session_reads_metadata_from_records(tmp_path: Path):
+    """id/cwd/model/timestamps come from the records, not the filename."""
+    from sesh.providers.claude import load_loose_session
+
+    # Filename deliberately differs from the sessionId inside the file.
+    path = tmp_path / "archived-copy.jsonl"
+    _write_jsonl(path, _loose_entries("real-session-id"))
+
+    meta, messages = load_loose_session(path)
+
+    assert meta.id == "real-session-id"  # from records, not "archived-copy"
+    assert meta.project_path == "/Users/me/proj"  # from cwd, not tmp_path
+    assert meta.provider is Provider.CLAUDE
+    assert meta.model == "claude-opus-4-8"
+    assert meta.summary == "Fix the bug please."
+    assert meta.start_timestamp is not None
+    assert meta.timestamp >= meta.start_timestamp
+    # Messages parse through get_messages: thinking + text + tool_use present.
+    types = {m.content_type for m in messages}
+    assert {"text", "thinking", "tool_use"} <= types
+
+
+def test_load_loose_session_no_cwd_falls_back_to_parent_dir(tmp_path: Path):
+    from sesh.providers.claude import load_loose_session
+
+    entries = [
+        {
+            "sessionId": "s",
+            "timestamp": "2025-01-15T10:00:00Z",
+            "message": {"role": "user", "content": "hi"},
+        }
+    ]
+    path = tmp_path / "sub" / "s.jsonl"
+    _write_jsonl(path, entries)
+
+    meta, _ = load_loose_session(path)
+    assert meta.project_path == str(path.parent)
+
+
+def test_load_loose_session_empty_file_raises(tmp_path: Path):
+    from sesh.providers.claude import load_loose_session
+
+    path = tmp_path / "empty.jsonl"
+    path.write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_loose_session(path)
+
+
+def test_load_loose_session_no_sessionid_raises(tmp_path: Path):
+    from sesh.providers.claude import load_loose_session
+
+    path = tmp_path / "junk.jsonl"
+    _write_jsonl(path, [{"type": "mode", "mode": "normal"}])
+
+    with pytest.raises(ValueError):
+        load_loose_session(path)
+
+
+def test_load_loose_session_explicit_agent_file_is_rendered(tmp_path: Path):
+    """An explicitly passed agent-*.jsonl renders (dir scans still skip it)."""
+    from sesh.providers.claude import load_loose_session
+
+    path = tmp_path / "agent-sidechain.jsonl"
+    _write_jsonl(path, _loose_entries("agent-sess"))
+
+    meta, messages = load_loose_session(path)
+    assert meta.id == "agent-sess"
+    assert messages  # not silently empty
+
+
+def test_get_messages_directory_scan_still_skips_agent_files(tmp_path: Path):
+    """Directory mode keeps skipping agent-*.jsonl sidechains."""
+    from sesh.providers.claude import ClaudeProvider
+
+    proj = tmp_path / "projects" / "p"
+    proj.mkdir(parents=True)
+    _write_jsonl(proj / "main.jsonl", _loose_entries("sid"))
+    _write_jsonl(proj / "agent-side.jsonl", _loose_entries("sid"))
+
+    session = SessionMeta(
+        id="sid",
+        project_path="/p",
+        provider=Provider.CLAUDE,
+        summary="t",
+        timestamp=datetime.now(tz=timezone.utc),
+        source_path=str(proj),
+    )
+    messages = ClaudeProvider().get_messages(session)
+    # Only main.jsonl contributes: 1 user + (text, thinking, tool_use) = 4.
+    assert len(messages) == 4
