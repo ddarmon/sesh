@@ -120,6 +120,135 @@ def _display_name_from_path(project_path: str) -> str:
     return Path(project_path).name or project_path
 
 
+def load_loose_session(path: Path) -> tuple[SessionMeta, list[Message]]:
+    """Build ``(SessionMeta, messages)`` from a single loose Claude ``.jsonl``.
+
+    For archived or copied transcripts that live outside
+    ``~/.claude/projects`` and therefore have no index entry. Assumes Claude
+    Code JSONL format.
+
+    The session id is read from the first ``sessionId`` seen *inside* the file
+    (not the filename), so a renamed archive still resolves — this matches the
+    ``sessionId`` filter in :meth:`ClaudeProvider.get_messages`. If the file
+    holds more than one session, the first wins and the others' records are
+    filtered out downstream.
+
+    Raises ``ValueError`` when no parseable record carrying a ``sessionId`` is
+    found (empty or non-Claude file).
+    """
+    session_id: str | None = None
+    cwd_counts: dict[str, int] = {}
+    min_ts: datetime | None = None
+    max_ts: datetime | None = None
+    model: str | None = None
+    message_count = 0
+    input_tokens = 0
+    output_tokens = 0
+    cumulative_input_tokens = 0
+    summary: str | None = None
+    last_user_message: str | None = None
+
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                sid = entry.get("sessionId")
+                if sid and session_id is None:
+                    session_id = sid
+                # Only aggregate metadata for the primary session's records.
+                if sid and sid != session_id:
+                    continue
+
+                cwd = entry.get("cwd")
+                if cwd:
+                    cwd_counts[cwd] = cwd_counts.get(cwd, 0) + 1
+
+                ts = entry.get("timestamp")
+                if ts:
+                    parsed = _parse_timestamp(ts)
+                    if min_ts is None or parsed < min_ts:
+                        min_ts = parsed
+                    if max_ts is None or parsed > max_ts:
+                        max_ts = parsed
+
+                if entry.get("type") == "summary" and entry.get("summary"):
+                    summary = entry["summary"]
+
+                msg = entry.get("message")
+                if not msg:
+                    continue
+
+                role = msg.get("role")
+                message_count += 1
+
+                if role == "assistant":
+                    if msg.get("model"):
+                        model = msg["model"]
+                    usage = msg.get("usage")
+                    if usage:
+                        turn_input = (
+                            usage.get("input_tokens", 0)
+                            + usage.get("cache_creation_input_tokens", 0)
+                            + usage.get("cache_read_input_tokens", 0)
+                        )
+                        input_tokens = turn_input
+                        cumulative_input_tokens += turn_input
+                        output_tokens += usage.get("output_tokens", 0)
+
+                if role == "user":
+                    text = _extract_text(msg.get("content", ""))
+                    if text and not _is_system_message(text):
+                        last_user_message = text
+    except OSError as exc:
+        raise ValueError(f"cannot read transcript file: {exc}") from exc
+
+    if session_id is None:
+        raise ValueError("no Claude transcript records with a sessionId found")
+
+    if not summary:
+        if last_user_message:
+            summary = (
+                last_user_message[:80] + "..."
+                if len(last_user_message) > 80
+                else last_user_message
+            )
+        else:
+            summary = path.stem
+
+    if cwd_counts:
+        project_path = max(cwd_counts, key=cwd_counts.get)
+    else:
+        project_path = str(path.parent)
+
+    timestamp = max_ts or datetime.fromtimestamp(
+        path.stat().st_mtime, tz=timezone.utc
+    )
+
+    meta = SessionMeta(
+        id=session_id,
+        project_path=project_path,
+        provider=Provider.CLAUDE,
+        summary=summary,
+        timestamp=timestamp,
+        start_timestamp=min_ts,
+        message_count=message_count,
+        model=model,
+        source_path=str(path),
+        input_tokens=input_tokens or None,
+        output_tokens=output_tokens or None,
+        cumulative_input_tokens=cumulative_input_tokens or None,
+    )
+    messages = ClaudeProvider().get_messages(meta)
+    return meta, messages
+
+
 def _rewrite_cwd_in_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> bool:
     """Rewrite exact cwd matches in a Claude JSONL file. Returns True if modified."""
     output: list[str] = []
@@ -237,15 +366,20 @@ class ClaudeProvider(SessionProvider):
         source_dir = Path(session.source_path)
         tool_id_map: dict[str, str] = {}  # tool_use_id -> tool_name
 
-        # source_path points to the project directory; scan all JSONL files
+        # source_path points to the project directory; scan all JSONL files.
+        # When it points straight at one file (loose/archived transcript), use
+        # that file as-is — including explicitly passed ``agent-*.jsonl`` — and
+        # only skip sidechain files when scanning a directory.
         if source_dir.is_dir():
-            jsonl_files = sorted(source_dir.glob("*.jsonl"))
+            jsonl_files = [
+                p
+                for p in sorted(source_dir.glob("*.jsonl"))
+                if not p.name.startswith("agent-")
+            ]
         else:
             jsonl_files = [source_dir]
 
         for jsonl_file in jsonl_files:
-            if jsonl_file.name.startswith("agent-"):
-                continue
             try:
                 with open(jsonl_file) as f:
                     for line in f:

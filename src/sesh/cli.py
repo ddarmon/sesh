@@ -384,6 +384,56 @@ def _load_session_messages(session_data: dict, args: argparse.Namespace | None =
     return session, messages
 
 
+def _load_transcript_file(file_arg: str):
+    """Load a loose Claude ``.jsonl`` transcript into ``(SessionMeta, messages)``.
+
+    Bypasses the session index entirely — used by ``view``/``export --file``
+    for archived transcripts that live outside ``~/.claude/projects``. Errors
+    exit with code 1 and a message on stderr, matching the house style.
+    """
+    from sesh.providers.claude import load_loose_session
+
+    path = Path(os.path.abspath(os.path.expanduser(file_arg)))
+    if not path.is_file():
+        print(f"Transcript file not found: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    if path.suffix != ".jsonl":
+        print(f"Expected a .jsonl transcript file, got: {path}", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        return load_loose_session(path)
+    except ValueError as exc:
+        print(f"No Claude transcript records found in {path} ({exc}).", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def _resolve_export_source(args: argparse.Namespace):
+    """Resolve ``(SessionMeta, messages)`` for view/export.
+
+    Takes the loose-file path when ``--file`` is given (no index needed), else
+    resolves the positional session ID against a freshly discovered index.
+    """
+    file_arg = getattr(args, "file", None)
+    if file_arg:
+        if args.session_id is not None:
+            print("Give either a session ID or --file, not both.", file=sys.stderr)
+            raise SystemExit(1)
+        if getattr(args, "provider", None) not in (None, "claude"):
+            print("--file currently supports only Claude transcripts.", file=sys.stderr)
+            raise SystemExit(1)
+        return _load_transcript_file(file_arg)
+
+    if args.session_id is None:
+        print("A session ID (or --file) is required.", file=sys.stderr)
+        raise SystemExit(1)
+    # Discover fresh (like delete/clean) so a just-created session — including
+    # 'last' — is usable without a manual 'sesh refresh'. Discovery is
+    # incremental via the on-disk cache.
+    index = _refresh_index(args)
+    matches = _resolve_session_matches(index, args.session_id, args.provider)
+    return _load_session_messages(matches[0], args)
+
+
 def cmd_messages(args: argparse.Namespace) -> None:
     """Load and print messages for a session."""
     # Discover fresh (like view/delete/clean) so a just-created session —
@@ -879,16 +929,9 @@ def cmd_resume(args: argparse.Namespace) -> None:
 
 def cmd_export(args: argparse.Namespace) -> None:
     """Export a session to Markdown or JSON, to stdout or a file."""
-    # Discover fresh (like view/delete/clean) so a just-created session —
-    # including 'last' — is exportable without a manual 'sesh refresh'.
-    # Discovery is incremental via the on-disk cache.
-    index = _refresh_index(args)
-
-    matches = _resolve_session_matches(index, args.session_id, args.provider)
-
     from sesh.models import filter_messages
 
-    session, messages = _load_session_messages(matches[0], args)
+    session, messages = _resolve_export_source(args)
 
     include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
     include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
@@ -962,18 +1005,11 @@ def cmd_view(args: argparse.Namespace) -> None:
     """Render a session to a self-contained HTML file and open it in a browser."""
     import webbrowser
 
-    # Discover fresh (like delete/clean) so a just-created session — including
-    # 'last' — is viewable without a manual 'sesh refresh'. Discovery is
-    # incremental via the on-disk cache, so an unchanged tree costs only stats.
-    index = _refresh_index(args)
-
-    matches = _resolve_session_matches(index, args.session_id, args.provider)
-
     from sesh.export import format_session_html
     from sesh.models import filter_messages
     from sesh.viewcache import sweep_view_cache, write_view
 
-    session, messages = _load_session_messages(matches[0], args)
+    session, messages = _resolve_export_source(args)
 
     include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
     include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
@@ -1463,13 +1499,28 @@ def main() -> None:
             "Export all messages from a session to stdout, or to a file with "
             "-o/--output. Accepts a session ID or the literal 'last' for the "
             "most recently active session (with --provider, 'last' is scoped "
-            "to that provider). System messages are excluded. "
+            "to that provider), or --file to render a loose Claude transcript "
+            ".jsonl by path with no index entry. System messages are excluded. "
             "Default format is Markdown; use --format json for JSON."
         ),
     )
     p_export.add_argument(
         "session_id",
-        help="The session ID to export, or 'last' for the most recent session",
+        nargs="?",
+        default=None,
+        help=(
+            "The session ID to export, or 'last' for the most recent session; "
+            "omit when using --file"
+        ),
+    )
+    p_export.add_argument(
+        "--file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Render a loose Claude Code transcript .jsonl file directly by "
+            "path, bypassing the session index (for archived transcripts)"
+        ),
     )
     p_export.add_argument(
         "-o",
@@ -1522,13 +1573,28 @@ def main() -> None:
             "highlighting, and LaTeX math), write it to a temp file, and open "
             "it in the default browser. Accepts a session ID or the literal "
             "'last' for the most recently active session (with --provider, "
-            "'last' is scoped to that provider). The file works offline. "
-            "Use --no-open to just print the path."
+            "'last' is scoped to that provider), or --file to render a loose "
+            "Claude transcript .jsonl by path with no index entry. The file "
+            "works offline. Use --no-open to just print the path."
         ),
     )
     p_view.add_argument(
         "session_id",
-        help="The session ID to view, or 'last' for the most recent session",
+        nargs="?",
+        default=None,
+        help=(
+            "The session ID to view, or 'last' for the most recent session; "
+            "omit when using --file"
+        ),
+    )
+    p_view.add_argument(
+        "--file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Render a loose Claude Code transcript .jsonl file directly by "
+            "path, bypassing the session index (for archived transcripts)"
+        ),
     )
     p_view.add_argument(
         "--provider",
