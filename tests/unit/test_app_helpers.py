@@ -440,3 +440,73 @@ def test_session_label_no_badge_when_zero() -> None:
     app = SeshApp()
     session = make_session(id="s1", subagent_count=0, summary="do a thing")
     assert "⑂" not in app._session_label(session)
+
+
+def test_splice_mixed_naive_and_aware_timestamps() -> None:
+    """[finding 2] Splicing must not crash when a message timestamp came from a
+    no-offset (naive-source) stamp and the sub-agent's from a Z stamp."""
+    from sesh.providers.claude import _parse_timestamp
+
+    m0 = make_message(content="early", timestamp=_parse_timestamp("2025-01-01T10:00:00"))
+    m1 = make_message(content="late", timestamp=_parse_timestamp("2025-01-01T12:00:00Z"))
+    sub = _sub("x", _parse_timestamp("2025-01-01T11:00:00Z"))
+
+    out = splice_subagent_threads([m0, m1], [sub])  # must not raise
+    assert [k for k, _ in out] == ["message", "agent", "message"]
+
+
+def test_agents_override_for_selection() -> None:
+    """[finding 8] Only a ⑂ search hit (agent_id set) triggers the auto-show."""
+    hit = SearchResult(
+        session_id="s2", project_path="/repo", provider=Provider.CLAUDE,
+        matched_line="agent hit", file_path="/x/subagents/agent-a.jsonl", agent_id="a",
+    )
+    plain = SearchResult(
+        session_id="s1", project_path="/repo", provider=Provider.CLAUDE,
+        matched_line="plain", file_path="/x/s1.jsonl",
+    )
+    assert SeshApp._agents_override_for_selection(hit) is True
+    assert SeshApp._agents_override_for_selection(plain) is False
+    assert SeshApp._agents_override_for_selection(make_session(id="s1")) is False
+
+
+def test_agents_visible_reflects_override_without_persisting() -> None:
+    """[finding 8] The override reveals agents without flipping show_agents."""
+    app = SeshApp()
+    app._show_agents = False
+    app._agents_override = True
+    assert app._agents_visible is True
+    # AUTO hint shows in the status suffix while the pref stays off.
+    assert "Agents:AUTO" in app._format_status_suffix()
+    assert app._show_agents is False
+
+    app._agents_override = False
+    assert app._agents_visible is False
+    assert "Agents:AUTO" not in app._format_status_suffix()
+
+
+def test_write_message_indents_markdown_assistant_body() -> None:
+    """[finding 6] A sub-agent assistant Markdown body is padded by the indent."""
+    from rich.markdown import Markdown
+    from rich.padding import Padding
+
+    app = SeshApp()
+    writes: list[object] = []
+
+    class _FakeView:
+        def write(self, renderable):
+            writes.append(renderable)
+
+    msg = make_message(role="assistant", content="# Heading\n\nbody",
+                       content_type="text")
+    # Indented (sub-agent interior): the Markdown renderable is wrapped in
+    # Padding with a left offset equal to the indent width.
+    app._write_message(_FakeView(), msg, "", indent="  ")
+    pads = [w for w in writes if isinstance(w, Padding)]
+    assert pads and pads[0].left == 2
+
+    # No indent (main thread): the Markdown renderable is written bare.
+    writes.clear()
+    app._write_message(_FakeView(), msg, "", indent="")
+    assert any(isinstance(w, Markdown) for w in writes)
+    assert not any(isinstance(w, Padding) for w in writes)

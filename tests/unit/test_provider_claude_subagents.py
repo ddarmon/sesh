@@ -401,6 +401,201 @@ def test_discover_no_subagents_returns_empty(tmp_path: Path) -> None:
     assert claude.ClaudeProvider().discover_subagents(session) == []
 
 
+# --- regression: review findings -----------------------------------------
+
+
+def test_is_safe_session_id() -> None:
+    """Traversal-safe id guard: plain ids pass; separators / pure dots fail."""
+    assert claude._is_safe_session_id("abc123-DEF_4.5")
+    assert not claude._is_safe_session_id("")
+    assert not claude._is_safe_session_id("..")
+    assert not claude._is_safe_session_id(".")
+    assert not claude._is_safe_session_id("../../etc")
+    assert not claude._is_safe_session_id("a/b")
+    assert not claude._is_safe_session_id("/abs")
+
+
+def test_delete_session_hostile_id_stays_inside_project(tmp_path: Path) -> None:
+    """[finding 1] A ../-laden sessionId must never rmtree outside the project."""
+    outside = tmp_path / "outside"
+    (outside).mkdir()
+    sentinel = outside / "keep.txt"
+    sentinel.write_text("precious")
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    # A record whose sessionId resolves (naively) to ../outside.
+    hostile_id = "../outside"
+    write_jsonl(
+        project_dir / "main.jsonl",
+        [{"sessionId": hostile_id, "message": {"role": "user", "content": "hi"}}],
+    )
+
+    session = make_session(id=hostile_id, source_path=str(project_dir))
+    claude.ClaudeProvider().delete_session(session)
+
+    # The sibling directory outside the project is untouched.
+    assert outside.is_dir()
+    assert sentinel.read_text() == "precious"
+
+
+def test_parse_timestamp_naive_assumed_utc() -> None:
+    """[finding 2] A no-offset ISO timestamp parses to an aware UTC datetime."""
+    parsed = claude._parse_timestamp("2026-07-05T11:00:00")
+    assert parsed.tzinfo is not None
+    assert parsed == datetime(2026, 7, 5, 11, 0, 0, tzinfo=timezone.utc)
+
+
+def test_discover_mixed_timestamp_formats_does_not_raise(tmp_path: Path) -> None:
+    """[finding 2] An agent file mixing Z and no-offset stamps scans cleanly."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-mix"
+    agent_file = project_dir / session_id / "subagents" / "agent-mix.jsonl"
+    write_jsonl(agent_file, [
+        {
+            "sessionId": session_id,
+            "timestamp": "2026-07-05T12:00:00Z",
+            "message": {"role": "user", "content": "aware"},
+        },
+        {
+            "sessionId": session_id,
+            "timestamp": "2026-07-05T11:00:00",  # no offset -> naive source
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "naive"}]},
+        },
+    ])
+
+    session = make_session(id=session_id, source_path=str(project_dir))
+    metas = claude.ClaudeProvider().discover_subagents(session)
+    assert len(metas) == 1
+    # Earliest timestamp wins and is aware (the 11:00 record).
+    assert metas[0].first_timestamp == datetime(2026, 7, 5, 11, 0, 0, tzinfo=timezone.utc)
+
+
+def test_parse_agent_file_survives_malformed_records(tmp_path: Path) -> None:
+    """[finding 3] Non-dict lines / string message / non-dict usage are skipped."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-bad"
+    agent_file = project_dir / session_id / "subagents" / "agent-bad.jsonl"
+    agent_file.parent.mkdir(parents=True, exist_ok=True)
+    agent_file.write_text(
+        "[]\n"  # valid JSON, not an object
+        + json.dumps({"message": "just a string", "sessionId": session_id}) + "\n"
+        + json.dumps({
+            "sessionId": session_id,
+            "message": {"role": "assistant", "usage": "not-a-dict",
+                        "content": [{"type": "text", "text": "ok"}]},
+        }) + "\n"
+        + json.dumps({
+            "sessionId": session_id,
+            "message": {"role": "user", "content": "real user"},
+        }) + "\n"
+    )
+
+    session = make_session(id=session_id, source_path=str(project_dir))
+    provider = claude.ClaudeProvider()
+    metas = provider.discover_subagents(session)  # must not raise
+    assert len(metas) == 1
+    # Only the two well-formed message records count.
+    assert metas[0].message_count == 2
+    messages = provider.get_subagent_messages(session, metas[0])
+    contents = {m.content for m in messages}
+    assert "ok" in contents
+    assert "real user" in contents
+
+
+def test_agent_file_without_sessionid_loads_messages(tmp_path: Path) -> None:
+    """[finding 4] Records with agentId but no sessionId still load (no filter)."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-nosid"
+    agent_file = project_dir / session_id / "subagents" / "agent-fork.jsonl"
+    write_jsonl(agent_file, [
+        {
+            "agentId": "fork",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "kickoff"},
+        },
+        {
+            "agentId": "fork",
+            "timestamp": "2025-01-01T00:00:05Z",
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "done"}]},
+        },
+    ])
+
+    session = make_session(id=session_id, source_path=str(project_dir))
+    provider = claude.ClaudeProvider()
+    metas = provider.discover_subagents(session)
+    assert len(metas) == 1
+    assert metas[0].message_count == 2
+    messages = provider.get_subagent_messages(session, metas[0])
+    # Advertised count and loaded messages agree, and both are non-empty.
+    assert len(messages) == metas[0].message_count > 0
+
+
+def test_probe_agent_session_id_reads_head(tmp_path: Path) -> None:
+    """[finding 9] The probe returns the first internal sessionId it sees."""
+    agent_file = tmp_path / "agent-p.jsonl"
+    write_jsonl(agent_file, [
+        {"type": "fork-context-ref", "parentSessionId": "x"},  # no sessionId
+        {"sessionId": "sess-head", "message": {"role": "user", "content": "hi"}},
+    ])
+    assert claude._probe_agent_session_id(agent_file) == "sess-head"
+
+
+def test_legacy_nonmatching_file_not_fully_parsed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """[finding 9/10] Legacy files for another session are probed, not full-read.
+
+    Also pins the single-pass property: the one matching file is parsed
+    exactly once (old code scanned then re-read it).
+    """
+    project_dir = tmp_path / "proj"
+    session_id = "sess-mine"
+    write_jsonl(
+        project_dir / "subagents" / "agent-mine.jsonl",
+        _agent_records(session_id, "mine"),
+    )
+    write_jsonl(
+        project_dir / "subagents" / "agent-other.jsonl",
+        _agent_records("sess-OTHER", "other"),
+    )
+
+    parsed: list[str] = []
+    orig = claude._parse_agent_file
+
+    def _counting(agent_file):
+        parsed.append(Path(agent_file).name)
+        return orig(agent_file)
+
+    monkeypatch.setattr(claude, "_parse_agent_file", _counting)
+
+    provider = claude.ClaudeProvider()
+    session = make_session(id=session_id, source_path=str(project_dir))
+    loaded = provider.load_subagents(session)
+
+    assert [meta.agent_id for meta, _ in loaded] == ["mine"]
+    # Non-matching file skipped via cheap probe; matching file parsed once.
+    assert parsed == ["agent-mine.jsonl"]
+
+
+def test_load_subagents_returns_meta_and_messages_single_pass(tmp_path: Path) -> None:
+    """[finding 10] load_subagents yields (meta, messages) per file in one read."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-load"
+    agent_file = project_dir / session_id / "subagents" / "agent-lp.jsonl"
+    write_jsonl(agent_file, _agent_records(session_id, "lp"))
+
+    session = make_session(id=session_id, source_path=str(project_dir))
+    loaded = claude.ClaudeProvider().load_subagents(session)
+    assert len(loaded) == 1
+    meta, messages = loaded[0]
+    assert meta.agent_id == "lp"
+    assert meta.message_count == 2
+    assert [m.content for m in messages] == ["Investigate the failing test", "Looking into it"]
+
+
 def test_subagent_meta_is_claude_provider_dataclass() -> None:
     """SubagentMeta constructs with required fields and sane defaults."""
     m = claude.SubagentMeta(agent_id="x", file_path="/p")

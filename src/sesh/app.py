@@ -879,6 +879,15 @@ class SeshApp(App):
         self._current_messages: list[Message] = []
         self._current_session: SessionMeta | None = None
         self._current_subagents: list[tuple[SubagentMeta, list[Message]]] = []
+        # Sub-agent threads are loaded lazily: only once the `a` toggle (or a ⑂
+        # search-result auto-show) first reveals them for a session. This flag
+        # tracks whether that load has happened for the current session so the
+        # toggle can trigger a background load exactly once.
+        self._subagents_loaded: bool = False
+        # Session-scoped override (NOT persisted): opening a ⑂ search hit while
+        # the show_agents preference is off temporarily reveals agent threads so
+        # the matched content is visible. Cleared when another session is picked.
+        self._agents_override: bool = False
         self._bookmarks: set[tuple[str, str]] = set()
         self._show_tools: bool = False
         self._show_thinking: bool = False
@@ -1266,6 +1275,26 @@ class SeshApp(App):
             source_path=source_path,
         )
 
+    @property
+    def _agents_visible(self) -> bool:
+        """Whether sub-agent threads should be shown for the current render.
+
+        True when the persisted ``show_agents`` preference is on OR a
+        session-scoped auto-show override is active (a \u2442 search hit).
+        """
+        return self._show_agents or self._agents_override
+
+    @staticmethod
+    def _agents_override_for_selection(data: object) -> bool:
+        """Auto-show agents for a selected \u2442 search hit (agent_id set).
+
+        Pure decision used when a tree node is selected: a search result inside
+        an ``agent-*.jsonl`` reveals agent threads for that session render so
+        the matched content is visible, without persisting the preference. Any
+        other selection (a regular session, a non-agent hit) clears it.
+        """
+        return bool(isinstance(data, SearchResult) and data.agent_id)
+
     def _format_status_suffix(self) -> str:
         parts = []
         if self._aggregation_root is not None:
@@ -1279,6 +1308,8 @@ class SeshApp(App):
             parts.append("Think:ON")
         if self._show_agents:
             parts.append("Agents:ON")
+        elif self._agents_override:
+            parts.append("Agents:AUTO")
         return (" \u00b7 " + " ".join(parts)) if parts else ""
 
     def _set_status(self, text: str) -> None:
@@ -1306,7 +1337,10 @@ class SeshApp(App):
     def action_toggle_tools(self) -> None:
         """Toggle visibility of tool call messages."""
         self._show_tools = not self._show_tools
-        if self._current_messages and self._current_session:
+        # Also re-render when only sub-agent threads are visible (a session
+        # can have zero main messages but spliced agent threads whose interior
+        # honors this toggle).
+        if self._current_session and (self._current_messages or self._current_subagents):
             self._render_messages(self._current_messages, self._current_session)
         self._save_current_prefs()
         self._refresh_status()
@@ -1314,7 +1348,7 @@ class SeshApp(App):
     def action_toggle_thinking(self) -> None:
         """Toggle visibility of thinking/reasoning messages."""
         self._show_thinking = not self._show_thinking
-        if self._current_messages and self._current_session:
+        if self._current_session and (self._current_messages or self._current_subagents):
             self._render_messages(self._current_messages, self._current_session)
         self._save_current_prefs()
         self._refresh_status()
@@ -1322,8 +1356,26 @@ class SeshApp(App):
     def action_toggle_agents(self) -> None:
         """Toggle splicing of Claude sub-agent threads into the message pane."""
         self._show_agents = not self._show_agents
-        if self._current_messages and self._current_session:
-            self._render_messages(self._current_messages, self._current_session)
+        # Drop any session-scoped auto-show override (⑂ search hit): after an
+        # explicit toggle, `a` alone must deterministically control visibility
+        # — otherwise a lingering override keeps threads visible and `a` can
+        # never hide them until another session is selected.
+        self._agents_override = False
+        if self._current_session is not None:
+            if self._agents_visible and not self._subagents_loaded:
+                # Lazy load: sub-agent transcripts (potentially large) are read
+                # only when first revealed. Background-load then re-render.
+                session = self._current_session
+                self.run_worker(
+                    lambda: self._load_subagents(session),
+                    thread=True,
+                    exclusive=True,
+                    group="subagents",
+                )
+            else:
+                # Re-render even when the main thread is empty: a session may
+                # have zero main messages but visible sub-agent threads.
+                self._render_messages(self._current_messages, self._current_session)
         self._save_current_prefs()
         self._refresh_status()
 
@@ -1355,6 +1407,9 @@ class SeshApp(App):
     def on_tree_node_selected(self, event: Tree.NodeSelected) -> None:
         """Load messages when a session or search result node is selected."""
         data = event.node.data
+        # Session-scoped auto-show: a ⑂ search hit reveals agent threads;
+        # every other selection clears the override.
+        self._agents_override = self._agents_override_for_selection(data)
         if isinstance(data, SessionMeta):
             self.run_worker(
                 lambda: self._load_messages(data),
@@ -1373,24 +1428,57 @@ class SeshApp(App):
                 )
 
     def _load_messages(self, session: SessionMeta) -> list[Message]:
-        """Load messages, and any Claude sub-agent threads, in a thread.
+        """Load main-thread messages in a worker thread and render immediately.
 
-        Sub-agent discovery + loading run here (not on the UI thread) so the
-        ``a`` toggle re-renders from already-loaded data with no file I/O,
-        mirroring how t/T re-render the main thread.
+        The main thread renders as soon as it is parsed (preserving pre-agents
+        behavior — the pane never blocks on sub-agent parsing). Sub-agent
+        transcripts are read lazily and only when they will actually be shown
+        (``a`` toggle on, or a ⑂ search auto-show): a large session's agent
+        files are never parsed when agents are hidden.
         """
         provider = self._provider_for(session)
         messages = provider.get_messages(session) if provider is not None else []
+        self.call_from_thread(self._apply_loaded_messages, messages, session)
+        if self._agents_visible:
+            self._load_subagents(session)
+        return messages
+
+    def _apply_loaded_messages(
+        self, messages: list[Message], session: SessionMeta
+    ) -> None:
+        """UI thread: store the freshly loaded main thread and reset agent state."""
+        self._current_subagents = []
+        self._subagents_loaded = False
+        self._render_messages(messages, session, subagents=[])
+
+    def _load_subagents(self, session: SessionMeta) -> None:
+        """Worker-thread body: single-pass discover+load of sub-agent threads."""
+        provider = self._provider_for(session)
         subagents: list[tuple[SubagentMeta, list[Message]]] = []
-        if provider is not None and hasattr(provider, "discover_subagents"):
+        if provider is not None and hasattr(provider, "load_subagents"):
             try:
-                for meta in provider.discover_subagents(session):
-                    interior = provider.get_subagent_messages(session, meta)
-                    subagents.append((meta, interior))
+                subagents = provider.load_subagents(session)
             except Exception:
                 subagents = []
-        self.call_from_thread(self._render_messages, messages, session, "", subagents)
-        return messages
+        self.call_from_thread(self._apply_loaded_subagents, session, subagents)
+
+    def _apply_loaded_subagents(
+        self,
+        session: SessionMeta,
+        subagents: list[tuple[SubagentMeta, list[Message]]],
+    ) -> None:
+        """UI thread: store loaded sub-agents and re-render if still current."""
+        current = self._current_session
+        if (
+            current is None
+            or current.id != session.id
+            or current.source_path != session.source_path
+        ):
+            # The selection changed while the load ran — drop the stale result.
+            return
+        self._current_subagents = subagents
+        self._subagents_loaded = True
+        self._render_messages(self._current_messages, self._current_session)
 
     def _proj_key(self, host: str | None, project_path: str) -> str:
         """Compute the composite key used to index self.projects / self.sessions.
@@ -1452,7 +1540,11 @@ class SeshApp(App):
         view = self.query_one("#message-view", MessageView)
         view.clear()
 
-        if not messages:
+        # A session can have zero parseable main messages but visible sub-agent
+        # threads — don't early-return on empty main until agents are ruled out.
+        has_agents = bool(self._agents_visible and self._current_subagents)
+
+        if not messages and not has_agents:
             view.write("[dim]No messages found.[/dim]")
             return
 
@@ -1462,14 +1554,11 @@ class SeshApp(App):
             include_thinking=self._show_thinking,
         )
 
-        has_agents = bool(self._show_agents and self._current_subagents)
-
-        if not visible and messages and not has_agents:
-            view.write("[dim]No visible messages. Press t for tool calls, T for thinking.[/dim]")
-            return
-
         if not visible and not has_agents:
-            view.write("[dim]No messages found.[/dim]")
+            if messages:
+                view.write("[dim]No visible messages. Press t for tool calls, T for thinking.[/dim]")
+            else:
+                view.write("[dim]No messages found.[/dim]")
             return
 
         hl = highlight.lower()
@@ -1552,8 +1641,14 @@ class SeshApp(App):
             else:
                 try:
                     from rich.markdown import Markdown
-                    md = Markdown(msg.content[:5000])
-                    view.write(md)
+                    renderable = Markdown(msg.content[:5000])
+                    if indent:
+                        # Indent the Markdown renderable so sub-agent interior
+                        # assistant bodies keep the same nesting every other
+                        # message type gets (Rich Markdown ignores a text prefix).
+                        from rich.padding import Padding
+                        renderable = Padding(renderable, (0, 0, 0, len(indent)))
+                    view.write(renderable)
                 except Exception:
                     view.write(f"{body}{msg.content[:2000]}")
         elif msg.role == "tool":
@@ -1731,7 +1826,7 @@ class SeshApp(App):
             include_thinking=self._show_thinking,
         )
         subagents = None
-        if self._show_agents and self._current_subagents:
+        if self._agents_visible and self._current_subagents:
             subagents = [
                 (
                     meta,

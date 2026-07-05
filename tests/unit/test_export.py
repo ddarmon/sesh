@@ -274,6 +274,30 @@ def test_format_session_html_unanchorable_agent_trails() -> None:
     assert kinds == ["text", "agent"]
 
 
+def test_compose_thread_mixed_naive_and_aware_timestamps() -> None:
+    """[finding 2] Anchoring a sub-agent must not crash when a main-thread
+    timestamp came from a no-offset (naive-source) stamp and the sub-agent's
+    came from a Z stamp. Both parse to aware datetimes now, so the ``>``
+    comparison in _compose_thread is safe."""
+    from sesh.export import _compose_thread
+    from sesh.providers.claude import _parse_timestamp
+
+    messages = [
+        make_message(role="user", content="early",
+                     timestamp=_parse_timestamp("2026-07-05T11:00:00")),  # no offset
+        make_message(role="assistant", content="late",
+                     timestamp=_parse_timestamp("2026-07-05T13:00:00Z")),  # aware
+    ]
+    meta, interior = _subagent(
+        first_timestamp=_parse_timestamp("2026-07-05T12:00:00Z")
+    )
+
+    composed = _compose_thread(messages, [(meta, interior)])  # must not raise
+    kinds = [e.get("kind") for e in composed]
+    # Sub-agent anchored between the 11:00 and 13:00 messages.
+    assert kinds == ["text", "agent", "text"]
+
+
 def test_format_session_html_no_subagents_matches_baseline() -> None:
     """Passing no sub-agents produces the same payload as omitting the arg."""
     session = make_session(id="s-none", provider=Provider.CLAUDE)

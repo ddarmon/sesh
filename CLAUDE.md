@@ -190,23 +190,37 @@ Claude Code writes each sub-agent (Task/Agent tool) run to a separate
     optional `agent-{id}.meta.json` sidecar for type/fork/description/
     toolUseId), legacy `{project}/subagents/agent-*.jsonl`, and oldest
     `{project}/agent-*.jsonl` (the last two attribute a file to a session
-    by the internal parent `sessionId`). `get_subagent_messages` reuses
-    `get_messages` pointed at the agent file. `count_subagents` is a cheap
-    directory glob (current layout only, no file reads) used to populate
+    by the internal parent `sessionId`, probed cheaply from the file head —
+    a non-matching legacy file is skipped without a full read). Agent-file
+    parsing is defensive (non-dict lines / string `message` / non-dict
+    `usage` are skipped) and never filters by `sessionId` (an agent file is
+    a single-thread transcript, so forks with no internal `sessionId` still
+    load). All id-derived filesystem paths are gated on a traversal-safe id.
+    `count_subagents` is a cheap directory glob (current layout only, no
+    file reads) used to populate
     `SessionMeta.subagent_count` during `_parse_sessions` — discovery
     stays lazy, so no agent files are read during index refresh.
 -   **Rendering**: sub-agents are turns, not tool calls. `format_session_html`
     / `format_session_markdown` splice each thread in at its spawn timestamp
     (`export._compose_thread`); the TUI message pane does the same via the
     pure `app.splice_subagent_threads` helper (anchor before the first
-    visible main-thread message with a later timestamp, else trailing),
-    loaded off the UI thread in `_load_messages` and re-rendered on the `a`
-    toggle. The collapsed block shows regardless of tool/thinking toggles;
-    those toggles govern the interior. Tree labels get a `⑂N` badge.
+    visible main-thread message with a later timestamp, else trailing).
+    Loading is single-pass and lazy: the provider's
+    `load_subagents(session)` reads each agent file once, building meta +
+    messages together (`discover_subagents` shares that parse for the
+    meta-only path). The TUI renders the main thread immediately on select
+    and defers ALL agent-file I/O until the `a` toggle first reveals them
+    (`_load_subagents` runs in a worker, then re-renders); a large session
+    never blocks on agent parsing while agents are hidden. The collapsed
+    block shows regardless of tool/thinking toggles; those toggles govern
+    the interior. Tree labels get a `⑂N` badge.
 -   **Search attribution**: `SearchResult.agent_id` is set for hits inside
     an `agent-*.jsonl`; the hit is attributed to the parent session, marked
     `⑂` in TUI search rows, and carried in `sesh search` JSON. `sesh sessions`
-    JSON carries `subagent_count`.
+    JSON carries `subagent_count`. Opening a `⑂` search hit while sub-agents
+    are hidden sets a session-scoped auto-show override (`_agents_override`,
+    not persisted; status bar `Agents:AUTO`) so the matched interior renders;
+    the override clears when another session is selected.
 -   **Delete/move hygiene**: `delete_session` removes the per-session sidecar
     dir plus legacy agent files matching the session's parent id;
     `move_project` rewrites `cwd` inside agent files across all three layouts.

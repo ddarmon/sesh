@@ -96,7 +96,16 @@ Presentation ("sub-agents are turns, not tool calls"):
      the `⑂N` badge already only counts the current layout). Doing so
      would require reading agent files during discovery, violating the
      lazy-discovery constraint (perf risk above). Left as future work.
-4. Full suite, review. (Docs folded into phase 3.)
+4. Full suite, review. (Docs folded into phase 3.) **DONE.** A
+   high-effort multi-agent review of the branch produced 10 confirmed
+   findings (worst: an unsanitized `shutil.rmtree(source_dir /
+   session.id)` path-traversal in `delete_session`; also mixed
+   naive/aware timestamp crashes, unhardened agent-file parsing,
+   sessionId-filter dropping fork records, TUI toggle/latency issues).
+   All 10 fixed with regression tests; a follow-up adversarial pass on
+   the fix diff confirmed closure and surfaced two residual toggle
+   interactions (`a` vs. the ⑂ auto-show override; `t`/`T` on
+   agents-only sessions), both fixed. Suite: 556 (main) → 623.
 
 ## Risks
 

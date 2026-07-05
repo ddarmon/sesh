@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
+import re
 import shutil
 import tempfile
 from collections import defaultdict
@@ -61,17 +61,48 @@ def _is_system_message(text: str) -> bool:
 
 
 def _parse_timestamp(ts) -> datetime:
-    """Parse a timestamp from string or epoch millis."""
+    """Parse a timestamp from string or epoch millis.
+
+    Always returns a timezone-aware datetime. A parsed ISO value with no
+    offset is assumed to be UTC — matching the repo convention that naive
+    datetimes are treated as UTC (see ``--since``/``--until``). This keeps
+    every downstream ``min``/``max``/``<`` comparison between parsed
+    timestamps safe even when a single file mixes offset-bearing and
+    offset-naive stamps (which otherwise raises ``TypeError: can't compare
+    offset-naive and offset-aware datetimes``).
+    """
     if isinstance(ts, (int, float)):
         return datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
     if isinstance(ts, str):
         # Handle ISO format with or without Z
         ts = ts.replace("Z", "+00:00")
         try:
-            return datetime.fromisoformat(ts)
+            parsed = datetime.fromisoformat(ts)
         except ValueError:
             pass
+        else:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
     return datetime.now(tz=timezone.utc)
+
+
+_SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _is_safe_session_id(session_id: str) -> bool:
+    """True when ``session_id`` is a single, traversal-safe path component.
+
+    Session ids come from the ``sessionId`` field of JSONL records, so a
+    corrupt or hostile transcript could carry ``../`` or an absolute path.
+    Anything used to build a filesystem path (sidecar dir, per-session
+    subagents dir) is gated on this: a conservative allowlist (matching how
+    ``viewcache`` sanitizes) with no path separators, and not a pure-dot name
+    like ``.`` / ``..`` that could still traverse.
+    """
+    if not session_id or _SAFE_SESSION_ID.fullmatch(session_id) is None:
+        return False
+    return session_id.strip(".") != ""
 
 
 def _extract_project_path(project_name: str, project_dir: Path) -> str:
@@ -316,21 +347,167 @@ def _read_agent_sidecar(agent_file: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _scan_agent_file(agent_file: Path) -> dict | None:
-    """Scan an ``agent-*.jsonl`` file for aggregate metadata.
+def _blocks_to_messages(
+    role: str,
+    ts: datetime,
+    raw_content,
+    tool_id_map: dict[str, str],
+) -> list[Message]:
+    """Turn one record's ``message.content`` into a list of :class:`Message`.
 
-    Reads line-by-line, swallowing per-line JSON errors. Records without a
-    ``message`` field (e.g. ``fork-context-ref``) don't count toward
-    ``message_count`` but their ``sessionId`` is skipped only when absent.
-    Returns None on OSError; otherwise a dict with the internal (parent)
-    ``session_id``, ``message_count``, ``output_tokens``, earliest
-    ``first_timestamp``, and the ``first_user_text`` for description fallback.
+    Shared by the main-session loader (:meth:`ClaudeProvider.get_messages`)
+    and the single-pass sub-agent loader (:func:`_parse_agent_file`) so both
+    parse content blocks identically. ``tool_id_map`` is threaded across
+    records so ``tool_result`` blocks can resolve the spawning tool's name.
+    """
+    out: list[Message] = []
+    if isinstance(raw_content, str):
+        if not raw_content.strip():
+            return out
+        is_sys = role == "user" and _is_system_message(raw_content)
+        out.append(Message(
+            role=role,
+            content=raw_content,
+            timestamp=ts,
+            is_system=is_sys,
+            content_type="text",
+        ))
+        return out
+    if not isinstance(raw_content, list):
+        return out
+
+    for block in raw_content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type", "")
+
+        if btype == "text":
+            text = block.get("text", "")
+            if not text.strip():
+                continue
+            is_sys = role == "user" and _is_system_message(text)
+            out.append(Message(
+                role=role,
+                content=text,
+                timestamp=ts,
+                is_system=is_sys,
+                content_type="text",
+            ))
+
+        elif btype == "thinking":
+            thinking_text = block.get("thinking", "")
+            if not thinking_text.strip():
+                continue
+            out.append(Message(
+                role="assistant",
+                content="",
+                timestamp=ts,
+                thinking=thinking_text,
+                content_type="thinking",
+            ))
+
+        elif btype == "tool_use":
+            name = block.get("name", "")
+            tool_id = block.get("id", "")
+            if tool_id and name:
+                tool_id_map[tool_id] = name
+            inp = block.get("input", {})
+            out.append(Message(
+                role="assistant",
+                content="",
+                timestamp=ts,
+                tool_name=name,
+                tool_input=json.dumps(inp, indent=2),
+                content_type="tool_use",
+            ))
+
+        elif btype == "tool_result":
+            tool_id = block.get("tool_use_id", "")
+            resolved_name = tool_id_map.get(tool_id, "")
+            result_content = block.get("content", "")
+            if isinstance(result_content, list):
+                parts = []
+                for part in result_content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        parts.append(part.get("text", ""))
+                result_str = "\n".join(parts)
+            else:
+                result_str = str(result_content) if result_content else ""
+            out.append(Message(
+                role="tool",
+                content="",
+                timestamp=ts,
+                tool_name=resolved_name,
+                tool_output=result_str,
+                content_type="tool_result",
+            ))
+    return out
+
+
+def _probe_agent_session_id(
+    agent_file: Path, *, max_records: int = 5, max_lines: int = 50
+) -> str | None:
+    """Cheaply read the internal (parent) ``sessionId`` from a file's head.
+
+    Legacy layouts (b/c) attribute an agent file to a session by its internal
+    ``sessionId``. Reading a whole file just to learn it belongs to a
+    *different* session is wasteful when a project holds many legacy agent
+    files, so we probe only the head: the first ``sessionId`` seen within the
+    first ``max_records`` object records (or ``max_lines`` physical lines).
+
+    Tradeoff: an agent file whose early records omit ``sessionId`` (rare —
+    records normally carry it) is reported as ``None`` and treated as a
+    non-match rather than parsed in full. Legacy layouts accept that miss to
+    keep session-open latency bounded by the session, not the whole project.
+    Returns the ``sessionId`` string, or ``None`` if none appears in the probe
+    window. Returns ``None`` on OSError.
+    """
+    try:
+        with open(agent_file) as f:
+            records = 0
+            for i, line in enumerate(f):
+                if i >= max_lines or records >= max_records:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                records += 1
+                sid = entry.get("sessionId")
+                if sid:
+                    return sid
+    except OSError:
+        return None
+    return None
+
+
+def _parse_agent_file(agent_file: Path) -> tuple[dict, list[Message]] | None:
+    """Single-pass read of an ``agent-*.jsonl``: aggregate meta + messages.
+
+    Reads the file exactly once, building both the scan metadata (internal
+    parent ``session_id``, ``message_count``, ``output_tokens``, earliest
+    ``first_timestamp``, ``first_user_text``) and the parsed interior
+    :class:`Message` list. This replaces the old two-pass approach (scan, then
+    reopen and reparse for messages).
+
+    No ``sessionId`` filter is applied: an agent file is a single sub-agent
+    thread by construction, so every record with a ``message`` field belongs
+    to it — including older forks whose records carry no internal ``sessionId``
+    at all. Non-dict JSON lines, string ``message`` fields, and non-dict
+    ``usage`` are skipped defensively. Returns ``None`` on OSError.
     """
     session_id: str | None = None
     message_count = 0
     output_tokens = 0
     first_ts: datetime | None = None
     first_user_text: str | None = None
+    messages: list[Message] = []
+    tool_id_map: dict[str, str] = {}
 
     try:
         with open(agent_file) as f:
@@ -342,62 +519,60 @@ def _scan_agent_file(agent_file: Path) -> dict | None:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(entry, dict):
+                    continue
 
                 sid = entry.get("sessionId")
                 if sid and session_id is None:
                     session_id = sid
 
-                ts = entry.get("timestamp")
-                if ts:
-                    parsed = _parse_timestamp(ts)
-                    if first_ts is None or parsed < first_ts:
-                        first_ts = parsed
+                raw_ts = entry.get("timestamp")
+                msg_ts = _parse_timestamp(raw_ts)
+                if raw_ts and (first_ts is None or msg_ts < first_ts):
+                    first_ts = msg_ts
 
                 msg = entry.get("message")
-                if not msg:
+                if not isinstance(msg, dict):
                     continue
                 message_count += 1
 
-                role = msg.get("role")
+                role = msg.get("role", "")
                 if role == "assistant":
                     usage = msg.get("usage")
-                    if usage:
+                    if isinstance(usage, dict):
                         output_tokens += usage.get("output_tokens", 0)
                 elif role == "user" and first_user_text is None:
                     text = _extract_text(msg.get("content", ""))
                     if text and not _is_system_message(text):
                         first_user_text = text
+
+                messages.extend(
+                    _blocks_to_messages(role, msg_ts, msg.get("content", ""), tool_id_map)
+                )
     except OSError:
         return None
 
-    return {
+    messages.sort(
+        key=lambda m: m.timestamp or datetime.min.replace(tzinfo=timezone.utc)
+    )
+    scan = {
         "session_id": session_id,
         "message_count": message_count,
         "output_tokens": output_tokens,
         "first_timestamp": first_ts,
         "first_user_text": first_user_text,
     }
+    return scan, messages
 
 
-def _build_subagent_meta(
-    agent_file: Path,
-    sidecar_data: dict | None,
-    *,
-    require_session_id: str | None = None,
-) -> SubagentMeta | None:
-    """Build a :class:`SubagentMeta` from an agent file and optional sidecar.
+def _meta_from_scan(
+    agent_file: Path, scan: dict, sidecar_data: dict | None
+) -> SubagentMeta:
+    """Build a :class:`SubagentMeta` from parsed scan metadata + optional sidecar.
 
-    When ``require_session_id`` is given (legacy layouts with no sidecar), the
-    file is included only if its internal ``sessionId`` matches. Description
-    falls back to the first user message text (first 80 chars) when the sidecar
-    has none.
+    Description falls back to the first user message text (first 80 chars) when
+    the sidecar has none.
     """
-    scan = _scan_agent_file(agent_file)
-    if scan is None:
-        return None
-    if require_session_id is not None and scan["session_id"] != require_session_id:
-        return None
-
     description = None
     agent_type = None
     is_fork = False
@@ -423,6 +598,17 @@ def _build_subagent_meta(
         message_count=scan["message_count"],
         output_tokens=scan["output_tokens"] or None,
     )
+
+
+def _load_agent_file(
+    agent_file: Path, sidecar_data: dict | None
+) -> tuple[SubagentMeta, list[Message]] | None:
+    """Parse one agent file into ``(SubagentMeta, interior messages)`` in one pass."""
+    parsed = _parse_agent_file(agent_file)
+    if parsed is None:
+        return None
+    scan, messages = parsed
+    return _meta_from_scan(agent_file, scan, sidecar_data), messages
 
 
 class ClaudeProvider(SessionProvider):
@@ -529,185 +715,128 @@ class ClaudeProvider(SessionProvider):
                             entry = json.loads(line)
                         except json.JSONDecodeError:
                             continue
+                        if not isinstance(entry, dict):
+                            continue
 
                         if entry.get("sessionId") != session.id:
                             continue
 
                         msg = entry.get("message")
-                        if not msg:
+                        if not isinstance(msg, dict):
                             continue
 
                         role = msg.get("role", "")
                         ts = _parse_timestamp(entry.get("timestamp"))
-                        raw_content = msg.get("content", "")
-
-                        if isinstance(raw_content, str):
-                            # Plain string content — single text message
-                            if not raw_content.strip():
-                                continue
-                            is_sys = role == "user" and _is_system_message(raw_content)
-                            messages.append(Message(
-                                role=role,
-                                content=raw_content,
-                                timestamp=ts,
-                                is_system=is_sys,
-                                content_type="text",
-                            ))
-                        elif isinstance(raw_content, list):
-                            # Content array — emit one Message per block
-                            for block in raw_content:
-                                if not isinstance(block, dict):
-                                    continue
-                                btype = block.get("type", "")
-
-                                if btype == "text":
-                                    text = block.get("text", "")
-                                    if not text.strip():
-                                        continue
-                                    is_sys = role == "user" and _is_system_message(text)
-                                    messages.append(Message(
-                                        role=role,
-                                        content=text,
-                                        timestamp=ts,
-                                        is_system=is_sys,
-                                        content_type="text",
-                                    ))
-
-                                elif btype == "thinking":
-                                    thinking_text = block.get("thinking", "")
-                                    if not thinking_text.strip():
-                                        continue
-                                    messages.append(Message(
-                                        role="assistant",
-                                        content="",
-                                        timestamp=ts,
-                                        thinking=thinking_text,
-                                        content_type="thinking",
-                                    ))
-
-                                elif btype == "tool_use":
-                                    name = block.get("name", "")
-                                    tool_id = block.get("id", "")
-                                    if tool_id and name:
-                                        tool_id_map[tool_id] = name
-                                    inp = block.get("input", {})
-                                    messages.append(Message(
-                                        role="assistant",
-                                        content="",
-                                        timestamp=ts,
-                                        tool_name=name,
-                                        tool_input=json.dumps(inp, indent=2),
-                                        content_type="tool_use",
-                                    ))
-
-                                elif btype == "tool_result":
-                                    tool_id = block.get("tool_use_id", "")
-                                    resolved_name = tool_id_map.get(tool_id, "")
-                                    result_content = block.get("content", "")
-                                    if isinstance(result_content, list):
-                                        parts = []
-                                        for part in result_content:
-                                            if isinstance(part, dict) and part.get("type") == "text":
-                                                parts.append(part.get("text", ""))
-                                        result_str = "\n".join(parts)
-                                    else:
-                                        result_str = str(result_content) if result_content else ""
-                                    messages.append(Message(
-                                        role="tool",
-                                        content="",
-                                        timestamp=ts,
-                                        tool_name=resolved_name,
-                                        tool_output=result_str,
-                                        content_type="tool_result",
-                                    ))
+                        messages.extend(
+                            _blocks_to_messages(
+                                role, ts, msg.get("content", ""), tool_id_map
+                            )
+                        )
             except OSError:
                 continue
 
         messages.sort(key=lambda m: m.timestamp or datetime.min.replace(tzinfo=timezone.utc))
         return messages
 
-    def discover_subagents(self, session: SessionMeta) -> list[SubagentMeta]:
-        """Discover sub-agent transcripts for a session across all three layouts.
+    def _subagent_files(
+        self, session: SessionMeta
+    ) -> Iterator[tuple[Path, dict | None, bool]]:
+        """Yield ``(agent_file, sidecar_data, needs_session_probe)`` across layouts.
 
-        Layout (a) — current: ``{project}/{id}/subagents/agent-*.jsonl`` with an
-        optional ``agent-{id}.meta.json`` sidecar. Layouts (b) legacy
-        ``{project}/subagents/agent-*.jsonl`` and (c) oldest
-        ``{project}/agent-*.jsonl`` have no sidecar, so a file is included only
-        when its internal (parent) ``sessionId`` matches this session.
-
-        Discovery is lazy and swallows parse errors per file; results are sorted
-        by ``first_timestamp``.
+        ``needs_session_probe`` is True for legacy layouts (b/c) that have no
+        sidecar and must be attributed to this session by their internal parent
+        ``sessionId`` — callers probe the head cheaply and skip non-matching
+        files without a full read. The current per-session layout (a) is gated
+        on a traversal-safe ``session.id`` so a hostile id can't glob outside
+        the project dir.
         """
-        if not session.source_path:
-            return []
-
         source = Path(session.source_path)
-        results: list[SubagentMeta] = []
 
-        # source_path is the project dir (indexed sessions) or a loose file.
         if source.is_dir():
             project_dir = source
 
             # (a) current layout: per-session subagents dir, sidecar honored.
-            current = project_dir / session.id / "subagents"
-            if current.is_dir():
-                for agent_file in sorted(current.glob("agent-*.jsonl")):
-                    meta = _build_subagent_meta(
-                        agent_file, _read_agent_sidecar(agent_file)
-                    )
-                    if meta:
-                        results.append(meta)
+            if _is_safe_session_id(session.id):
+                current = project_dir / session.id / "subagents"
+                if current.is_dir():
+                    for agent_file in sorted(current.glob("agent-*.jsonl")):
+                        yield agent_file, _read_agent_sidecar(agent_file), False
 
             # (b) legacy: project-level subagents dir, internal sessionId probe.
             legacy = project_dir / "subagents"
             if legacy.is_dir():
                 for agent_file in sorted(legacy.glob("agent-*.jsonl")):
-                    meta = _build_subagent_meta(
-                        agent_file, None, require_session_id=session.id
-                    )
-                    if meta:
-                        results.append(meta)
+                    yield agent_file, None, True
 
             # (c) oldest: agent files loose in the project dir, same probe.
             for agent_file in sorted(project_dir.glob("agent-*.jsonl")):
-                meta = _build_subagent_meta(
-                    agent_file, None, require_session_id=session.id
-                )
-                if meta:
-                    results.append(meta)
-        else:
+                yield agent_file, None, True
+        elif _is_safe_session_id(session.id):
             # Loose/archived transcript: only the current per-session layout,
             # relative to the file's own directory. Keep it simple.
             current = source.parent / session.id / "subagents"
             if current.is_dir():
                 for agent_file in sorted(current.glob("agent-*.jsonl")):
-                    meta = _build_subagent_meta(
-                        agent_file, _read_agent_sidecar(agent_file)
-                    )
-                    if meta:
-                        results.append(meta)
+                    yield agent_file, _read_agent_sidecar(agent_file), False
+
+    def load_subagents(
+        self, session: SessionMeta
+    ) -> list[tuple[SubagentMeta, list[Message]]]:
+        """Discover and load every sub-agent thread, one pass per file.
+
+        Reads each ``agent-*.jsonl`` exactly once, building its
+        :class:`SubagentMeta` and parsed interior messages together (replacing
+        the old discover-then-reload double read). Legacy layouts (b/c) are
+        probed cheaply for the internal parent ``sessionId`` and skipped
+        without a full read when they belong to a different session.
+
+        Lazy and defensive: swallows per-file parse errors; results are sorted
+        by ``first_timestamp``.
+        """
+        if not session.source_path:
+            return []
+
+        results: list[tuple[SubagentMeta, list[Message]]] = []
+        for agent_file, sidecar, needs_probe in self._subagent_files(session):
+            if needs_probe and _probe_agent_session_id(agent_file) != session.id:
+                continue
+            loaded = _load_agent_file(agent_file, sidecar)
+            if loaded is not None:
+                results.append(loaded)
 
         results.sort(
-            key=lambda m: m.first_timestamp
+            key=lambda pair: pair[0].first_timestamp
             or datetime.min.replace(tzinfo=timezone.utc)
         )
         return results
+
+    def discover_subagents(self, session: SessionMeta) -> list[SubagentMeta]:
+        """Sub-agent metadata (meta-only) across all three on-disk layouts.
+
+        Shares :meth:`load_subagents`' single-pass parsing and drops the
+        interior messages; use ``load_subagents`` directly when the messages
+        are also needed (view/export/TUI) to avoid re-reading files.
+        """
+        return [meta for meta, _ in self.load_subagents(session)]
 
     def get_subagent_messages(
         self, session: SessionMeta, meta: SubagentMeta
     ) -> list[Message]:
         """Load parsed messages for one sub-agent transcript.
 
-        Reuses :meth:`get_messages` by pointing a shallow copy of the session at
-        the agent file; the agent records carry the parent ``sessionId`` so the
-        existing filter passes, and records without a ``message`` field (e.g.
-        ``fork-context-ref``) are skipped by that code path.
+        Single-pass parse of the agent file with no ``sessionId`` filter — an
+        agent file is a single-thread transcript, so every record with a
+        ``message`` field belongs to it (older forks may carry no internal
+        ``sessionId`` at all). Records without a ``message`` field (e.g.
+        ``fork-context-ref``) are skipped.
         """
-        agent_session = dataclasses.replace(session, source_path=meta.file_path)
-        return self.get_messages(agent_session)
+        parsed = _parse_agent_file(Path(meta.file_path))
+        return parsed[1] if parsed is not None else []
 
     def count_subagents(self, session_id: str, project_dir: Path) -> int:
         """Cheap sub-agent count for tree badges — current layout only, no reads."""
+        if not _is_safe_session_id(session_id):
+            return 0
         subdir = project_dir / session_id / "subagents"
         if not subdir.is_dir():
             return 0
@@ -760,18 +889,27 @@ class ClaudeProvider(SessionProvider):
                 continue
 
         # Remove the per-session sidecar dir (subagents + tool-results).
+        # session.id comes from JSONL records, so a corrupt/hostile transcript
+        # could carry ``../`` or an absolute path — never rmtree an
+        # id-derived path unsanitized. Require: a traversal-safe id, a real
+        # (non-symlink) directory, and a resolved parent that is exactly the
+        # project dir, so nothing outside the project can be deleted.
         sidecar_dir = source_dir / session.id
-        if sidecar_dir.is_dir():
+        if (
+            _is_safe_session_id(session.id)
+            and sidecar_dir.is_dir()
+            and not sidecar_dir.is_symlink()
+            and sidecar_dir.resolve().parent == source_dir.resolve()
+        ):
             shutil.rmtree(sidecar_dir, ignore_errors=True)
 
         # Remove legacy agent files (layouts b/c) belonging to this session,
-        # identified by their internal (parent) sessionId.
+        # identified by their internal (parent) sessionId (cheap head probe).
         for base in (source_dir / "subagents", source_dir):
             if not base.is_dir():
                 continue
             for agent_file in base.glob("agent-*.jsonl"):
-                scan = _scan_agent_file(agent_file)
-                if scan and scan["session_id"] == session.id:
+                if _probe_agent_session_id(agent_file) == session.id:
                     try:
                         agent_file.unlink()
                     except OSError:

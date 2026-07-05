@@ -452,18 +452,28 @@ def _resolve_subagents(session, args, *, include_tools, include_thinking):
         return []
 
     provider = _provider_for_session(session, _aggregation_root(args))
-    if provider is None or not hasattr(provider, "discover_subagents"):
+    if provider is None or not hasattr(provider, "load_subagents"):
+        return []
+
+    # A single broken agent file must never brick view/export of the parent
+    # session: swallow a failure of the whole load, and guard each agent's
+    # body so one bad file is skipped while the rest render (mirrors app.py).
+    try:
+        loaded = provider.load_subagents(session)
+    except Exception:
         return []
 
     out = []
-    for meta in provider.discover_subagents(session):
-        interior = provider.get_subagent_messages(session, meta)
-        interior = filter_messages(
-            interior,
-            include_tools=include_tools,
-            include_thinking=include_thinking,
-        )
-        out.append((meta, interior))
+    for meta, interior in loaded:
+        try:
+            interior = filter_messages(
+                interior,
+                include_tools=include_tools,
+                include_thinking=include_thinking,
+            )
+            out.append((meta, interior))
+        except Exception:
+            continue
     return out
 
 

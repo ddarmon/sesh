@@ -2050,6 +2050,47 @@ def test_cmd_export_json_subagent_interior_tools_gated(monkeypatch, capsys, tmp_
     )
 
 
+def test_cmd_export_json_malformed_agent_file_does_not_crash(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    """[finding 3] A malformed-but-valid-JSON agent line never bricks export."""
+    session, messages = _make_subagent_session(tmp_path, sidecar=False)
+    # Corrupt the agent file: prepend a bare array (valid JSON, not an object)
+    # and a record whose message is a string. Pre-fix these raised AttributeError.
+    agent_file = tmp_path / "proj" / session.id / "subagents" / "agent-ag-1.jsonl"
+    original = agent_file.read_text()
+    agent_file.write_text(
+        "[]\n"
+        + json.dumps({"sessionId": session.id, "message": "not a dict"}) + "\n"
+        + original
+    )
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id=session.id)]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    # Must not raise; the well-formed interior still comes through.
+    cli.cmd_export(_ns(session_id=session.id, provider=None, output_format="json",
+                       output=None, include_tools=False, include_thinking=False,
+                       full=False, no_agents=False))
+    out = json.loads(capsys.readouterr().out)
+    assert len(out["subagents"]) == 1
+    assert any(m["content"] == "nested reply text" for m in out["subagents"][0]["messages"])
+
+
+def test_resolve_subagents_skips_when_loader_raises(monkeypatch) -> None:
+    """[finding 3] A load failure is swallowed, returning no sub-agents."""
+    session = make_session(id="s-guard", provider=Provider.CLAUDE, source_path="/p")
+
+    class _Boom:
+        def load_subagents(self, _session):
+            raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(cli, "_provider_for_session", lambda *a, **k: _Boom())
+    out = cli._resolve_subagents(
+        session, _ns(no_agents=False), include_tools=False, include_thinking=False
+    )
+    assert out == []
+
+
 def test_cmd_export_json_nonclaude_has_no_subagents(monkeypatch, capsys) -> None:
     """Non-Claude sessions never get a subagents array."""
     session = make_session(id="cx", provider=Provider.CODEX)

@@ -216,9 +216,11 @@ Claude Code records each sub-agent (Task/Agent tool) run in its own
 renders every sub-agent as one collapsible thread — headed
 `⑂ {type} — {description} · N msgs` — spliced into the parent transcript
 at the spawn point, with its interior honoring the same tool/thinking
-toggles as the main thread (in the TUI press `a` to toggle them; on the
-CLI `sesh view`/`sesh export` show them by default, `--no-agents`
-suppresses). Three on-disk layouts are supported with graceful
+toggles as the main thread (in the TUI press `a` to toggle them — the
+agent transcripts are read lazily the first time you reveal them, so
+selecting a session never blocks on parsing agent files while they are
+hidden; on the CLI `sesh view`/`sesh export` show them by default,
+`--no-agents` suppresses). Three on-disk layouts are supported with graceful
 fallback: current per-session `{project}/{sessionId}/subagents/agent-*.jsonl`
 (with an optional `agent-{id}.meta.json` sidecar carrying agent type,
 fork flag, description, and spawning tool id), legacy project-level
@@ -229,7 +231,10 @@ Session tree labels gain a `⑂N` badge (a cheap directory count, no file
 reads during discovery); `sesh sessions` output includes `subagent_count`
 per session; and full-text search hits inside an agent file are
 attributed to the parent session, marked `⑂` in the TUI, and carry an
-`agent_id` in `sesh search` JSON output.
+`agent_id` in `sesh search` JSON output. Opening a `⑂` search hit while
+sub-agent threads are hidden auto-shows them for that session (status
+bar reads `Agents:AUTO`) so the matched content is visible without
+flipping the persisted preference.
 
 ### Session statistics
 
