@@ -96,6 +96,7 @@ class SearchResult:
     matched_line: str
     file_path: str
     host: str | None = None  # Set in aggregation mode
+    agent_id: str | None = None  # Set when the hit is inside a Claude sub-agent file
 
 
 def filter_messages(

@@ -1,10 +1,44 @@
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime, timezone
 
 from sesh.export import format_session_html, format_session_markdown
-from sesh.models import Provider
+from sesh.models import Provider, SubagentMeta
 from tests.helpers import make_message, make_session
+
+
+def _subagent(**overrides):
+    """Build a (SubagentMeta, interior messages) pair for export tests."""
+    data = {
+        "agent_id": "ag-1",
+        "file_path": "/proj/sess/subagents/agent-ag-1.jsonl",
+        "description": "Build the FIRE projection layer",
+        "agent_type": "Explore",
+        "is_fork": True,
+        "tool_use_id": "toolu_42",
+        "first_timestamp": datetime(2025, 1, 1, 0, 30, tzinfo=timezone.utc),
+        "message_count": 42,
+        "output_tokens": 1234,
+    }
+    interior = overrides.pop("interior", None)
+    data.update(overrides)
+    meta = SubagentMeta(**data)
+    if interior is None:
+        interior = [make_message(role="user", content="agent kickoff", timestamp=None)]
+    return meta, interior
+
+
+def _extract_payload(html_out: str) -> dict:
+    """Pull the embedded JSON payload back out of the HTML document."""
+    m = re.search(
+        r'<script id="data" type="application/json">(.*?)</script>',
+        html_out,
+        re.S,
+    )
+    assert m is not None
+    return json.loads(m.group(1).replace("<\\/", "</"))
 
 
 def test_format_session_markdown_renders_message_types() -> None:
@@ -181,3 +215,112 @@ def test_format_session_html_pins_markdown_html_disabled() -> None:
     out = format_session_html(make_session(id="h", provider=Provider.CLAUDE), [])
 
     assert "html:false" in out
+
+
+def test_format_session_html_embeds_agent_entry_with_nested_messages() -> None:
+    """A sub-agent becomes a kind:'agent' payload entry carrying nested messages."""
+    session = make_session(id="s-agent", provider=Provider.CLAUDE)
+    messages = [
+        make_message(
+            role="user",
+            content="please investigate",
+            timestamp=datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc),
+        ),
+        make_message(
+            role="assistant",
+            content="done",
+            timestamp=datetime(2025, 1, 1, 1, 0, tzinfo=timezone.utc),
+        ),
+    ]
+    meta, interior = _subagent(
+        interior=[make_message(role="assistant", content="nested reply", timestamp=None)]
+    )
+    out = format_session_html(session, messages, [(meta, interior)])
+
+    payload = _extract_payload(out)
+    agents = [e for e in payload["messages"] if e.get("kind") == "agent"]
+    assert len(agents) == 1
+    agent = agents[0]
+    assert agent["role"] == "agent"
+    assert agent["agent_type"] == "Explore"
+    assert agent["message_count"] == 42
+    assert "Build the FIRE projection layer" in agent["label"]
+    assert "42 msgs" in agent["label"]
+    # Nested interior is mapped through the same message display shape.
+    assert [m["content"] for m in agent["messages"]] == ["nested reply"]
+    # Anchored chronologically: spawn at 00:30 lands between the two main msgs.
+    kinds = [e.get("kind") for e in payload["messages"]]
+    assert kinds == ["text", "agent", "text"]
+    # The recursive renderer and agent styling are present.
+    assert "renderThread" in out
+    assert "agent-thread" in out
+
+
+def test_format_session_html_unanchorable_agent_trails() -> None:
+    """A sub-agent with no timestamp is appended after the main thread."""
+    session = make_session(id="s-trail", provider=Provider.CLAUDE)
+    messages = [
+        make_message(
+            role="user",
+            content="hi",
+            timestamp=datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc),
+        ),
+    ]
+    meta, interior = _subagent(first_timestamp=None)
+    out = format_session_html(session, messages, [(meta, interior)])
+
+    payload = _extract_payload(out)
+    kinds = [e.get("kind") for e in payload["messages"]]
+    assert kinds == ["text", "agent"]
+
+
+def test_format_session_html_no_subagents_matches_baseline() -> None:
+    """Passing no sub-agents produces the same payload as omitting the arg."""
+    session = make_session(id="s-none", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="hi", timestamp=None)]
+
+    a = _extract_payload(format_session_html(session, messages))
+    b = _extract_payload(format_session_html(session, messages, []))
+    assert a == b
+    assert all(e.get("kind") != "agent" for e in a["messages"])
+
+
+def test_format_session_markdown_appends_subagent_section() -> None:
+    """Markdown export gains a '## Sub-agent:' section with demoted interior."""
+    session = make_session(id="s-md", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="main question", timestamp=None)]
+    meta, _ = _subagent()
+    interior = [
+        make_message(role="user", content="sub question", timestamp=None),
+        make_message(role="assistant", content="sub answer", timestamp=None),
+        make_message(
+            role="assistant",
+            content="",
+            content_type="thinking",
+            thinking="nested thought",
+            timestamp=None,
+        ),
+    ]
+    out = format_session_markdown(session, messages, [(meta, interior)])
+
+    assert "## User" in out  # main thread heading (H2)
+    assert "## Sub-agent: Build the FIRE projection layer (ag-1)" in out
+    assert "**Type:** Explore" in out
+    assert "**Messages:** 42" in out
+    assert "**Output tokens:** 1,234" in out
+    # Interior headings are demoted one level.
+    assert "### User" in out  # sub-agent user (H3)
+    assert "### Assistant" in out
+    assert "#### Thinking" in out  # sub-agent thinking (H4)
+    assert "> nested thought" in out
+
+
+def test_format_session_markdown_no_subagents_unchanged() -> None:
+    """Omitting sub-agents leaves the markdown identical to the two-arg call."""
+    session = make_session(id="s-md2", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="hi", timestamp=None)]
+
+    assert format_session_markdown(session, messages) == format_session_markdown(
+        session, messages, []
+    )
+    assert "Sub-agent" not in format_session_markdown(session, messages)
