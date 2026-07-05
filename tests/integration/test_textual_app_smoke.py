@@ -12,8 +12,14 @@ import pytest_asyncio
 
 from sesh import snapshots
 from sesh.app import HelpScreen, SeshApp, SessionTree, SnapshotPreviewScreen, SnapshotsScreen
-from sesh.models import Project, Provider
-from tests.helpers import make_session, make_snapshot, make_snapshot_resume, make_snapshot_tab
+from sesh.models import Project, Provider, SearchResult, SubagentMeta
+from tests.helpers import (
+    make_message,
+    make_session,
+    make_snapshot,
+    make_snapshot_resume,
+    make_snapshot_tab,
+)
 
 
 @pytest_asyncio.fixture()
@@ -207,6 +213,198 @@ async def test_tool_toggle_updates_state(app):
 
     await pilot.press("T")
     assert sesh_app._show_thinking is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_agents_toggle_updates_state(app):
+    """Pressing 'a' toggles _show_agents and shows Agents:ON in the status suffix."""
+    sesh_app, pilot = app
+
+    assert sesh_app._show_agents is False
+
+    await pilot.press("a")
+    assert sesh_app._show_agents is True
+    assert "Agents:ON" in sesh_app._format_status_suffix()
+
+    await pilot.press("a")
+    assert sesh_app._show_agents is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_search_row_marks_agent_hits(app):
+    """Search results with agent_id set get a ⑂ marker in their row label."""
+    sesh_app, _pilot = app
+
+    normal = SearchResult(
+        session_id="s1",
+        project_path="/repo",
+        provider=Provider.CLAUDE,
+        matched_line="plain hit",
+        file_path="/tmp/.claude/projects/-repo/s1.jsonl",
+    )
+    agent_hit = SearchResult(
+        session_id="s2",
+        project_path="/repo",
+        provider=Provider.CLAUDE,
+        matched_line="agent hit",
+        file_path="/tmp/.claude/projects/-repo/s2/subagents/agent-x.jsonl",
+        agent_id="x",
+    )
+    sesh_app._show_search_results([normal, agent_hit], "hit")
+
+    tree = sesh_app.query_one("#session-tree")
+    leaves = list(tree.root.children[0].children)
+    labels = [str(leaf.label) for leaf in leaves]
+    assert not any("⑂" in lb for lb in labels if "plain hit" in lb)
+    assert any("⑂" in lb for lb in labels if "agent hit" in lb)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_toggle_agents_renders_on_empty_main_thread(app):
+    """[finding 5] Pressing 'a' reveals sub-agent threads even when the main
+    thread parsed to zero messages (was a visual no-op before)."""
+    sesh_app, pilot = app
+
+    rendered: list[object] = []
+    sesh_app._write_subagent = lambda *a, **k: rendered.append(a)
+
+    session = make_session(id="empty-main", provider=Provider.CLAUDE)
+    sesh_app._current_session = session
+    sesh_app._current_messages = []  # no parseable main messages
+    meta = SubagentMeta(agent_id="ag", file_path="/x", message_count=1)
+    sesh_app._current_subagents = [(meta, [make_message(content="interior")])]
+    sesh_app._subagents_loaded = True  # already loaded
+    sesh_app._show_agents = False
+
+    await pilot.press("a")
+    await pilot.pause()
+
+    assert sesh_app._show_agents is True
+    assert rendered, "sub-agent thread should render despite an empty main thread"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_toggle_agents_clears_auto_override(app):
+    """[review] After a ⑂ auto-show override, 'a' must still be able to hide
+    the threads: the first press clears the override (ON), the second hides."""
+    sesh_app, pilot = app
+
+    session = make_session(id="ovr", provider=Provider.CLAUDE)
+    sesh_app._current_session = session
+    sesh_app._current_messages = [make_message(content="main")]
+    meta = SubagentMeta(agent_id="ag", file_path="/x", message_count=1)
+    sesh_app._current_subagents = [(meta, [make_message(content="interior")])]
+    sesh_app._subagents_loaded = True
+    sesh_app._show_agents = False
+    sesh_app._agents_override = True  # as set by opening a ⑂ search hit
+    assert sesh_app._agents_visible is True
+
+    await pilot.press("a")
+    await pilot.pause()
+    assert sesh_app._show_agents is True
+    assert sesh_app._agents_override is False
+
+    await pilot.press("a")
+    await pilot.pause()
+    assert sesh_app._show_agents is False
+    assert sesh_app._agents_visible is False
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_toggle_tools_rerenders_agents_only_session(app):
+    """[review] 't'/'T' re-render a session whose main thread is empty but
+    which has visible sub-agent threads (interior honors the toggles)."""
+    sesh_app, pilot = app
+
+    rendered: list[object] = []
+    sesh_app._write_subagent = lambda *a, **k: rendered.append(a)
+
+    session = make_session(id="agents-only", provider=Provider.CLAUDE)
+    sesh_app._current_session = session
+    sesh_app._current_messages = []
+    meta = SubagentMeta(agent_id="ag", file_path="/x", message_count=1)
+    sesh_app._current_subagents = [(meta, [make_message(content="interior")])]
+    sesh_app._subagents_loaded = True
+    sesh_app._show_agents = True
+
+    await pilot.press("t")
+    await pilot.pause()
+    assert rendered, "toggling tools should re-render the spliced agent threads"
+
+    rendered.clear()
+    await pilot.press("T")
+    await pilot.pause()
+    assert rendered, "toggling thinking should re-render the spliced agent threads"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_load_messages_defers_subagents_when_hidden(app):
+    """[finding 7/10] Sub-agent files are not read on select when agents are
+    hidden; the main thread still loads."""
+    import types
+
+    sesh_app, _pilot = app
+    # Run the render callback inline so we can drive the worker body directly.
+    sesh_app.call_from_thread = lambda fn, *a: fn(*a)
+
+    loads: list[object] = []
+    sesh_app._load_subagents = lambda session: loads.append(session)
+    main_calls: list[object] = []
+    sesh_app._provider_for = lambda s: types.SimpleNamespace(
+        get_messages=lambda sess: main_calls.append(sess) or [make_message(content="hi")]
+    )
+
+    session = make_session(id="s-lazy", provider=Provider.CLAUDE, source_path="/p")
+
+    sesh_app._show_agents = False
+    sesh_app._agents_override = False
+    sesh_app._load_messages(session)
+    assert main_calls, "main thread must load immediately"
+    assert loads == [], "sub-agent load must be deferred while agents are hidden"
+
+    # With agents visible, the sub-agent load fires as part of selection.
+    sesh_app._show_agents = True
+    sesh_app._load_messages(session)
+    assert loads == [session]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_export_includes_subagents_when_toggled_on(app):
+    """With 'a' ON, the clipboard export includes sub-agent sections."""
+    sesh_app, _pilot = app
+
+    captured: list[str] = []
+    sesh_app._copy_text = lambda text: captured.append(text)
+
+    session = make_session(id="s1", provider=Provider.CLAUDE, project_path="/repo")
+    sesh_app._current_session = session
+    sesh_app._current_messages = [make_message(content="main message")]
+    meta = SubagentMeta(
+        agent_id="ag1",
+        file_path="/tmp/agent-ag1.jsonl",
+        description="Build the thing",
+        agent_type="fork",
+        message_count=1,
+    )
+    sesh_app._current_subagents = [(meta, [make_message(content="agent interior")])]
+
+    # Off: no sub-agent section.
+    sesh_app._show_agents = False
+    sesh_app.action_export_session()
+    assert "Sub-agent:" not in captured[-1]
+
+    # On: sub-agent section present.
+    sesh_app._show_agents = True
+    sesh_app.action_export_session()
+    assert "Sub-agent: Build the thing (ag1)" in captured[-1]
+    assert "agent interior" in captured[-1]
 
 
 @pytest.mark.integration

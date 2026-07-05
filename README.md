@@ -85,6 +85,7 @@ toggles -- persist across launches.
 | `m`      | Move selected project path (full or metadata-only)         |
 | `t`      | Toggle tool call/result visibility                         |
 | `T`      | Toggle thinking/reasoning visibility                       |
+| `a`      | Toggle Claude sub-agent thread visibility                  |
 | `F`      | Toggle fullscreen message pane                             |
 | `S`      | Open Terminal-tab snapshots (macOS only)                   |
 | `?`      | Show keyboard shortcuts help                               |
@@ -164,9 +165,11 @@ sesh resume last                          # resume the most recent session
 sesh export <session-id> --format json    # export session transcript
 sesh export <session-id> --format html -o out.html  # self-contained HTML (Markdown + LaTeX)
 sesh export <session-id> --full           # export with tools + thinking
+sesh export <session-id> --no-agents      # exclude Claude sub-agent transcripts
 sesh export last -o transcript.md         # export the most recent session to a file
 sesh view <session-id>                    # render as HTML + open in the browser
 sesh view last --full                     # view most recent, incl. tools + thinking
+sesh view <session-id> --no-agents        # hide Claude sub-agent transcripts
 sesh view <session-id> --no-open          # write the HTML file, just print its path
 sesh view --file /path/archive/abc.jsonl  # render a loose/archived transcript (no index)
 sesh export --file /path/abc.jsonl --format html -o out.html  # archived transcript → HTML
@@ -205,6 +208,33 @@ copied `.jsonl` that has been deleted from `~/.claude/projects/` and so
 has no index entry (the session id, project path, model, and token
 counts are recovered from the file's own records). `--file` currently
 assumes Claude JSONL format.
+
+### Claude sub-agent transcripts
+
+Claude Code records each sub-agent (Task/Agent tool) run in its own
+`agent-{id}.jsonl` file. sesh discovers these lazily on session open and
+renders every sub-agent as one collapsible thread — headed
+`⑂ {type} — {description} · N msgs` — spliced into the parent transcript
+at the spawn point, with its interior honoring the same tool/thinking
+toggles as the main thread (in the TUI press `a` to toggle them — the
+agent transcripts are read lazily the first time you reveal them, so
+selecting a session never blocks on parsing agent files while they are
+hidden; on the CLI `sesh view`/`sesh export` show them by default,
+`--no-agents` suppresses). Three on-disk layouts are supported with graceful
+fallback: current per-session `{project}/{sessionId}/subagents/agent-*.jsonl`
+(with an optional `agent-{id}.meta.json` sidecar carrying agent type,
+fork flag, description, and spawning tool id), legacy project-level
+`{project}/subagents/agent-*.jsonl`, and the oldest
+`{project}/agent-*.jsonl` — the latter two have no sidecar, so a file is
+attributed to a session by the parent `sessionId` inside its records.
+Session tree labels gain a `⑂N` badge (a cheap directory count, no file
+reads during discovery); `sesh sessions` output includes `subagent_count`
+per session; and full-text search hits inside an agent file are
+attributed to the parent session, marked `⑂` in the TUI, and carry an
+`agent_id` in `sesh search` JSON output. Opening a `⑂` search hit while
+sub-agent threads are hidden auto-shows them for that session (status
+bar reads `Agents:AUTO`) so the matched content is visible without
+flipping the persisted preference.
 
 ### Session statistics
 

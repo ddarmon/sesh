@@ -279,6 +279,7 @@ def cmd_sessions(args: argparse.Namespace) -> None:
             "output_tokens": s.get("output_tokens"),
             "cumulative_input_tokens": s.get("cumulative_input_tokens"),
             "host": s.get("host"),
+            "subagent_count": s.get("subagent_count", 0),
         })
 
     _json_out(out)
@@ -434,6 +435,48 @@ def _resolve_export_source(args: argparse.Namespace):
     return _load_session_messages(matches[0], args)
 
 
+def _resolve_subagents(session, args, *, include_tools, include_thinking):
+    """Discover and load Claude sub-agent threads for view/export.
+
+    Returns a list of ``(SubagentMeta, filtered interior messages)`` pairs, or
+    an empty list for non-Claude providers, when ``--no-agents`` is passed, or
+    when the session has no sub-agents. The interior of each sub-agent gets the
+    same tool/thinking filtering applied to the main thread — the collapsed
+    block itself is shown regardless (sub-agents are turns, not tool calls).
+    """
+    from sesh.models import Provider, filter_messages
+
+    if getattr(args, "no_agents", False):
+        return []
+    if session.provider != Provider.CLAUDE:
+        return []
+
+    provider = _provider_for_session(session, _aggregation_root(args))
+    if provider is None or not hasattr(provider, "load_subagents"):
+        return []
+
+    # A single broken agent file must never brick view/export of the parent
+    # session: swallow a failure of the whole load, and guard each agent's
+    # body so one bad file is skipped while the rest render (mirrors app.py).
+    try:
+        loaded = provider.load_subagents(session)
+    except Exception:
+        return []
+
+    out = []
+    for meta, interior in loaded:
+        try:
+            interior = filter_messages(
+                interior,
+                include_tools=include_tools,
+                include_thinking=include_thinking,
+            )
+            out.append((meta, interior))
+        except Exception:
+            continue
+    return out
+
+
 def cmd_messages(args: argparse.Namespace) -> None:
     """Load and print messages for a session."""
     # Discover fresh (like view/delete/clean) so a just-created session —
@@ -536,6 +579,7 @@ def cmd_search(args: argparse.Namespace) -> None:
             "matched_line": r.matched_line,
             "file_path": r.file_path,
             "host": r.host,
+            "agent_id": r.agent_id,
         })
 
     _json_out(out)
@@ -942,9 +986,12 @@ def cmd_export(args: argparse.Namespace) -> None:
         include_thinking=include_thinking,
     )
 
+    subagents = _resolve_subagents(
+        session, args, include_tools=include_tools, include_thinking=include_thinking
+    )
+
     if args.output_format == "json":
-        out_messages = []
-        for m in messages:
+        def _serialize(m):
             entry = {
                 "role": m.role,
                 "content": m.content,
@@ -958,24 +1005,39 @@ def cmd_export(args: argparse.Namespace) -> None:
                 entry["tool_output"] = m.tool_output
             if m.thinking:
                 entry["thinking"] = m.thinking
-            out_messages.append(entry)
+            return entry
 
-        content = json.dumps({
+        payload = {
             "session_id": session.id,
             "provider": session.provider.value,
             "project_path": session.project_path,
             "model": session.model,
             "timestamp": session.timestamp.isoformat(),
-            "messages": out_messages,
-        }, indent=2) + "\n"
+            "messages": [_serialize(m) for m in messages],
+        }
+        if subagents:
+            payload["subagents"] = [
+                {
+                    "agent_id": meta.agent_id,
+                    "description": meta.description,
+                    "agent_type": meta.agent_type,
+                    "is_fork": meta.is_fork,
+                    "tool_use_id": meta.tool_use_id,
+                    "message_count": meta.message_count,
+                    "output_tokens": meta.output_tokens,
+                    "messages": [_serialize(m) for m in interior],
+                }
+                for meta, interior in subagents
+            ]
+        content = json.dumps(payload, indent=2) + "\n"
     elif args.output_format == "html":
         from sesh.export import format_session_html
 
-        content = format_session_html(session, messages)
+        content = format_session_html(session, messages, subagents)
     else:
         from sesh.export import format_session_markdown
 
-        content = format_session_markdown(session, messages) + "\n"
+        content = format_session_markdown(session, messages, subagents) + "\n"
 
     output = getattr(args, "output", None)
     if output is None:
@@ -1020,7 +1082,11 @@ def cmd_view(args: argparse.Namespace) -> None:
         include_thinking=include_thinking,
     )
 
-    content = format_session_html(session, messages)
+    subagents = _resolve_subagents(
+        session, args, include_tools=include_tools, include_thinking=include_thinking
+    )
+
+    content = format_session_html(session, messages, subagents)
 
     # Write to a stable per-session path so re-running 'sesh view' reuses the
     # same file:// URL and the browser refreshes the existing tab (with new=0)
@@ -1563,6 +1629,12 @@ def main() -> None:
         action="store_true",
         help="Include all message types (tools + thinking)",
     )
+    p_export.add_argument(
+        "--no-agents",
+        dest="no_agents",
+        action="store_true",
+        help="Exclude Claude sub-agent (Task/Agent) transcripts from the export",
+    )
 
     # view
     p_view = sub.add_parser(
@@ -1616,6 +1688,12 @@ def main() -> None:
         "--full",
         action="store_true",
         help="Include all message types (tools + thinking)",
+    )
+    p_view.add_argument(
+        "--no-agents",
+        dest="no_agents",
+        action="store_true",
+        help="Exclude Claude sub-agent (Task/Agent) transcripts from the view",
     )
     p_view.add_argument(
         "--no-open",

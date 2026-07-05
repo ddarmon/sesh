@@ -7,11 +7,87 @@ import json
 import re
 from importlib.resources import files
 
-from sesh.models import Message, SessionMeta
+from sesh.models import Message, SessionMeta, SubagentMeta
 
 
-def format_session_markdown(session: SessionMeta, messages: list[Message]) -> str:
-    """Render a session + messages as Markdown."""
+def _md_message_lines(m: Message, heading_offset: int = 0) -> list[str]:
+    """Render one message as Markdown lines.
+
+    ``heading_offset`` demotes every heading by that many levels so a message
+    thread can be nested under a higher-level section (e.g. a sub-agent's
+    interior renders one level deeper than the main thread).
+    """
+    h2 = "#" * (2 + heading_offset)
+    h3 = "#" * (3 + heading_offset)
+    ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
+    lines: list[str] = []
+
+    if m.content_type == "thinking":
+        lines.append(f"{h3} Thinking{ts}")
+        lines.append("")
+        for line in (m.thinking or "").splitlines():
+            lines.append(f"> {line}")
+        lines.append("")
+        return lines
+
+    if m.content_type == "tool_use":
+        tool = m.tool_name or "tool"
+        lines.append(f"{h3} {tool} (call){ts}")
+        lines.append("")
+        lines.append("```json")
+        lines.append(m.tool_input or "")
+        lines.append("```")
+        lines.append("")
+        return lines
+
+    if m.content_type == "tool_result":
+        tool = m.tool_name or "tool"
+        lines.append(f"{h3} {tool} (result){ts}")
+        lines.append("")
+        lines.append(m.tool_output or "")
+        lines.append("")
+        return lines
+
+    if m.role == "user":
+        lines.append(f"{h2} User{ts}")
+        lines.append("")
+        lines.append(m.content)
+        lines.append("")
+        return lines
+
+    if m.role == "assistant":
+        lines.append(f"{h2} Assistant{ts}")
+        lines.append("")
+        lines.append(m.content)
+        lines.append("")
+        return lines
+
+    if m.role == "tool":
+        tool = m.tool_name or "tool"
+        lines.append(f"{h3} {tool}{ts}")
+        lines.append("")
+        lines.append(m.content)
+        lines.append("")
+        return lines
+
+    lines.append(f"{h2} {m.role}{ts}")
+    lines.append("")
+    lines.append(m.content)
+    lines.append("")
+    return lines
+
+
+def format_session_markdown(
+    session: SessionMeta,
+    messages: list[Message],
+    subagents: list[tuple[SubagentMeta, list[Message]]] | None = None,
+) -> str:
+    """Render a session + messages as Markdown.
+
+    When ``subagents`` is given (Claude sub-agent threads), each is appended
+    after the main thread as a ``## Sub-agent:`` section with its interior
+    messages demoted one heading level.
+    """
     lines: list[str] = [
         f"# Session: {session.id}",
         "",
@@ -36,60 +112,22 @@ def format_session_markdown(session: SessionMeta, messages: list[Message]) -> st
     lines.append("")
 
     for m in messages:
-        ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
+        lines.extend(_md_message_lines(m))
 
-        if m.content_type == "thinking":
-            lines.append(f"### Thinking{ts}")
-            lines.append("")
-            for line in (m.thinking or "").splitlines():
-                lines.append(f"> {line}")
-            lines.append("")
-            continue
-
-        if m.content_type == "tool_use":
-            tool = m.tool_name or "tool"
-            lines.append(f"### {tool} (call){ts}")
-            lines.append("")
-            lines.append("```json")
-            lines.append(m.tool_input or "")
-            lines.append("```")
-            lines.append("")
-            continue
-
-        if m.content_type == "tool_result":
-            tool = m.tool_name or "tool"
-            lines.append(f"### {tool} (result){ts}")
-            lines.append("")
-            lines.append(m.tool_output or "")
-            lines.append("")
-            continue
-
-        if m.role == "user":
-            lines.append(f"## User{ts}")
-            lines.append("")
-            lines.append(m.content)
-            lines.append("")
-            continue
-
-        if m.role == "assistant":
-            lines.append(f"## Assistant{ts}")
-            lines.append("")
-            lines.append(m.content)
-            lines.append("")
-            continue
-
-        if m.role == "tool":
-            tool = m.tool_name or "tool"
-            lines.append(f"### {tool}{ts}")
-            lines.append("")
-            lines.append(m.content)
-            lines.append("")
-            continue
-
-        lines.append(f"## {m.role}{ts}")
+    for meta, interior in subagents or []:
+        desc = meta.description or meta.agent_id
+        lines.append(f"## Sub-agent: {desc} ({meta.agent_id})")
         lines.append("")
-        lines.append(m.content)
+        meta_bits = [f"**Type:** {meta.agent_type or 'agent'}"]
+        meta_bits.append(f"**Messages:** {meta.message_count}")
+        if meta.output_tokens is not None:
+            meta_bits.append(f"**Output tokens:** {meta.output_tokens:,}")
+        if meta.is_fork:
+            meta_bits.append("**Fork:** yes")
+        lines.append(" · ".join(meta_bits))
         lines.append("")
+        for m in interior:
+            lines.extend(_md_message_lines(m, heading_offset=1))
 
     return "\n".join(lines)
 
@@ -158,6 +196,68 @@ def _html_messages(messages: list[Message]) -> list[dict]:
     return out
 
 
+def _agent_entry(meta: SubagentMeta, interior: list[Message]) -> dict:
+    """Build a ``kind: "agent"`` display dict for a sub-agent thread.
+
+    Carries the collapsed summary ``label`` plus the nested interior mapped
+    through :func:`_html_messages`, so the viewer JS can recurse into it.
+    """
+    desc = meta.description or meta.agent_id
+    label = f"⑂ {meta.agent_type or 'agent'} — {desc} · {meta.message_count} msgs"
+    return {
+        "role": "agent",
+        "label": label,
+        "kind": "agent",
+        "description": meta.description,
+        "agent_type": meta.agent_type,
+        "message_count": meta.message_count,
+        "messages": _html_messages(interior),
+    }
+
+
+def _compose_thread(
+    messages: list[Message],
+    subagents: list[tuple[SubagentMeta, list[Message]]] | None,
+) -> list[dict]:
+    """Interleave sub-agent ``agent`` entries into the main message dicts.
+
+    Each sub-agent is anchored chronologically: it is spliced in just before
+    the first visible main-thread message with a later timestamp (so it works
+    even when tool rows are filtered out). Sub-agents with no timestamp fall
+    back to a trailing section appended after the whole thread.
+    """
+    base = _html_messages(messages)
+    if not subagents:
+        return base
+
+    anchored: list[tuple[int, dict]] = []
+    trailing: list[dict] = []
+    for meta, interior in subagents:
+        entry = _agent_entry(meta, interior)
+        ts = meta.first_timestamp
+        if ts is None:
+            trailing.append(entry)
+            continue
+        idx = len(messages)
+        for i, m in enumerate(messages):
+            if m.timestamp is not None and m.timestamp > ts:
+                idx = i
+                break
+        anchored.append((idx, entry))
+
+    anchored.sort(key=lambda t: t[0])
+    result: list[dict] = []
+    ai = 0
+    for i in range(len(base) + 1):
+        while ai < len(anchored) and anchored[ai][0] == i:
+            result.append(anchored[ai][1])
+            ai += 1
+        if i < len(base):
+            result.append(base[i])
+    result.extend(trailing)
+    return result
+
+
 _HTML_TEMPLATE = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -180,6 +280,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
   .tool .bubble { background:#8881; border:1px dashed #8886; font-size:14px; opacity:.85; }
   .tool details summary { cursor:pointer; opacity:.7; text-transform:uppercase; font-size:12px; letter-spacing:.06em; }
   .tool details[open] summary { margin-bottom:8px; }
+  .agent > details > summary { cursor:pointer; opacity:.75; font-size:13px; letter-spacing:.02em; }
+  .agent > details[open] > summary { margin-bottom:10px; }
+  .agent-thread { border-left:2px solid #8886; padding-left:16px; margin-left:4px; }
   .bubble > :first-child { margin-top:0; } .bubble > :last-child { margin-bottom:0; }
   pre { background:#8881; padding:12px 14px; border-radius:8px; overflow:auto; font-size:13.5px; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -218,39 +321,65 @@ _HTML_TEMPLATE = r"""<!doctype html>
          .replace(/\\\(([\s\S]+?)\\\)/g, (_,m)=>'$'+m+'$')
     ).join('');
   }
-  const thread = document.getElementById('thread');
-  for (const m of data.messages){
-    const role = (m.role||'assistant');
-    const wrap = document.createElement('div'); wrap.className = 'msg '+role;
-    const bub = document.createElement('div'); bub.className='bubble';
-    const rendered = md.render(normMath(m.content||''));
-    if (m.kind === 'tool' || m.kind === 'thinking'){
-      const det = document.createElement('details');
-      const sum = document.createElement('summary'); sum.textContent = m.label||role;
-      det.appendChild(sum);
-      const inner = document.createElement('div'); inner.innerHTML = rendered;
-      det.appendChild(inner);
-      bub.appendChild(det);
-      wrap.appendChild(bub);
-    } else {
-      const lab = document.createElement('div'); lab.className='role'; lab.textContent = m.label||role;
-      bub.innerHTML = rendered;
-      wrap.appendChild(lab); wrap.appendChild(bub);
+  // Render a list of message dicts into a container. Sub-agent entries
+  // (kind:'agent') become a collapsed <details> whose interior is the same
+  // thread rendering, recursed one level deeper.
+  function renderThread(list, container){
+    for (const m of list){
+      if (m.kind === 'agent'){
+        const wrap = document.createElement('div'); wrap.className = 'msg agent';
+        const det = document.createElement('details');
+        const sum = document.createElement('summary'); sum.textContent = m.label||'sub-agent';
+        det.appendChild(sum);
+        const inner = document.createElement('div'); inner.className = 'agent-thread';
+        renderThread(m.messages||[], inner);
+        det.appendChild(inner);
+        wrap.appendChild(det);
+        container.appendChild(wrap);
+        continue;
+      }
+      const role = (m.role||'assistant');
+      const wrap = document.createElement('div'); wrap.className = 'msg '+role;
+      const bub = document.createElement('div'); bub.className='bubble';
+      const rendered = md.render(normMath(m.content||''));
+      if (m.kind === 'tool' || m.kind === 'thinking'){
+        const det = document.createElement('details');
+        const sum = document.createElement('summary'); sum.textContent = m.label||role;
+        det.appendChild(sum);
+        const inner = document.createElement('div'); inner.innerHTML = rendered;
+        det.appendChild(inner);
+        bub.appendChild(det);
+        wrap.appendChild(bub);
+      } else {
+        const lab = document.createElement('div'); lab.className='role'; lab.textContent = m.label||role;
+        bub.innerHTML = rendered;
+        wrap.appendChild(lab); wrap.appendChild(bub);
+      }
+      container.appendChild(wrap);
     }
-    thread.appendChild(wrap);
   }
+  renderThread(data.messages, document.getElementById('thread'));
 </script>
 </body></html>
 """
 
 
-def format_session_html(session: SessionMeta, messages: list[Message]) -> str:
+def format_session_html(
+    session: SessionMeta,
+    messages: list[Message],
+    subagents: list[tuple[SubagentMeta, list[Message]]] | None = None,
+) -> str:
     """Render a session + messages as a self-contained HTML document.
 
     Markdown, syntax highlighting, and LaTeX math are rendered client-side by
     vendored JS/CSS inlined into the document, so the output is a single
     ``.html`` file that works offline from ``file://``. ``messages`` should
     already be filtered (tools/thinking) by the caller.
+
+    When ``subagents`` is given (Claude sub-agent threads), each renders as a
+    collapsed ``kind: "agent"`` block spliced into the thread at its spawn
+    point (see :func:`_compose_thread`); its interior should already be
+    filtered by the caller.
     """
     title = f"{session.provider.value} · {session.id[:8]}"
 
@@ -268,7 +397,7 @@ def format_session_html(session: SessionMeta, messages: list[Message]) -> str:
         "project_path": session.project_path,
         "model": session.model,
         "timestamp": session.timestamp.isoformat(),
-        "messages": _html_messages(messages),
+        "messages": _compose_thread(messages, subagents),
     }
     # Escape "</" so the embedded JSON can't terminate the <script> early.
     data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")

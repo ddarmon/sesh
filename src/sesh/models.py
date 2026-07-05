@@ -54,6 +54,26 @@ class SessionMeta:
     output_tokens: int | None = None             # Total output across all turns
     cumulative_input_tokens: int | None = None   # Sum of all turns' inputs
     host: str | None = None  # Set in aggregation mode
+    subagent_count: int = 0  # Claude sub-agent transcripts (cheap directory count)
+
+
+@dataclass
+class SubagentMeta:
+    """Metadata for a Claude Code sub-agent (Task/Agent) transcript.
+
+    Pairs with ``list[Message]`` (loaded on demand by the provider) rather
+    than carrying loaded messages itself.
+    """
+
+    agent_id: str
+    file_path: str
+    description: str | None = None
+    agent_type: str | None = None
+    is_fork: bool = False
+    tool_use_id: str | None = None
+    first_timestamp: datetime | None = None
+    message_count: int = 0
+    output_tokens: int | None = None
 
 
 @dataclass
@@ -77,6 +97,7 @@ class SearchResult:
     matched_line: str
     file_path: str
     host: str | None = None  # Set in aggregation mode
+    agent_id: str | None = None  # Set when the hit is inside a Claude sub-agent file
 
 
 def filter_messages(

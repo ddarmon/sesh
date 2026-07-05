@@ -279,6 +279,38 @@ def _extract_codex_session_id(file_path: str) -> str:
     return matches[-1] if matches else stem
 
 
+def _is_claude_agent_file(file_path: str) -> bool:
+    """True when the basename is a Claude sub-agent transcript (agent-*.jsonl)."""
+    name = Path(file_path).name
+    return name.startswith("agent-") and name.endswith(".jsonl")
+
+
+def _agent_id_from_filename(file_path: str) -> str:
+    """Derive the agent id from an `agent-{id}.jsonl` filename (stem minus prefix)."""
+    stem = Path(file_path).stem  # e.g. "agent-abc123"
+    if stem.startswith("agent-"):
+        return stem[len("agent-"):]
+    return ""
+
+
+def _agent_parent_session_from_path(fp: Path) -> str:
+    """Recover the parent sessionId from the current sub-agent layout.
+
+    Current layout: ``{project}/{sessionId}/subagents/agent-*.jsonl`` — the
+    grandparent directory name is the parent session id. The legacy layout
+    ``{project}/subagents/agent-*.jsonl`` puts the encoded project dir there
+    instead (it sits directly under ``projects``), so it is excluded.
+    """
+    parents = fp.parents
+    if (
+        fp.parent.name == "subagents"
+        and len(parents) >= 3
+        and parents[2].name != "projects"
+    ):
+        return parents[1].name
+    return ""
+
+
 def _decode_cursor_projects_path(encoded: str, *, validate_locally: bool = True) -> str:
     """Reverse the Cursor path encoding: 'Users-foo-bar' -> '/Users/foo/bar'.
 
@@ -879,6 +911,22 @@ def _search_one_host(
                     else:
                         session_id = _extract_codex_session_id(file_path)
 
+                # Claude sub-agent transcripts (agent-*.jsonl): the record's
+                # sessionId is the PARENT session — attribute the hit there and
+                # tag agent_id so downstream knows it's a "phantom" sub-agent
+                # match. Prefer the record's own agentId; fall back to filename.
+                agent_id: str | None = None
+                if provider == Provider.CLAUDE and _is_claude_agent_file(file_path):
+                    aid = ((entry.get("agentId") or "") if entry else "")
+                    agent_id = (aid or _agent_id_from_filename(file_path)) or None
+                    # A leading fork-context-ref record carries no sessionId
+                    # but a parentSessionId; and older forks none at all, so
+                    # derive the parent id from the current-layout directory.
+                    if not session_id and entry:
+                        session_id = entry.get("parentSessionId", "") or ""
+                    if not session_id:
+                        session_id = _agent_parent_session_from_path(Path(file_path))
+
                 # Deduplicate by session — skip cwd lookup and content
                 # extraction for matches we've already seen.
                 dedup_key = f"{session_id}:{file_path}" if session_id else file_path
@@ -952,6 +1000,7 @@ def _search_one_host(
                     matched_line=display_text,
                     file_path=file_path,
                     host=roots.host,
+                    agent_id=agent_id,
                 ))
 
     # Cursor search: transcripts (.txt) and store.db files

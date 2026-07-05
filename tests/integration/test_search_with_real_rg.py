@@ -39,6 +39,173 @@ def test_ripgrep_search_finds_claude_jsonl(tmp_search_dirs) -> None:
     assert any(r.provider is Provider.CLAUDE and r.session_id == "claude-1" for r in results)
 
 
+def _agent_record(
+    *,
+    session_id: str | None,
+    agent_id: str,
+    text: str,
+    cwd: str = "/Users/me/repo",
+    parent_session_id: str | None = None,
+) -> dict:
+    """A realistic Claude sub-agent JSONL record carrying the parent sessionId."""
+    rec: dict = {
+        "agentId": agent_id,
+        "isSidechain": True,
+        "timestamp": "2026-01-01T00:00:00Z",
+        "cwd": cwd,
+        "message": {"role": "user", "content": text},
+    }
+    if session_id is not None:
+        rec["sessionId"] = session_id
+    if parent_session_id is not None:
+        rec["parentSessionId"] = parent_session_id
+    return rec
+
+
+def test_ripgrep_search_agent_file_current_layout(tmp_search_dirs) -> None:
+    """A hit only inside a current-layout agent file is attributed to the
+    parent sessionId and tagged with the agent_id."""
+    _require_rg()
+    parent = "parent-sess-1"
+    agent_file = (
+        tmp_search_dirs["claude_projects"]
+        / "-Users-me-repo"
+        / parent
+        / "subagents"
+        / "agent-abc123.jsonl"
+    )
+    write_jsonl(
+        agent_file,
+        [_agent_record(session_id=parent, agent_id="abc123", text="Needle token in subagent")],
+    )
+
+    results = search.ripgrep_search("needle token")
+    hits = [r for r in results if r.provider is Provider.CLAUDE and r.agent_id]
+    assert len(hits) == 1
+    assert hits[0].session_id == parent
+    assert hits[0].agent_id == "abc123"
+    assert hits[0].project_path == "/Users/me/repo"
+
+
+def test_ripgrep_search_agent_file_legacy_layout(tmp_search_dirs) -> None:
+    """Legacy {project}/subagents/agent-*.jsonl hits resolve via the record's
+    own sessionId and still carry agent_id."""
+    _require_rg()
+    parent = "parent-sess-2"
+    agent_file = (
+        tmp_search_dirs["claude_projects"]
+        / "-Users-me-repo"
+        / "subagents"
+        / "agent-leg99.jsonl"
+    )
+    write_jsonl(
+        agent_file,
+        [_agent_record(session_id=parent, agent_id="leg99", text="Needle token legacy subagent")],
+    )
+
+    results = search.ripgrep_search("needle token")
+    hits = [r for r in results if r.provider is Provider.CLAUDE and r.agent_id]
+    assert len(hits) == 1
+    assert hits[0].session_id == parent
+    assert hits[0].agent_id == "leg99"
+
+
+def test_ripgrep_search_agent_file_fork_context_ref(tmp_search_dirs) -> None:
+    """A matched line with no sessionId but a parentSessionId resolves the
+    parent via parentSessionId."""
+    _require_rg()
+    agent_file = (
+        tmp_search_dirs["claude_projects"]
+        / "-Users-me-repo"
+        / "some-dir"
+        / "subagents"
+        / "agent-fork1.jsonl"
+    )
+    write_jsonl(
+        agent_file,
+        [
+            _agent_record(
+                session_id=None,
+                agent_id="fork1",
+                text="Needle token in fork ref",
+                parent_session_id="parent-fork",
+            )
+        ],
+    )
+
+    results = search.ripgrep_search("needle token")
+    hits = [r for r in results if r.provider is Provider.CLAUDE and r.agent_id]
+    assert len(hits) == 1
+    assert hits[0].session_id == "parent-fork"
+    assert hits[0].agent_id == "fork1"
+
+
+def test_ripgrep_search_agent_file_parent_from_directory(tmp_search_dirs) -> None:
+    """A matched line with neither sessionId nor parentSessionId derives the
+    parent id from the current-layout grandparent directory name."""
+    _require_rg()
+    parent = "dir-derived-parent"
+    agent_file = (
+        tmp_search_dirs["claude_projects"]
+        / "-Users-me-repo"
+        / parent
+        / "subagents"
+        / "agent-nodir.jsonl"
+    )
+    write_jsonl(
+        agent_file,
+        [_agent_record(session_id=None, agent_id="nodir", text="Needle token no ids")],
+    )
+
+    results = search.ripgrep_search("needle token")
+    hits = [r for r in results if r.provider is Provider.CLAUDE and r.agent_id]
+    assert len(hits) == 1
+    assert hits[0].session_id == parent
+    assert hits[0].agent_id == "nodir"
+
+
+def test_ripgrep_search_main_session_has_no_agent_id(tmp_search_dirs) -> None:
+    """A normal main-session Claude match leaves agent_id None."""
+    _require_rg()
+    claude_file = tmp_search_dirs["claude_projects"] / "-Users-me-repo" / "main.jsonl"
+    write_jsonl(
+        claude_file,
+        [
+            {
+                "sessionId": "main-1",
+                "cwd": "/Users/me/repo",
+                "message": {"role": "user", "content": "Needle token in main session"},
+            }
+        ],
+    )
+
+    results = search.ripgrep_search("needle token")
+    hits = [r for r in results if r.session_id == "main-1"]
+    assert len(hits) == 1
+    assert hits[0].agent_id is None
+
+
+def test_ripgrep_search_multiple_agent_files_one_session(tmp_search_dirs) -> None:
+    """Distinct sub-agent files of one session yield distinct rows."""
+    _require_rg()
+    parent = "multi-parent"
+    base = tmp_search_dirs["claude_projects"] / "-Users-me-repo" / parent / "subagents"
+    write_jsonl(
+        base / "agent-one.jsonl",
+        [_agent_record(session_id=parent, agent_id="one", text="Needle token from agent one")],
+    )
+    write_jsonl(
+        base / "agent-two.jsonl",
+        [_agent_record(session_id=parent, agent_id="two", text="Needle token from agent two")],
+    )
+
+    results = search.ripgrep_search("needle token")
+    hits = [r for r in results if r.provider is Provider.CLAUDE and r.agent_id]
+    assert {r.agent_id for r in hits} == {"one", "two"}
+    assert all(r.session_id == parent for r in hits)
+    assert len(hits) == 2
+
+
 def test_ripgrep_search_finds_codex_jsonl(tmp_search_dirs) -> None:
     """Real rg binary finds a query term inside a Codex JSONL fixture."""
     _require_rg()

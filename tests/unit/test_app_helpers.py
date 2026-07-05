@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sesh.app import SeshApp, _MODEL_SHORT, _compact_tokens, _format_duration, _relative_time, _short_model_name
-from sesh.models import MoveReport, Provider, SearchResult
-from tests.helpers import make_session
+from sesh.app import (
+    SeshApp,
+    _MODEL_SHORT,
+    _compact_tokens,
+    _format_duration,
+    _relative_time,
+    _short_model_name,
+    splice_subagent_threads,
+)
+from sesh.models import Message, MoveReport, Provider, SearchResult, SubagentMeta
+from tests.helpers import make_message, make_session
 
 
 def setup_function() -> None:
@@ -339,3 +347,166 @@ def test_sort_options_include_tokens_mode() -> None:
     app = SeshApp()
 
     assert app.sort_options == ["date", "name", "messages", "tokens", "timeline"]
+
+
+def _at(hour: int, minute: int) -> datetime:
+    return datetime(2025, 1, 1, hour, minute, tzinfo=timezone.utc)
+
+
+def _sub(agent_id: str, ts: datetime | None) -> tuple[SubagentMeta, list[Message]]:
+    meta = SubagentMeta(
+        agent_id=agent_id,
+        file_path=f"/tmp/agent-{agent_id}.jsonl",
+        description=f"desc-{agent_id}",
+        agent_type="fork",
+        first_timestamp=ts,
+        message_count=3,
+    )
+    return meta, [make_message(content=f"interior-{agent_id}")]
+
+
+def test_splice_no_subagents_returns_messages_only() -> None:
+    """With no sub-agents, every item is a ('message', ...) in order."""
+    msgs = [make_message(content="a", timestamp=_at(10, 0))]
+    out = splice_subagent_threads(msgs, [])
+    assert out == [("message", msgs[0])]
+
+
+def test_splice_anchors_before_first_later_message() -> None:
+    """A sub-agent is inserted before the first message with a later timestamp."""
+    m0 = make_message(content="m0", timestamp=_at(10, 0))
+    m1 = make_message(content="m1", timestamp=_at(10, 30))
+    sub = _sub("x", _at(10, 15))
+
+    out = splice_subagent_threads([m0, m1], [sub])
+
+    kinds = [k for k, _ in out]
+    assert kinds == ["message", "agent", "message"]
+    assert out[1][1][0] is sub[0]
+
+
+def test_splice_appends_when_later_than_all_messages() -> None:
+    """A sub-agent later than every message is appended at the end."""
+    m0 = make_message(content="m0", timestamp=_at(10, 0))
+    sub = _sub("x", _at(11, 0))
+
+    out = splice_subagent_threads([m0], [sub])
+
+    assert [k for k, _ in out] == ["message", "agent"]
+
+
+def test_splice_no_timestamp_goes_trailing() -> None:
+    """A sub-agent with no first_timestamp lands in the trailing section."""
+    m0 = make_message(content="m0", timestamp=_at(10, 0))
+    sub = _sub("x", None)
+
+    out = splice_subagent_threads([m0], [sub])
+
+    assert [k for k, _ in out] == ["message", "agent"]
+    assert out[1][1][0] is sub[0]
+
+
+def test_splice_multiple_ordered_by_anchor() -> None:
+    """Multiple sub-agents interleave at their respective anchor points."""
+    m0 = make_message(content="m0", timestamp=_at(10, 0))
+    m1 = make_message(content="m1", timestamp=_at(12, 0))
+    early = _sub("early", _at(9, 0))     # before m0
+    mid = _sub("mid", _at(11, 0))        # between m0 and m1
+
+    out = splice_subagent_threads([m0, m1], [mid, early])
+
+    assert [k for k, _ in out] == ["agent", "message", "agent", "message"]
+    assert out[0][1][0] is early[0]
+    assert out[2][1][0] is mid[0]
+
+
+def test_format_status_suffix_agents_flag() -> None:
+    """The show_agents flag adds the Agents:ON suffix."""
+    app = SeshApp()
+    app._show_agents = True
+    assert "Agents:ON" in app._format_status_suffix()
+
+
+def test_session_label_shows_subagent_badge() -> None:
+    """A session with sub-agents gets a ⑂N suffix in its tree label."""
+    app = SeshApp()
+    session = make_session(id="s1", subagent_count=3, summary="do a thing")
+    label = app._session_label(session)
+    assert "⑂3" in label
+
+
+def test_session_label_no_badge_when_zero() -> None:
+    """Sessions without sub-agents carry no ⑂ marker."""
+    app = SeshApp()
+    session = make_session(id="s1", subagent_count=0, summary="do a thing")
+    assert "⑂" not in app._session_label(session)
+
+
+def test_splice_mixed_naive_and_aware_timestamps() -> None:
+    """[finding 2] Splicing must not crash when a message timestamp came from a
+    no-offset (naive-source) stamp and the sub-agent's from a Z stamp."""
+    from sesh.providers.claude import _parse_timestamp
+
+    m0 = make_message(content="early", timestamp=_parse_timestamp("2025-01-01T10:00:00"))
+    m1 = make_message(content="late", timestamp=_parse_timestamp("2025-01-01T12:00:00Z"))
+    sub = _sub("x", _parse_timestamp("2025-01-01T11:00:00Z"))
+
+    out = splice_subagent_threads([m0, m1], [sub])  # must not raise
+    assert [k for k, _ in out] == ["message", "agent", "message"]
+
+
+def test_agents_override_for_selection() -> None:
+    """[finding 8] Only a ⑂ search hit (agent_id set) triggers the auto-show."""
+    hit = SearchResult(
+        session_id="s2", project_path="/repo", provider=Provider.CLAUDE,
+        matched_line="agent hit", file_path="/x/subagents/agent-a.jsonl", agent_id="a",
+    )
+    plain = SearchResult(
+        session_id="s1", project_path="/repo", provider=Provider.CLAUDE,
+        matched_line="plain", file_path="/x/s1.jsonl",
+    )
+    assert SeshApp._agents_override_for_selection(hit) is True
+    assert SeshApp._agents_override_for_selection(plain) is False
+    assert SeshApp._agents_override_for_selection(make_session(id="s1")) is False
+
+
+def test_agents_visible_reflects_override_without_persisting() -> None:
+    """[finding 8] The override reveals agents without flipping show_agents."""
+    app = SeshApp()
+    app._show_agents = False
+    app._agents_override = True
+    assert app._agents_visible is True
+    # AUTO hint shows in the status suffix while the pref stays off.
+    assert "Agents:AUTO" in app._format_status_suffix()
+    assert app._show_agents is False
+
+    app._agents_override = False
+    assert app._agents_visible is False
+    assert "Agents:AUTO" not in app._format_status_suffix()
+
+
+def test_write_message_indents_markdown_assistant_body() -> None:
+    """[finding 6] A sub-agent assistant Markdown body is padded by the indent."""
+    from rich.markdown import Markdown
+    from rich.padding import Padding
+
+    app = SeshApp()
+    writes: list[object] = []
+
+    class _FakeView:
+        def write(self, renderable):
+            writes.append(renderable)
+
+    msg = make_message(role="assistant", content="# Heading\n\nbody",
+                       content_type="text")
+    # Indented (sub-agent interior): the Markdown renderable is wrapped in
+    # Padding with a left offset equal to the indent width.
+    app._write_message(_FakeView(), msg, "", indent="  ")
+    pads = [w for w in writes if isinstance(w, Padding)]
+    assert pads and pads[0].left == 2
+
+    # No indent (main thread): the Markdown renderable is written bare.
+    writes.clear()
+    app._write_message(_FakeView(), msg, "", indent="")
+    assert any(isinstance(w, Markdown) for w in writes)
+    assert not any(isinstance(w, Padding) for w in writes)

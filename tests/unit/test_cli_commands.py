@@ -145,8 +145,33 @@ def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
             "matched_line": "needle",
             "file_path": "/tmp/x.jsonl",
             "host": None,
+            "agent_id": None,
         }
     ]
+
+
+def test_cmd_search_emits_agent_id(monkeypatch, capsys) -> None:
+    """A sub-agent hit surfaces its agent_id in the JSON output."""
+    import sesh.search as search_mod
+
+    monkeypatch.setattr(
+        search_mod,
+        "ripgrep_search",
+        lambda q, aggregation_root=None, **_kw: [
+            SearchResult(
+                session_id="parent-1",
+                provider=Provider.CLAUDE,
+                project_path="/repo",
+                matched_line="needle",
+                file_path="/tmp/parent-1/subagents/agent-xyz.jsonl",
+                agent_id="xyz",
+            )
+        ],
+    )
+    cli.cmd_search(_ns(query="needle"))
+    out = json.loads(capsys.readouterr().out)
+    assert out[0]["session_id"] == "parent-1"
+    assert out[0]["agent_id"] == "xyz"
 
 
 def test_cmd_search_passes_aggregation_root(monkeypatch, capsys, tmp_path) -> None:
@@ -184,6 +209,7 @@ def test_cmd_search_passes_aggregation_root(monkeypatch, capsys, tmp_path) -> No
             "matched_line": "needle",
             "file_path": str(tmp_path / "laptop" / ".claude" / "a.jsonl"),
             "host": "laptop",
+            "agent_id": None,
         }
     ]
 
@@ -1844,3 +1870,283 @@ def test_cmd_export_file_nonclaude_provider_rejected(capsys, tmp_path) -> None:
         cli.cmd_export(_ns(session_id=None, file=str(loose), provider="codex"))
     assert exc.value.code == 1
     assert "only Claude" in capsys.readouterr().err
+
+
+# --- sub-agent (Task/Agent) view/export plumbing -------------------------
+
+def _agent_records(session_id, agent_id, *, user_text="agent kickoff", with_tool=False):
+    recs = [
+        {
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "isSidechain": True,
+            "timestamp": "2025-01-01T00:30:00Z",
+            "uuid": "au1",
+            "parentUuid": None,
+            "message": {"role": "user", "content": user_text},
+        },
+        {
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "isSidechain": True,
+            "timestamp": "2025-01-01T00:30:05Z",
+            "uuid": "au2",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "nested reply text"}],
+                "usage": {"input_tokens": 10, "output_tokens": 7},
+            },
+        },
+    ]
+    if with_tool:
+        recs.append({
+            "sessionId": session_id,
+            "agentId": agent_id,
+            "isSidechain": True,
+            "timestamp": "2025-01-01T00:30:06Z",
+            "uuid": "au3",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "InteriorTool",
+                     "input": {"q": "x"}},
+                ],
+            },
+        })
+    return recs
+
+
+def _make_subagent_session(tmp_path, *, session_id="sess-A", with_tool=False,
+                           sidecar=True, agent_id="ag-1"):
+    """Write a current-layout Claude project with one sub-agent; return session."""
+    import json as _json
+
+    project_dir = tmp_path / "proj"
+    (project_dir).mkdir(parents=True, exist_ok=True)
+    # Main session file.
+    main = project_dir / "main.jsonl"
+    with open(main, "w") as f:
+        f.write(_json.dumps({
+            "sessionId": session_id,
+            "timestamp": "2025-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "please investigate"},
+        }) + "\n")
+    # Current-layout sub-agent.
+    agent_file = project_dir / session_id / "subagents" / f"agent-{agent_id}.jsonl"
+    agent_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(agent_file, "w") as f:
+        for rec in _agent_records(session_id, agent_id, with_tool=with_tool):
+            f.write(_json.dumps(rec) + "\n")
+    if sidecar:
+        sc = agent_file.parent / (agent_file.stem + ".meta.json")
+        sc.write_text(_json.dumps({
+            "agentType": "Explore",
+            "isFork": True,
+            "description": "Investigate the layout",
+            "toolUseId": "toolu_777",
+        }))
+    session = make_session(
+        id=session_id, provider=Provider.CLAUDE, source_path=str(project_dir),
+        timestamp=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    )
+    main_messages = [
+        make_message(role="user", content="please investigate",
+                     timestamp=datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)),
+    ]
+    return session, main_messages
+
+
+def test_cmd_view_includes_subagent_block(monkeypatch, capsys, tmp_cache_dir, tmp_path) -> None:
+    """'sesh view' embeds a kind:'agent' payload entry with nested messages."""
+    session, messages = _make_subagent_session(tmp_path)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id=session.id)]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: None)
+
+    cli.cmd_view(_ns(session_id=session.id, provider=None, include_tools=False,
+                     include_thinking=False, full=False, no_open=True, no_agents=False))
+
+    from pathlib import Path as _P
+    content = _P(capsys.readouterr().out.strip()).read_text(encoding="utf-8")
+    assert '"kind": "agent"' in content or '"kind":"agent"' in content
+    assert "Investigate the layout" in content
+    assert "nested reply text" in content
+
+
+def test_cmd_view_no_agents_suppresses_block(monkeypatch, capsys, tmp_cache_dir, tmp_path) -> None:
+    """--no-agents drops the sub-agent block from the rendered view."""
+    session, messages = _make_subagent_session(tmp_path)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id=session.id)]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: None)
+
+    cli.cmd_view(_ns(session_id=session.id, provider=None, include_tools=False,
+                     include_thinking=False, full=False, no_open=True, no_agents=True))
+
+    from pathlib import Path as _P
+    content = _P(capsys.readouterr().out.strip()).read_text(encoding="utf-8")
+    assert "Investigate the layout" not in content
+    assert "nested reply text" not in content
+
+
+def test_cmd_export_markdown_gains_subagent_section(monkeypatch, capsys, tmp_path) -> None:
+    """Markdown export appends a '## Sub-agent:' section."""
+    session, messages = _make_subagent_session(tmp_path)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id=session.id)]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    cli.cmd_export(_ns(session_id=session.id, provider=None, output_format="md",
+                       output=None, include_tools=False, include_thinking=False,
+                       full=False, no_agents=False))
+    out = capsys.readouterr().out
+    assert "## Sub-agent: Investigate the layout (ag-1)" in out
+    assert "**Type:** Explore" in out
+    assert "nested reply text" in out
+
+
+def test_cmd_export_json_gains_subagents_array(monkeypatch, capsys, tmp_path) -> None:
+    """JSON export gains a 'subagents' array with per-agent metadata + messages."""
+    session, messages = _make_subagent_session(tmp_path)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id=session.id)]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    cli.cmd_export(_ns(session_id=session.id, provider=None, output_format="json",
+                       output=None, include_tools=False, include_thinking=False,
+                       full=False, no_agents=False))
+    out = json.loads(capsys.readouterr().out)
+    assert "subagents" in out
+    assert len(out["subagents"]) == 1
+    ag = out["subagents"][0]
+    assert ag["agent_id"] == "ag-1"
+    assert ag["description"] == "Investigate the layout"
+    assert ag["agent_type"] == "Explore"
+    assert ag["is_fork"] is True
+    assert ag["tool_use_id"] == "toolu_777"
+    assert ag["message_count"] == 2
+    assert any(m["content"] == "nested reply text" for m in ag["messages"])
+
+
+def test_cmd_export_json_subagent_interior_tools_gated(monkeypatch, capsys, tmp_path) -> None:
+    """Interior tool messages appear in the sub-agent only with --include-tools."""
+    session, messages = _make_subagent_session(tmp_path, with_tool=True)
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id=session.id)]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    def _run(include_tools):
+        cli.cmd_export(_ns(session_id=session.id, provider=None, output_format="json",
+                           output=None, include_tools=include_tools,
+                           include_thinking=False, full=False, no_agents=False))
+        return json.loads(capsys.readouterr().out)
+
+    without = _run(False)
+    assert not any(
+        m.get("tool_name") == "InteriorTool"
+        for m in without["subagents"][0]["messages"]
+    )
+    withtools = _run(True)
+    assert any(
+        m.get("tool_name") == "InteriorTool"
+        for m in withtools["subagents"][0]["messages"]
+    )
+
+
+def test_cmd_export_json_malformed_agent_file_does_not_crash(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    """[finding 3] A malformed-but-valid-JSON agent line never bricks export."""
+    session, messages = _make_subagent_session(tmp_path, sidecar=False)
+    # Corrupt the agent file: prepend a bare array (valid JSON, not an object)
+    # and a record whose message is a string. Pre-fix these raised AttributeError.
+    agent_file = tmp_path / "proj" / session.id / "subagents" / "agent-ag-1.jsonl"
+    original = agent_file.read_text()
+    agent_file.write_text(
+        "[]\n"
+        + json.dumps({"sessionId": session.id, "message": "not a dict"}) + "\n"
+        + original
+    )
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id=session.id)]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    # Must not raise; the well-formed interior still comes through.
+    cli.cmd_export(_ns(session_id=session.id, provider=None, output_format="json",
+                       output=None, include_tools=False, include_thinking=False,
+                       full=False, no_agents=False))
+    out = json.loads(capsys.readouterr().out)
+    assert len(out["subagents"]) == 1
+    assert any(m["content"] == "nested reply text" for m in out["subagents"][0]["messages"])
+
+
+def test_resolve_subagents_skips_when_loader_raises(monkeypatch) -> None:
+    """[finding 3] A load failure is swallowed, returning no sub-agents."""
+    session = make_session(id="s-guard", provider=Provider.CLAUDE, source_path="/p")
+
+    class _Boom:
+        def load_subagents(self, _session):
+            raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(cli, "_provider_for_session", lambda *a, **k: _Boom())
+    out = cli._resolve_subagents(
+        session, _ns(no_agents=False), include_tools=False, include_thinking=False
+    )
+    assert out == []
+
+
+def test_cmd_export_json_nonclaude_has_no_subagents(monkeypatch, capsys) -> None:
+    """Non-Claude sessions never get a subagents array."""
+    session = make_session(id="cx", provider=Provider.CODEX)
+    messages = [make_message(role="user", content="hi")]
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="cx")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    cli.cmd_export(_ns(session_id="cx", provider=None, output_format="json",
+                       output=None, include_tools=False, include_thinking=False,
+                       full=False, no_agents=False))
+    out = json.loads(capsys.readouterr().out)
+    assert "subagents" not in out
+
+
+def test_cmd_export_json_claude_without_subagents_unchanged(monkeypatch, capsys) -> None:
+    """A Claude session with no sub-agent files gets no subagents array."""
+    session = make_session(id="c-none", provider=Provider.CLAUDE, source_path=None)
+    messages = [make_message(role="user", content="hi")]
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="c-none")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, messages))
+
+    cli.cmd_export(_ns(session_id="c-none", provider=None, output_format="json",
+                       output=None, include_tools=False, include_thinking=False,
+                       full=False, no_agents=False))
+    out = json.loads(capsys.readouterr().out)
+    assert "subagents" not in out
+
+
+def test_cmd_view_file_picks_up_layout_a_subagents(monkeypatch, capsys, tmp_cache_dir, tmp_path) -> None:
+    """--file loose path discovers current-layout sub-agents beside the file."""
+    import json as _json
+
+    session_id = "loose-A"
+    loose = tmp_path / "archived.jsonl"
+    with open(loose, "w") as f:
+        f.write(_json.dumps({
+            "sessionId": session_id,
+            "cwd": "/Users/me/proj",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "message": {"role": "user", "content": "please investigate"},
+        }) + "\n")
+    agent_file = tmp_path / session_id / "subagents" / "agent-la.jsonl"
+    agent_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(agent_file, "w") as f:
+        for rec in _agent_records(session_id, "la"):
+            f.write(_json.dumps(rec) + "\n")
+    (agent_file.parent / (agent_file.stem + ".meta.json")).write_text(
+        _json.dumps({"agentType": "Task", "description": "Loose sub-agent work"})
+    )
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: None)
+
+    cli.cmd_view(_ns(session_id=None, file=str(loose), provider=None,
+                     include_tools=False, include_thinking=False, full=False,
+                     no_open=True, no_agents=False))
+
+    from pathlib import Path as _P
+    content = _P(capsys.readouterr().out.strip()).read_text(encoding="utf-8")
+    assert "Loose sub-agent work" in content
+    assert "nested reply text" in content

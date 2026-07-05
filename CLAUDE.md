@@ -166,15 +166,71 @@ If the CLI binary isn't on PATH, the status bar shows an error.
 Press `t` to toggle tool call/result messages in the message viewer.
 Press `T` (shift-t) to toggle thinking/reasoning blocks. Both are hidden
 by default. The status bar shows `Tools:ON` / `Think:ON` when active.
-Press `F` (shift-f) to toggle fullscreen mode for the message pane; the
-status bar shows `Full:ON` when active. Press `?` to open the keyboard
-shortcuts help modal (press `?` or Escape again to close).
+Press `a` to toggle Claude sub-agent threads (see below); the status bar
+shows `Agents:ON` when active. Press `F` (shift-f) to toggle fullscreen
+mode for the message pane; the status bar shows `Full:ON` when active.
+Press `?` to open the keyboard shortcuts help modal (press `?` or Escape
+again to close).
 
 CLI equivalents: `--include-tools`, `--include-thinking`, `--full`
-(both) on the `messages` and `export` subcommands. These toggles, along
-with the provider filter and sort mode, persist across launches in
-`~/.config/sesh/preferences.json` by default (or
+(both) on the `messages` and `export` subcommands; `--no-agents` on
+`view`/`export` suppresses sub-agent sections. These toggles (including
+`show_agents`), along with the provider filter and sort mode, persist
+across launches in `~/.config/sesh/preferences.json` by default (or
 `$XDG_CONFIG_HOME/sesh/preferences.json`) (managed by `preferences.py`).
+
+## Claude sub-agent transcripts
+
+Claude Code writes each sub-agent (Task/Agent tool) run to a separate
+`agent-{id}.jsonl` file. Only the Claude provider handles these.
+
+-   **Discovery API** (`providers/claude.py`): `discover_subagents(session)`
+    returns `SubagentMeta` list across three on-disk layouts — current
+    per-session `{project}/{sessionId}/subagents/agent-*.jsonl` (with an
+    optional `agent-{id}.meta.json` sidecar for type/fork/description/
+    toolUseId), legacy `{project}/subagents/agent-*.jsonl`, and oldest
+    `{project}/agent-*.jsonl` (the last two attribute a file to a session
+    by the internal parent `sessionId`, probed cheaply from the file head —
+    a non-matching legacy file is skipped without a full read). Agent-file
+    parsing is defensive (non-dict lines / string `message` / non-dict
+    `usage` are skipped) and never filters by `sessionId` (an agent file is
+    a single-thread transcript, so forks with no internal `sessionId` still
+    load). All id-derived filesystem paths are gated on a traversal-safe id.
+    `count_subagents` is a cheap directory glob (current layout only, no
+    file reads) used to populate
+    `SessionMeta.subagent_count` during `_parse_sessions` — discovery
+    stays lazy, so no agent files are read during index refresh.
+-   **Rendering**: sub-agents are turns, not tool calls. `format_session_html`
+    / `format_session_markdown` splice each thread in at its spawn timestamp
+    (`export._compose_thread`); the TUI message pane does the same via the
+    pure `app.splice_subagent_threads` helper (anchor before the first
+    visible main-thread message with a later timestamp, else trailing).
+    Loading is single-pass and lazy: the provider's
+    `load_subagents(session)` reads each agent file once, building meta +
+    messages together (`discover_subagents` shares that parse for the
+    meta-only path). The TUI renders the main thread immediately on select
+    and defers ALL agent-file I/O until the `a` toggle first reveals them
+    (`_load_subagents` runs in a worker, then re-renders); a large session
+    never blocks on agent parsing while agents are hidden. The collapsed
+    block shows regardless of tool/thinking toggles; those toggles govern
+    the interior. Tree labels get a `⑂N` badge.
+-   **Search attribution**: `SearchResult.agent_id` is set for hits inside
+    an `agent-*.jsonl`; the hit is attributed to the parent session, marked
+    `⑂` in TUI search rows, and carried in `sesh search` JSON. `sesh sessions`
+    JSON carries `subagent_count`. Opening a `⑂` search hit while sub-agents
+    are hidden sets a session-scoped auto-show override (`_agents_override`,
+    not persisted; status bar `Agents:AUTO`) so the matched interior renders;
+    the override clears when another session is selected.
+-   **Delete/move hygiene**: `delete_session` removes the per-session sidecar
+    dir plus legacy agent files matching the session's parent id;
+    `move_project` rewrites `cwd` inside agent files across all three layouts.
+-   **Cache caveat**: the sessions-cache directory fingerprint only globs
+    top-level `*.jsonl`, so agent files added under `{sessionId}/subagents/`
+    without touching a top-level file would not invalidate the cached
+    `subagent_count`. In normal operation the parent transcript is appended
+    when a sub-agent spawns, so the badge refreshes. Folding sub-agent output
+    tokens into `sesh stats` is deferred (it would require reading agent files
+    during discovery, breaking the lazy-discovery constraint).
 
 ## Token usage
 
@@ -370,8 +426,8 @@ the index, then query it.
 | `sesh delete <id\|last> [--provider NAME] [--force] [--dry-run]`                                          | Delete a session by ID, or the most recent with `last` |
 | `sesh clean <query> [--force] [--dry-run]`                                                                | Delete sessions matching a search query  |
 | `sesh resume <id\|last> [--provider NAME]`                                                                | Resume a session in its provider's CLI   |
-| `sesh export <id\|last> [--provider NAME] [--format md/json/html] [-o FILE] [--include-tools] [--include-thinking] [--full]` | Export a session to Markdown, JSON, or HTML |
-| `sesh view <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--no-open]` | Render a session as HTML and open it in the browser |
+| `sesh export <id\|last> [--provider NAME] [--format md/json/html] [-o FILE] [--include-tools] [--include-thinking] [--full] [--no-agents]` | Export a session to Markdown, JSON, or HTML |
+| `sesh view <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--no-agents] [--no-open]` | Render a session as HTML and open it in the browser |
 | `sesh move <old> <new> [--metadata-only] [--dry-run]`                                                     | Move project path and update metadata    |
 | `sesh snapshot save`                                                                                      | Capture Terminal.app tabs (macOS only)   |
 | `sesh snapshot list`                                                                                      | List stored snapshots                    |
