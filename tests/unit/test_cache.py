@@ -28,10 +28,27 @@ def test_session_serialization_roundtrip(tmp_cache_dir) -> None:
         input_tokens=15000,
         output_tokens=3000,
         cumulative_input_tokens=150000,
+        subagent_count=4,
     )
     payload = cache._session_to_dict(session)
+    assert payload["subagent_count"] == 4
     rebuilt = cache._dict_to_session(payload)
     assert rebuilt == session
+    assert rebuilt.subagent_count == 4
+
+
+def test_dict_to_session_missing_subagent_count_defaults_zero(tmp_cache_dir) -> None:
+    """Stale cache entries without subagent_count default to 0, not a crash."""
+    session = cache._dict_to_session(
+        {
+            "id": "s1",
+            "project_path": "/p",
+            "provider": "claude",
+            "summary": "x",
+            "timestamp": "2025-01-01T00:00:00+00:00",
+        }
+    )
+    assert session.subagent_count == 0
 
 
 def test_dict_to_session_z_suffix(tmp_cache_dir) -> None:

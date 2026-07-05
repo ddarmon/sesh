@@ -13,6 +13,7 @@ DEFAULT_PREFERENCES = {
     "sort_mode": "date",
     "show_tools": False,
     "show_thinking": False,
+    "show_agents": False,
     "fullscreen": False,
 }
 
@@ -35,7 +36,7 @@ def _normalize_preferences(data: object) -> dict:
     if sort_mode in _VALID_SORT_MODES:
         prefs["sort_mode"] = sort_mode
 
-    for key in ("show_tools", "show_thinking", "fullscreen"):
+    for key in ("show_tools", "show_thinking", "show_agents", "fullscreen"):
         value = data.get(key)
         if isinstance(value, bool):
             prefs[key] = value

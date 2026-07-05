@@ -54,6 +54,7 @@ class SessionMeta:
     output_tokens: int | None = None             # Total output across all turns
     cumulative_input_tokens: int | None = None   # Sum of all turns' inputs
     host: str | None = None  # Set in aggregation mode
+    subagent_count: int = 0  # Claude sub-agent transcripts (cheap directory count)
 
 
 @dataclass

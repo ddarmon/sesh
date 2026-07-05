@@ -279,6 +279,7 @@ def cmd_sessions(args: argparse.Namespace) -> None:
             "output_tokens": s.get("output_tokens"),
             "cumulative_input_tokens": s.get("cumulative_input_tokens"),
             "host": s.get("host"),
+            "subagent_count": s.get("subagent_count", 0),
         })
 
     _json_out(out)

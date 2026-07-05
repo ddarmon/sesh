@@ -77,18 +77,26 @@ Presentation ("sub-agents are turns, not tool calls"):
   in TUI rows and carried in CLI JSON.
 - TUI: `a` toggle (persisted like `t`/`T`) splices collapsed sub-agent
   sections into the message pane at spawn timestamps; session tree
-  labels get a `⑂N` suffix; stats fold in sub-agent output tokens.
+  labels get a `⑂N` suffix. (Folding sub-agent output tokens into stats
+  is DEFERRED — see rollout item 3 — to keep discovery lazy.)
 - Hygiene: `delete_session` also removes `{project}/{sessionId}/`;
   `move_project` cwd rewrite covers agent files in all three layouts.
 
 ## Rollout order
 
 1. **Foundation** — models + `discover_subagents` + loading + hygiene
-   fixes + unit tests. (No user-visible change yet.)
+   fixes + unit tests. (No user-visible change yet.) **DONE.**
 2. **View/export** — HTML/md/json rendering + CLI flags. **Search
-   attribution** — parallel, disjoint files.
-3. **TUI** — `a` toggle, tree badges, search-row markers, stats.
-4. Full suite, README + CLAUDE.md docs, review.
+   attribution** — parallel, disjoint files. **DONE.**
+3. **TUI** — `a` toggle (persisted, `Agents:ON` status), tree `⑂N`
+   badges, search-row `⑂` markers, splice into the RichLog message pane,
+   `e` export includes sub-agents. **DONE.** README + CLAUDE.md docs
+   updated in this phase.
+   - **DEFERRED:** folding sub-agent output tokens into `sesh stats` (and
+     the `⑂N` badge already only counts the current layout). Doing so
+     would require reading agent files during discovery, violating the
+     lazy-discovery constraint (perf risk above). Left as future work.
+4. Full suite, review. (Docs folded into phase 3.)
 
 ## Risks
 

@@ -29,6 +29,7 @@ def _session_to_dict(s: SessionMeta) -> dict:
         "output_tokens": s.output_tokens,
         "cumulative_input_tokens": s.cumulative_input_tokens,
         "host": s.host,
+        "subagent_count": s.subagent_count,
     }
 
 
@@ -63,6 +64,7 @@ def _dict_to_session(d: dict) -> SessionMeta:
         output_tokens=d.get("output_tokens"),
         cumulative_input_tokens=d.get("cumulative_input_tokens"),
         host=d.get("host"),
+        subagent_count=d.get("subagent_count", 0),
     )
 
 

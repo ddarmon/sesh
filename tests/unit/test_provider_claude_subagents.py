@@ -262,6 +262,70 @@ def test_count_subagents_current_layout_only(tmp_path: Path) -> None:
     assert provider.count_subagents("missing", project_dir) == 0
 
 
+def test_parse_sessions_populates_subagent_count(tmp_path: Path) -> None:
+    """_parse_sessions counts current-layout sub-agents via a directory glob."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-count"
+    write_jsonl(
+        project_dir / f"{session_id}.jsonl",
+        [
+            {
+                "sessionId": session_id,
+                "cwd": "/Users/me/repo",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "uuid": "u1",
+                "parentUuid": None,
+                "message": {"role": "user", "content": "start"},
+            }
+        ],
+    )
+    subdir = project_dir / session_id / "subagents"
+    write_jsonl(subdir / "agent-1.jsonl", _agent_records(session_id, "1"))
+    write_jsonl(subdir / "agent-2.jsonl", _agent_records(session_id, "2"))
+
+    provider = claude.ClaudeProvider()
+    sessions = provider._parse_sessions(project_dir, "/Users/me/repo")
+
+    by_id = {s.id: s for s in sessions}
+    assert by_id[session_id].subagent_count == 2
+
+
+def test_get_sessions_subagent_count_survives_dir_cache(tmp_path: Path, tmp_cache_dir) -> None:
+    """subagent_count round-trips through the per-directory sessions cache."""
+    from sesh.cache import SessionCache
+
+    project_dir = tmp_path / "proj"
+    session_id = "sess-cache"
+    write_jsonl(
+        project_dir / f"{session_id}.jsonl",
+        [
+            {
+                "sessionId": session_id,
+                "cwd": "/Users/me/repo",
+                "timestamp": "2025-01-01T00:00:00Z",
+                "uuid": "u1",
+                "parentUuid": None,
+                "message": {"role": "user", "content": "start"},
+            }
+        ],
+    )
+    write_jsonl(
+        project_dir / session_id / "subagents" / "agent-1.jsonl",
+        _agent_records(session_id, "1"),
+    )
+
+    provider = claude.ClaudeProvider()
+    provider._path_to_dir["/Users/me/repo"] = project_dir
+    cache = SessionCache()
+
+    first = provider.get_sessions("/Users/me/repo", cache=cache)
+    assert {s.id: s.subagent_count for s in first}[session_id] == 1
+
+    # Second read comes from the cache; the field must survive serialization.
+    cached = provider.get_sessions("/Users/me/repo", cache=cache)
+    assert {s.id: s.subagent_count for s in cached}[session_id] == 1
+
+
 def test_delete_session_removes_sidecar_dir_and_legacy_files(tmp_path: Path) -> None:
     """delete_session drops the sidecar dir and legacy agent files for the session."""
     project_dir = tmp_path / "proj"

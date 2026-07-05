@@ -1023,6 +1023,7 @@ class ClaudeProvider(SessionProvider):
                 output_tokens=s["output_tokens"] or None,
                 cumulative_input_tokens=s["cumulative_input_tokens"] or None,
                 host=self.host,
+                subagent_count=self.count_subagents(sid, project_dir),
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)
