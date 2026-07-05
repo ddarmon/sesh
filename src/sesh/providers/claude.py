@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import shutil
 import tempfile
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sesh.models import Message, MoveReport, Provider, SessionMeta, encode_claude_path
+from sesh.models import (
+    Message,
+    MoveReport,
+    Provider,
+    SessionMeta,
+    SubagentMeta,
+    encode_claude_path,
+)
 from sesh.providers import SessionProvider
 
 CLAUDE_DIR = Path.home() / ".claude"
@@ -286,6 +295,136 @@ def _rewrite_cwd_in_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> boo
     return True
 
 
+def _agent_id_from_path(path: Path) -> str:
+    """Extract the agent id from an ``agent-{id}.jsonl`` filename stem."""
+    stem = path.stem
+    return stem[len("agent-"):] if stem.startswith("agent-") else stem
+
+
+def _read_agent_sidecar(agent_file: Path) -> dict | None:
+    """Read the optional ``agent-{id}.meta.json`` sidecar next to an agent file.
+
+    Returns the parsed ``{agentType, isFork, description, toolUseId}`` dict, or
+    None when there is no sidecar (or it cannot be read/parsed).
+    """
+    sidecar = agent_file.parent / (agent_file.stem + ".meta.json")
+    try:
+        with open(sidecar) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _scan_agent_file(agent_file: Path) -> dict | None:
+    """Scan an ``agent-*.jsonl`` file for aggregate metadata.
+
+    Reads line-by-line, swallowing per-line JSON errors. Records without a
+    ``message`` field (e.g. ``fork-context-ref``) don't count toward
+    ``message_count`` but their ``sessionId`` is skipped only when absent.
+    Returns None on OSError; otherwise a dict with the internal (parent)
+    ``session_id``, ``message_count``, ``output_tokens``, earliest
+    ``first_timestamp``, and the ``first_user_text`` for description fallback.
+    """
+    session_id: str | None = None
+    message_count = 0
+    output_tokens = 0
+    first_ts: datetime | None = None
+    first_user_text: str | None = None
+
+    try:
+        with open(agent_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                sid = entry.get("sessionId")
+                if sid and session_id is None:
+                    session_id = sid
+
+                ts = entry.get("timestamp")
+                if ts:
+                    parsed = _parse_timestamp(ts)
+                    if first_ts is None or parsed < first_ts:
+                        first_ts = parsed
+
+                msg = entry.get("message")
+                if not msg:
+                    continue
+                message_count += 1
+
+                role = msg.get("role")
+                if role == "assistant":
+                    usage = msg.get("usage")
+                    if usage:
+                        output_tokens += usage.get("output_tokens", 0)
+                elif role == "user" and first_user_text is None:
+                    text = _extract_text(msg.get("content", ""))
+                    if text and not _is_system_message(text):
+                        first_user_text = text
+    except OSError:
+        return None
+
+    return {
+        "session_id": session_id,
+        "message_count": message_count,
+        "output_tokens": output_tokens,
+        "first_timestamp": first_ts,
+        "first_user_text": first_user_text,
+    }
+
+
+def _build_subagent_meta(
+    agent_file: Path,
+    sidecar_data: dict | None,
+    *,
+    require_session_id: str | None = None,
+) -> SubagentMeta | None:
+    """Build a :class:`SubagentMeta` from an agent file and optional sidecar.
+
+    When ``require_session_id`` is given (legacy layouts with no sidecar), the
+    file is included only if its internal ``sessionId`` matches. Description
+    falls back to the first user message text (first 80 chars) when the sidecar
+    has none.
+    """
+    scan = _scan_agent_file(agent_file)
+    if scan is None:
+        return None
+    if require_session_id is not None and scan["session_id"] != require_session_id:
+        return None
+
+    description = None
+    agent_type = None
+    is_fork = False
+    tool_use_id = None
+    if sidecar_data:
+        description = sidecar_data.get("description")
+        agent_type = sidecar_data.get("agentType")
+        is_fork = bool(sidecar_data.get("isFork", False))
+        tool_use_id = sidecar_data.get("toolUseId")
+
+    if not description and scan["first_user_text"]:
+        text = scan["first_user_text"]
+        description = text[:80] + "..." if len(text) > 80 else text
+
+    return SubagentMeta(
+        agent_id=_agent_id_from_path(agent_file),
+        file_path=str(agent_file),
+        description=description,
+        agent_type=agent_type,
+        is_fork=is_fork,
+        tool_use_id=tool_use_id,
+        first_timestamp=scan["first_timestamp"],
+        message_count=scan["message_count"],
+        output_tokens=scan["output_tokens"] or None,
+    )
+
+
 class ClaudeProvider(SessionProvider):
     """Provider for Claude Code sessions."""
 
@@ -487,6 +626,93 @@ class ClaudeProvider(SessionProvider):
         messages.sort(key=lambda m: m.timestamp or datetime.min.replace(tzinfo=timezone.utc))
         return messages
 
+    def discover_subagents(self, session: SessionMeta) -> list[SubagentMeta]:
+        """Discover sub-agent transcripts for a session across all three layouts.
+
+        Layout (a) — current: ``{project}/{id}/subagents/agent-*.jsonl`` with an
+        optional ``agent-{id}.meta.json`` sidecar. Layouts (b) legacy
+        ``{project}/subagents/agent-*.jsonl`` and (c) oldest
+        ``{project}/agent-*.jsonl`` have no sidecar, so a file is included only
+        when its internal (parent) ``sessionId`` matches this session.
+
+        Discovery is lazy and swallows parse errors per file; results are sorted
+        by ``first_timestamp``.
+        """
+        if not session.source_path:
+            return []
+
+        source = Path(session.source_path)
+        results: list[SubagentMeta] = []
+
+        # source_path is the project dir (indexed sessions) or a loose file.
+        if source.is_dir():
+            project_dir = source
+
+            # (a) current layout: per-session subagents dir, sidecar honored.
+            current = project_dir / session.id / "subagents"
+            if current.is_dir():
+                for agent_file in sorted(current.glob("agent-*.jsonl")):
+                    meta = _build_subagent_meta(
+                        agent_file, _read_agent_sidecar(agent_file)
+                    )
+                    if meta:
+                        results.append(meta)
+
+            # (b) legacy: project-level subagents dir, internal sessionId probe.
+            legacy = project_dir / "subagents"
+            if legacy.is_dir():
+                for agent_file in sorted(legacy.glob("agent-*.jsonl")):
+                    meta = _build_subagent_meta(
+                        agent_file, None, require_session_id=session.id
+                    )
+                    if meta:
+                        results.append(meta)
+
+            # (c) oldest: agent files loose in the project dir, same probe.
+            for agent_file in sorted(project_dir.glob("agent-*.jsonl")):
+                meta = _build_subagent_meta(
+                    agent_file, None, require_session_id=session.id
+                )
+                if meta:
+                    results.append(meta)
+        else:
+            # Loose/archived transcript: only the current per-session layout,
+            # relative to the file's own directory. Keep it simple.
+            current = source.parent / session.id / "subagents"
+            if current.is_dir():
+                for agent_file in sorted(current.glob("agent-*.jsonl")):
+                    meta = _build_subagent_meta(
+                        agent_file, _read_agent_sidecar(agent_file)
+                    )
+                    if meta:
+                        results.append(meta)
+
+        results.sort(
+            key=lambda m: m.first_timestamp
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        return results
+
+    def get_subagent_messages(
+        self, session: SessionMeta, meta: SubagentMeta
+    ) -> list[Message]:
+        """Load parsed messages for one sub-agent transcript.
+
+        Reuses :meth:`get_messages` by pointing a shallow copy of the session at
+        the agent file; the agent records carry the parent ``sessionId`` so the
+        existing filter passes, and records without a ``message`` field (e.g.
+        ``fork-context-ref``) are skipped by that code path.
+        """
+        agent_session = dataclasses.replace(session, source_path=meta.file_path)
+        return self.get_messages(agent_session)
+
+    def count_subagents(self, session_id: str, project_dir: Path) -> int:
+        """Cheap sub-agent count for tree badges — current layout only, no reads."""
+        subdir = project_dir / session_id / "subagents"
+        if not subdir.is_dir():
+            return 0
+        return len(list(subdir.glob("agent-*.jsonl")))
+
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a Claude session by removing its lines from JSONL files."""
         source_dir = Path(session.source_path)
@@ -533,6 +759,24 @@ class ClaudeProvider(SessionProvider):
             except OSError:
                 continue
 
+        # Remove the per-session sidecar dir (subagents + tool-results).
+        sidecar_dir = source_dir / session.id
+        if sidecar_dir.is_dir():
+            shutil.rmtree(sidecar_dir, ignore_errors=True)
+
+        # Remove legacy agent files (layouts b/c) belonging to this session,
+        # identified by their internal (parent) sessionId.
+        for base in (source_dir / "subagents", source_dir):
+            if not base.is_dir():
+                continue
+            for agent_file in base.glob("agent-*.jsonl"):
+                scan = _scan_agent_file(agent_file)
+                if scan and scan["session_id"] == session.id:
+                    try:
+                        agent_file.unlink()
+                    except OSError:
+                        continue
+
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Update Claude metadata when a project path changes."""
         projects_dir = self._projects_dir
@@ -573,6 +817,16 @@ class ClaudeProvider(SessionProvider):
                     continue
                 if _rewrite_cwd_in_jsonl(jsonl_file, old_path, new_path):
                     files_modified += 1
+
+            # Also rewrite cwd inside sub-agent files across all three layouts.
+            for pattern in (
+                "agent-*.jsonl",
+                "subagents/*.jsonl",
+                "*/subagents/*.jsonl",
+            ):
+                for jsonl_file in target_dir.glob(pattern):
+                    if _rewrite_cwd_in_jsonl(jsonl_file, old_path, new_path):
+                        files_modified += 1
         except OSError as exc:
             return MoveReport(
                 provider=Provider.CLAUDE,

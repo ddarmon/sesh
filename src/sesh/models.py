@@ -57,6 +57,25 @@ class SessionMeta:
 
 
 @dataclass
+class SubagentMeta:
+    """Metadata for a Claude Code sub-agent (Task/Agent) transcript.
+
+    Pairs with ``list[Message]`` (loaded on demand by the provider) rather
+    than carrying loaded messages itself.
+    """
+
+    agent_id: str
+    file_path: str
+    description: str | None = None
+    agent_type: str | None = None
+    is_fork: bool = False
+    tool_use_id: str | None = None
+    first_timestamp: datetime | None = None
+    message_count: int = 0
+    output_tokens: int | None = None
+
+
+@dataclass
 class Message:
     role: str  # "user", "assistant", "system", "tool"
     content: str
