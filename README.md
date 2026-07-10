@@ -242,10 +242,10 @@ sticky reader toolbar. The toolbar always offers a **transcript find**
 box with a match counter and previous/next controls (`Enter` /
 `Shift+Enter` in the box; `/` focuses it) and a message count; find and
 anchors work from `file://` with no server. Every message and sub-agent
-block has a stable DOM anchor: hover it to reveal **Copy** (the full
-message) and **Link** (its `#anchor` URL) actions, and opening a
-`#anchor` link highlights and scrolls to that message. Expanded
-`<details>` state is preserved by message identity across live updates.
+block has a stable DOM anchor: opening a `#anchor` link highlights,
+reveals, and scrolls to that message. (For full-body copy, use the TUI's
+`C` or `sesh export`.) Expanded `<details>` state is preserved by message
+identity across live updates.
 
 From the TUI, press `v` to open the selected session in the same browser
 viewer while honoring the current tools, thinking, and sub-agent toggles.

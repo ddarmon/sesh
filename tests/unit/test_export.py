@@ -503,21 +503,49 @@ def test_html_details_open_state_restored_by_stable_key() -> None:
     assert "|| index" not in script
 
 
-def test_html_copy_controls_present_for_every_card() -> None:
-    """Each card gets copy-message and copy-link actions with a clipboard fallback."""
+def test_html_live_rerender_reapplies_anchor_without_reforcing() -> None:
+    """[finding 6] A live poll re-marks the anchored card but never re-reveals it.
+
+    `applyPayload` must NOT call `applyHash` (which force-opens the anchored
+    card's <details> and scrolls); it uses `reapplyAnchor`, which only re-adds
+    the highlight class. Full reveal stays reserved for initial load / hashchange.
+    """
+    out = format_session_html(
+        make_session(id="s-anchor-live", provider=Provider.CLAUDE),
+        [make_message(content="x")],
+        live_api="./api/session",
+    )
+    script = _viewer_script(out)
+    # The reveal-only helper exists and is what applyPayload calls.
+    assert "function reapplyAnchor()" in script
+    assert "reapplyAnchor();" in script
+    # applyPayload no longer force-reveals on every poll.
+    assert "applyHash(false)" not in script
+    # reapplyAnchor re-adds the highlight class but does not open <details>
+    # (revealElement) or scroll.
+    anchor_body = script.split("function reapplyAnchor()", 1)[1].split("}", 1)[0]
+    assert "anchor-active" in anchor_body
+    assert "revealElement" not in anchor_body
+    assert "scrollIntoView" not in anchor_body
+    # Initial load and real hashchange still perform the full reveal.
+    assert "applyHash(true)" in script
+    assert 'addEventListener(\'hashchange\', ()=> applyHash(true))' in script
+
+
+def test_html_no_per_card_copy_or_link_chrome() -> None:
+    """Per-card hover Copy/Link buttons were removed; only the anchors remain."""
     out = format_session_html(
         make_session(id="s-copy", provider=Provider.CLAUDE),
         [make_message(content="hello")],
     )
     script = _viewer_script(out)
-    assert "buildActions" in script
-    assert "msg-actions" in script
-    # Copy-message copies the full content; copy-link copies the #anchor URL.
-    assert "copyText(getText())" in script
-    assert "linkFor(key)" in script
-    # Clipboard uses navigator.clipboard in secure contexts with a fallback.
-    assert "navigator.clipboard" in script
-    assert "execCommand('copy')" in script
+    # No per-message action chrome or its link machinery survives.
+    assert "buildActions" not in script
+    assert "msg-actions" not in out
+    assert "linkFor" not in script
+    # Anchors stay: every card still becomes an addressable #fragment target.
+    assert "wrap.id = key" in script
+    assert "anchor-active" in script
 
 
 def test_html_static_export_hides_live_only_controls() -> None:
@@ -575,14 +603,14 @@ def test_html_find_navigation_is_present() -> None:
     # Reveal a hidden match by opening its own + ancestor <details>.
     assert "revealElement" in script
     # Find matches against the body-only match map, not the card's textContent,
-    # so the hover Copy/Link button labels are never counted as hits.
+    # so only the message body is ever counted as a hit.
     assert "matchText.get(el.dataset.key)" in script
     assert "el.textContent" not in script
 
 
 def test_html_find_scopes_matching_to_message_body() -> None:
-    """[finding 5] The find map is populated with body-only text per key, so the
-    hover Copy/Link chrome cannot be matched."""
+    """[finding 5] The find map is populated with body-only text per key, so only
+    the message body (never rendered chrome) can be matched."""
     out = format_session_html(
         make_session(id="s-find2", provider=Provider.CLAUDE),
         [make_message(content="body text")],
@@ -590,14 +618,14 @@ def test_html_find_scopes_matching_to_message_body() -> None:
     script = _viewer_script(out)
     # A per-key map holds the lowercased body used for matching.
     assert "const matchText = new Map();" in script
-    assert "matchText.set(key, copyBody(m).toLowerCase())" in script
+    assert "matchText.set(key, matchSource(m).toLowerCase())" in script
 
 
-def test_html_tool_message_copy_field_is_raw_body() -> None:
-    """[finding 4] Tool messages carry a `copy` field with the raw (unfenced)
+def test_html_tool_message_match_field_is_raw_body() -> None:
+    """[finding 4] Tool messages carry a `match` field with the raw (unfenced)
     body matching the TUI, while `content` keeps the render-time code fence."""
     out = format_session_html(
-        make_session(id="s-copyfield", provider=Provider.CLAUDE),
+        make_session(id="s-matchfield", provider=Provider.CLAUDE),
         [
             make_message(
                 role="assistant",
@@ -620,27 +648,27 @@ def test_html_tool_message_copy_field_is_raw_body() -> None:
     tool_use = next(m for m in payload["messages"] if "(call)" in m["label"])
     tool_res = next(m for m in payload["messages"] if "(result)" in m["label"])
     text_msg = next(m for m in payload["messages"] if m["label"].startswith("Assistant"))
-    # Raw body in `copy`, fenced body in `content`.
-    assert tool_use["copy"] == '{"cmd": "ls"}'
+    # Raw body in `match`, fenced body in `content`.
+    assert tool_use["match"] == '{"cmd": "ls"}'
     assert tool_use["content"] == '```json\n{"cmd": "ls"}\n```'
-    assert tool_res["copy"] == "file-a\nfile-b"
+    assert tool_res["match"] == "file-a\nfile-b"
     assert tool_res["content"] == "```\nfile-a\nfile-b\n```"
-    # Plain text messages don't carry a redundant `copy` field.
-    assert "copy" not in text_msg
+    # Plain text messages don't carry a redundant `match` field.
+    assert "match" not in text_msg
 
 
-def test_html_copy_button_prefers_copy_over_content() -> None:
-    """[finding 4] The clipboard helper prefers m.copy (raw) over m.content."""
+def test_html_find_source_prefers_match_over_content() -> None:
+    """[finding 4] The find match-source helper prefers m.match (raw) over
+    m.content, so a query hits the same unfenced bytes the TUI would."""
     out = format_session_html(
-        make_session(id="s-copyprefer", provider=Provider.CLAUDE),
+        make_session(id="s-matchprefer", provider=Provider.CLAUDE),
         [make_message(content="hi")],
     )
     script = _viewer_script(out)
-    # A shared helper resolves the raw body, preferring `copy` when present.
-    assert "function copyBody(m){ return (m.copy != null ? m.copy : m.content) || ''; }" in script
-    # Both the per-message Copy button and the sub-agent aggregate use it.
-    assert "buildActions(key, ()=> copyBody(m))" in script
-    assert "copyBody(x)" in script
+    # A shared helper resolves the raw body, preferring `match` when present.
+    assert "function matchSource(m){ return (m.match != null ? m.match : m.content) || ''; }" in script
+    # The find map is populated from it.
+    assert "matchText.set(key, matchSource(m).toLowerCase())" in script
 
 
 def test_html_message_count_excludes_agent_containers() -> None:

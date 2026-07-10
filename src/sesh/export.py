@@ -215,11 +215,11 @@ def _message_display_dict(m: Message) -> dict:
     branching mirrors ``format_session_markdown``.
 
     Tool messages wrap their body in a Markdown code fence for *rendering*, so
-    for those an extra ``copy`` field carries the raw body (matching the TUI's
-    ``transcript_view.normalize_message`` semantics). The Copy button prefers
-    ``copy`` over ``content`` so the clipboard bytes agree between the two
-    readers. ``copy`` is emitted only when it differs from ``content`` to keep
-    the payload small.
+    for those an extra ``match`` field carries the raw unfenced body (matching
+    the TUI's ``transcript_view.normalize_message`` semantics). The transcript
+    find matches against ``match`` in preference to the fenced ``content`` so a
+    query hits the same text the TUI would. ``match`` is emitted only when it
+    differs from ``content`` to keep the payload small.
     """
     ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
 
@@ -233,7 +233,7 @@ def _message_display_dict(m: Message) -> dict:
             "label": f"{tool} (call){ts}",
             "kind": "tool",
             "content": f"```json\n{m.tool_input or ''}\n```",
-            "copy": m.tool_input or "",
+            "match": m.tool_input or "",
         }
 
     if m.content_type == "tool_result":
@@ -243,7 +243,7 @@ def _message_display_dict(m: Message) -> dict:
             "label": f"{tool} (result){ts}",
             "kind": "tool",
             "content": f"```\n{m.tool_output or ''}\n```",
-            "copy": m.tool_output or "",
+            "match": m.tool_output or "",
         }
 
     if m.role == "user":
@@ -358,13 +358,6 @@ _HTML_TEMPLATE = r"""<!doctype html>
   .agent > details[open] > summary { margin-bottom:10px; }
   .agent-thread { border-left:2px solid #8886; padding-left:16px; margin-left:4px; }
   .bubble > :first-child { margin-top:0; } .bubble > :last-child { margin-bottom:0; }
-  /* Unobtrusive per-message copy / link actions (shown on hover / focus). */
-  .msg-actions { position:absolute; top:0; right:0; display:flex; gap:4px;
-    opacity:0; transition:opacity .1s; }
-  .msg:hover > .msg-actions, .msg:focus-within > .msg-actions { opacity:1; }
-  .msg-actions .act { font-size:11px; padding:1px 7px; border:1px solid #8886;
-    border-radius:5px; background:#ffffffcc; color:inherit; cursor:pointer; font:inherit; }
-  @media (prefers-color-scheme: dark){ .msg-actions .act{ background:#161b22cc; } }
   /* Find matches and fragment anchor highlight. */
   .msg.match-hit > .bubble, .msg.match-hit > details { box-shadow:0 0 0 2px #f59e0b55; border-radius:10px; }
   .msg.match-active > .bubble, .msg.match-active > details { box-shadow:0 0 0 3px #f59e0b; border-radius:10px; }
@@ -436,51 +429,15 @@ __TOOLBAR__
     btn.textContent = label;
     window.setTimeout(()=>{ btn.textContent = prev; }, 1100);
   }
-  // Raw body a message copies to the clipboard. Tool messages carry a `copy`
-  // field with the unfenced body (matching the TUI); everything else copies its
-  // rendered-source `content`, so the two readers put identical bytes on the
-  // clipboard.
-  function copyBody(m){ return (m.copy != null ? m.copy : m.content) || ''; }
-  // Full plain-text of a sub-agent container: its interior messages joined.
-  function agentText(m){
-    return (m.messages||[]).map((x)=> (x.label ? x.label + '\n' : '') + copyBody(x)).join('\n\n');
-  }
-  function linkFor(key){
-    const base = (location.origin && location.origin !== 'null')
-      ? location.origin + location.pathname + location.search
-      : location.href.split('#')[0];
-    return base + '#' + key;
-  }
-  // Small copy-message / copy-link controls attached to every card.
-  function buildActions(key, getText){
-    const box = document.createElement('div'); box.className = 'msg-actions';
-    const copy = document.createElement('button');
-    copy.type = 'button'; copy.className = 'act'; copy.textContent = 'Copy';
-    copy.title = 'Copy full message';
-    copy.addEventListener('click', async (e)=>{
-      e.stopPropagation(); e.preventDefault();
-      const ok = await copyText(getText());
-      flash(copy, ok ? 'Copied' : 'Failed');
-    });
-    box.appendChild(copy);
-    if (key){
-      const link = document.createElement('button');
-      link.type = 'button'; link.className = 'act'; link.textContent = 'Link';
-      link.title = 'Copy link to this message';
-      link.addEventListener('click', async (e)=>{
-        e.stopPropagation(); e.preventDefault();
-        try { history.replaceState(null, '', '#' + key); } catch (err) {}
-        const ok = await copyText(linkFor(key));
-        flash(link, ok ? 'Copied' : 'Failed');
-      });
-      box.appendChild(link);
-    }
-    return box;
-  }
+  // Raw body used as the find-match source for a message. Tool messages carry a
+  // `match` field with the unfenced body (matching the TUI); everything else
+  // falls back to its rendered-source `content`. Find searches this text, not
+  // the fenced/rendered card, so a query hits the same bytes the TUI would.
+  function matchSource(m){ return (m.match != null ? m.match : m.content) || ''; }
 
   // Body-only match text per stable key (populated as cards are built). Find
-  // matches against this map, not the card's textContent, so the hover
-  // Copy/Link button labels never count as a hit.
+  // matches against this map, not the card's textContent, so chrome/labels are
+  // never counted as a hit.
   const matchText = new Map();
 
   // Build one message/agent node. The stable key becomes the DOM id (and the
@@ -491,7 +448,6 @@ __TOOLBAR__
     if (m.kind === 'agent'){
       const wrap = document.createElement('div'); wrap.className = 'msg agent';
       if (key){ wrap.id = key; wrap.dataset.key = key; }
-      wrap.appendChild(buildActions(key, ()=>agentText(m)));
       const det = document.createElement('details'); det.dataset.liveKey = key;
       const sum = document.createElement('summary'); sum.textContent = m.label||'sub-agent';
       det.appendChild(sum);
@@ -506,9 +462,8 @@ __TOOLBAR__
     const wrap = document.createElement('div'); wrap.className = 'msg '+role;
     if (key){ wrap.id = key; wrap.dataset.key = key; }
     // Record the body-only text (no header/chrome) for find matching, keyed by
-    // stable id, so searching never matches the hover Copy/Link button labels.
-    if (key) matchText.set(key, copyBody(m).toLowerCase());
-    wrap.appendChild(buildActions(key, ()=> copyBody(m)));
+    // stable id, so searching matches the message body only.
+    if (key) matchText.set(key, matchSource(m).toLowerCase());
     const bub = document.createElement('div'); bub.className='bubble';
     const rendered = md.render(normMath(m.content||''));
     if (m.kind === 'tool' || m.kind === 'thinking'){
@@ -650,17 +605,36 @@ __TOOLBAR__
   });
 
   // ---- Fragment anchor highlight ----
-  function applyHash(doScroll){
+  // Resolve the element the current #fragment points at (decoded, may be null).
+  function anchoredElement(){
     const raw = location.hash.slice(1);
-    if (!raw) return;
+    if (!raw) return null;
     let id;
     try { id = decodeURIComponent(raw); } catch (e) { id = raw; }
-    const el = document.getElementById(id);
+    return document.getElementById(id);
+  }
+  // Full navigation to a #fragment: force the target (and its ancestors) open,
+  // highlight it, and optionally scroll. Only ever driven by a real navigation
+  // — the initial load and genuine `hashchange` events — never by a live poll.
+  function applyHash(doScroll){
+    const el = anchoredElement();
     if (!el) return;
     document.querySelectorAll('.anchor-active').forEach((n)=> n.classList.remove('anchor-active'));
     revealElement(el);
     el.classList.add('anchor-active');
     if (doScroll) el.scrollIntoView({block:'center'});
+  }
+  // After a live rerender rebuilds every card, the anchored card is a fresh DOM
+  // node that has lost its highlight class. Re-apply the highlight so a
+  // fragment-linked card stays marked, but deliberately DO NOT re-open its
+  // <details> and DO NOT scroll: the reader may have collapsed or scrolled away
+  // since arriving, and only a real navigation should force reveal. This keeps
+  // the poll from perpetually re-opening/re-centering the anchored card.
+  function reapplyAnchor(){
+    const el = anchoredElement();
+    if (!el) return;
+    document.querySelectorAll('.anchor-active').forEach((n)=> n.classList.remove('anchor-active'));
+    el.classList.add('anchor-active');
   }
   window.addEventListener('hashchange', ()=> applyHash(true));
 
@@ -743,7 +717,8 @@ __TOOLBAR__
     }
     updateNewBadge();
     recomputeMatches();
-    applyHash(false);
+    // Re-mark (but never re-reveal/re-scroll) the anchored card after a rerender.
+    reapplyAnchor();
   }
 
   async function poll(manual){

@@ -364,9 +364,12 @@ unchanged tree costs only stats.
 The page has a details header (`format_meta_header_html`) and a **sticky
 reader toolbar** (`_toolbar_html`). Every message and sub-agent block
 carries a DOM `id` = its stable transcript key (see "Transcript reading
-and navigation"), so each has an `#anchor`, per-card hover **Copy** (full
-message) / **Link** (`#anchor` URL) actions, fragment highlight on
-load/`hashchange`, and open-`<details>` restoration keyed by identity.
+and navigation"), so each has an `#anchor`: fragment highlight + reveal on
+load/`hashchange`, and open-`<details>` restoration keyed by identity. (A
+live poll re-marks the anchored card via `reapplyAnchor` but never
+re-opens its `<details>` or scrolls — only a real navigation reveals.)
+There are no per-card copy/link buttons; full-body copy is covered by the
+TUI's `C` and `sesh export`.
 The toolbar's **transcript find** (input + `i / n` counter + prev/next,
 `/` focuses, `Enter`/`Shift+Enter` navigate) and message count render in
 **both** static and live documents and work from `file://` with no
