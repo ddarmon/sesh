@@ -9,6 +9,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -367,7 +368,6 @@ class HelpScreen(ModalScreen[None]):
                 [
                     ("f", "Cycle provider filter"),
                     ("s", "Cycle sort mode"),
-                    ("n", "Find in current messages"),
                     ("t", "Toggle tool messages"),
                     ("T", "Toggle thinking messages"),
                     ("a", "Toggle sub-agent threads"),
@@ -382,6 +382,16 @@ class HelpScreen(ModalScreen[None]):
                     ("↑/↓", "Move message selection (or j/k)"),
                     ("Enter", "Expand / collapse selected message"),
                     ("C", "Copy full selected message"),
+                ],
+            ),
+            (
+                "Find in transcript",
+                [
+                    ("n", "Open find / next match"),
+                    ("N", "Previous match"),
+                    ("Enter", "Next match (in find box)"),
+                    ("↑/↓", "Previous / next match (in find box)"),
+                    ("Esc", "Close find"),
                 ],
             ),
             (
@@ -819,15 +829,27 @@ class SeshApp(App):
         width: 1fr;
     }
 
-    #message-search {
+    #message-search-bar {
         display: none;
         dock: top;
         height: 3;
         padding: 0 1;
     }
 
-    #message-search.visible {
+    #message-search-bar.visible {
         display: block;
+    }
+
+    #message-search {
+        width: 1fr;
+    }
+
+    #message-find-count {
+        width: auto;
+        min-width: 10;
+        content-align: right middle;
+        color: $text-muted;
+        padding: 0 1;
     }
 
     #message-view {
@@ -866,6 +888,8 @@ class SeshApp(App):
         Binding("K", "prev_project", "Prev Proj", key_display="K"),
         Binding("b", "toggle_bookmark", "Bookmark"),
         Binding("n", "search_messages", "Find"),
+        Binding("N", "find_prev", "Find Prev", key_display="N", show=False),
+        Binding("shift+enter", "find_prev", "Find Prev", show=False),
         Binding("C", "copy_focused_message", "Copy Msg", key_display="C"),
         Binding("t", "toggle_tools", "Tools"),
         Binding("T", "toggle_thinking", "Thinking", key_display="T"),
@@ -934,7 +958,9 @@ class SeshApp(App):
         with Horizontal(id="main"):
             yield SessionTree("Sessions", id="session-tree")
             with Vertical(id="message-pane"):
-                yield Input(placeholder="Find in messages...", id="message-search")
+                with Horizontal(id="message-search-bar"):
+                    yield Input(placeholder="Find in messages...", id="message-search")
+                    yield Static("", id="message-find-count")
                 yield TranscriptView(id="message-view")
         yield Static("Loading...", id="status-bar")
 
@@ -1471,7 +1497,17 @@ class SeshApp(App):
         """UI thread: store the freshly loaded main thread and reset agent state."""
         self._current_subagents = []
         self._subagents_loaded = False
-        self._render_messages(messages, session, subagents=[])
+        # A new session starts with transcript find cleared so match state never
+        # bleeds across sessions.
+        self._reset_transcript_find()
+        self._render_messages(messages, session, subagents=[], highlight="")
+
+    def _reset_transcript_find(self) -> None:
+        """Hide the transcript-find bar and clear its query + counter."""
+        bar = self.query_one("#message-search-bar", Horizontal)
+        bar.remove_class("visible")
+        self.query_one("#message-search", Input).value = ""
+        self.query_one("#message-find-count", Static).update("")
 
     def _load_subagents(self, session: SessionMeta) -> None:
         """Worker-thread body: single-pass discover+load of sub-agent threads."""
@@ -1575,22 +1611,27 @@ class SeshApp(App):
         self,
         messages: list[Message],
         session: SessionMeta,
-        highlight: str = "",
+        highlight: str | None = None,
         subagents: list[tuple[SubagentMeta, list[Message]]] | None = None,
     ) -> None:
         """Render the transcript in the right pane.
 
         Builds stable, keyed :class:`~sesh.transcript.TranscriptItem` entries and
         hands them to the :class:`~sesh.transcript_view.TranscriptView`, which
-        preserves per-message expansion state (and the selection cursor) by
-        stable key across tool/thinking/agent toggles and live rerenders.
-        ``subagents`` (loaded off-thread) is stored so re-renders can splice
-        sub-agent threads without re-reading files; None keeps the stored ones.
+        preserves per-message expansion state, the selection cursor, and the
+        active find match by stable key across tool/thinking/agent toggles and
+        live rerenders. ``highlight`` defaults to the current transcript-find
+        term so a toggle/append rerender keeps the highlight and active match;
+        pass an explicit value to override. ``subagents`` (loaded off-thread) is
+        stored so re-renders can splice sub-agent threads without re-reading
+        files; None keeps the stored ones.
         """
         self._current_messages = messages
         self._current_session = session
         if subagents is not None:
             self._current_subagents = subagents
+        if highlight is None:
+            highlight = self._current_find_term()
 
         view = self.query_one("#message-view", TranscriptView)
         items = self._compose_transcript_items(messages)
@@ -1600,6 +1641,7 @@ class SeshApp(App):
             else "No messages found."
         )
         view.set_transcript(items, highlight=highlight, empty_message=empty_message)
+        self._update_find_count()
 
     def action_copy_focused_message(self) -> None:
         """Copy the complete body of the focused transcript message."""
@@ -1612,28 +1654,67 @@ class SeshApp(App):
         self._set_status("Message copied to clipboard")
 
     def action_search_messages(self) -> None:
-        """Toggle the message search input."""
+        """Open/focus transcript find; advance to the next hit if a query exists.
+
+        Unlike the old toggle, ``n`` never closes find (Escape does). When the
+        bar is already showing a query, ``n`` acts as "find next"; ``N`` /
+        :meth:`action_find_prev` goes backward.
+        """
+        bar = self.query_one("#message-search-bar", Horizontal)
         search = self.query_one("#message-search", Input)
-        if search.has_class("visible"):
-            search.remove_class("visible")
-            search.value = ""
-            self.query_one("#message-view", TranscriptView).set_highlight("")
+        if not bar.has_class("visible"):
+            bar.add_class("visible")
+        if search.value.strip():
+            self._find_next()
+            search.focus()
         else:
-            search.add_class("visible")
             search.focus()
 
+    def action_find_prev(self) -> None:
+        """Move to the previous transcript match (``N`` / ``Shift+Enter``)."""
+        search = self.query_one("#message-search", Input)
+        if not search.value.strip():
+            return
+        bar = self.query_one("#message-search-bar", Horizontal)
+        if not bar.has_class("visible"):
+            bar.add_class("visible")
+        self._find_prev()
+
+    def _find_next(self) -> None:
+        view = self.query_one("#message-view", TranscriptView)
+        view.find_next()
+        self._update_find_count()
+
+    def _find_prev(self) -> None:
+        view = self.query_one("#message-view", TranscriptView)
+        view.find_prev()
+        self._update_find_count()
+
+    def _update_find_count(self) -> None:
+        """Sync the ``i / n`` match counter from the transcript view."""
+        view = self.query_one("#message-view", TranscriptView)
+        self.query_one("#message-find-count", Static).update(view.find_label)
+
+    def _current_find_term(self) -> str:
+        """The active transcript-find term (empty when find is not showing)."""
+        bar = self.query_one("#message-search-bar", Horizontal)
+        if not bar.has_class("visible"):
+            return ""
+        return self.query_one("#message-search", Input).value
+
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Filter sessions as user types, or highlight in messages."""
+        """Filter sessions as user types, or drive transcript find in messages."""
         if event.input.id == "search-input":
             self._populate_tree(
                 filter_text=event.value,
                 provider_filter=self.current_filter,
             )
         elif event.input.id == "message-search":
-            self.query_one("#message-view", TranscriptView).set_highlight(event.value)
+            self.query_one("#message-view", TranscriptView).find(event.value)
+            self._update_find_count()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Full-text search on Enter."""
+        """Full-text search on Enter (session search); find-next in transcript find."""
         if event.input.id == "search-input" and event.value.strip():
             self.run_worker(
                 lambda: self._fulltext_search(event.value.strip()),
@@ -1641,6 +1722,27 @@ class SeshApp(App):
                 exclusive=True,
                 group="search",
             )
+        elif event.input.id == "message-search":
+            self._find_next()
+
+    def on_key(self, event: events.Key) -> None:
+        """Robust transcript-find navigation while the find input is focused.
+
+        ``Shift+Enter`` is not reliably delivered by every terminal, so
+        ``Up``/``Down`` (which the single-line find input does not otherwise use)
+        also navigate previous/next. ``Enter`` is left to ``on_input_submitted``.
+        """
+        focused = self.focused
+        if focused is None or focused.id != "message-search":
+            return
+        if event.key in ("shift+enter", "up"):
+            event.stop()
+            event.prevent_default()
+            self._find_prev()
+        elif event.key == "down":
+            event.stop()
+            event.prevent_default()
+            self._find_next()
 
     def _build_cwd_lookup(self) -> dict[tuple[str, str], str] | None:
         """Build a (session_id, provider) → project_path lookup from in-memory sessions."""
@@ -1694,12 +1796,17 @@ class SeshApp(App):
         self.query_one("#search-input", Input).focus()
 
     def action_clear_search(self) -> None:
-        # If message search is active, close it first
-        msg_search = self.query_one("#message-search", Input)
-        if msg_search.has_class("visible"):
-            msg_search.remove_class("visible")
+        # If transcript find is active, close it first (leaving the unrelated
+        # session-tree search state untouched) and restore focus to the pane.
+        bar = self.query_one("#message-search-bar", Horizontal)
+        if bar.has_class("visible"):
+            bar.remove_class("visible")
+            msg_search = self.query_one("#message-search", Input)
             msg_search.value = ""
-            self.query_one("#message-view", TranscriptView).set_highlight("")
+            view = self.query_one("#message-view", TranscriptView)
+            view.find("")
+            self._update_find_count()
+            view.focus()
             return
         search = self.query_one("#search-input", Input)
         search.value = ""

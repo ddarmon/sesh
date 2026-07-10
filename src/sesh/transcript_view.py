@@ -88,6 +88,169 @@ def find_match_spans(text: str, term: str) -> list[tuple[int, int]]:
     return spans
 
 
+@dataclass(frozen=True)
+class Match:
+    """One find hit: a stable card ``key`` and a ``(start, end)`` body span.
+
+    Spans are offsets into the card's **full** (uncollapsed) body, so a match
+    can point past a collapsed card's preview boundary; navigation expands the
+    card when it needs to surface such a hit.
+    """
+
+    key: str
+    start: int
+    end: int
+
+
+def _match_bodies(items: list[TranscriptItem]):
+    """Yield ``(key, full_body)`` for every matchable card in document order.
+
+    Sub-agent interiors are included (each under its own interior key) so hits
+    inside a collapsed sub-agent still count and can be revealed. Agent
+    container headers are not searched — only message bodies.
+    """
+    for item in items:
+        if item.kind == "agent":
+            for interior in item.interior:
+                assert interior.message is not None
+                _, _, body = normalize_message(interior.message)
+                yield interior.key, body
+        else:
+            assert item.message is not None
+            _, _, body = normalize_message(item.message)
+            yield item.key, body
+
+
+def compute_matches(items: list[TranscriptItem], term: str) -> list[Match]:
+    """Ordered ``Match`` list for *term* across full bodies of *items*.
+
+    Matching runs over complete bodies (not collapsed previews), so a hit past
+    a card's preview boundary is still found. Empty term yields ``[]``.
+    """
+    if not term:
+        return []
+    matches: list[Match] = []
+    for key, body in _match_bodies(items):
+        for start, end in find_match_spans(body, term):
+            matches.append(Match(key, start, end))
+    return matches
+
+
+class TranscriptFinder:
+    """Pure match-index model for transcript find navigation.
+
+    Holds an ordered ``Match`` list (one entry per span, so a card with three
+    hits contributes three matches) plus a 0-based active pointer. ``next`` /
+    ``prev`` wrap around. On recompute (a live append or rerender) the active
+    match is preserved **by stable key** — the same key's hit stays active even
+    though list positions shifted — and resets gracefully to no-active when the
+    matched card disappears. Free of any widget dependency so it is heavily
+    unit-testable.
+    """
+
+    def __init__(self) -> None:
+        self._term: str = ""
+        self._matches: list[Match] = []
+        self._active: int = -1
+
+    @property
+    def term(self) -> str:
+        return self._term
+
+    @property
+    def matches(self) -> list[Match]:
+        return list(self._matches)
+
+    @property
+    def count(self) -> int:
+        return len(self._matches)
+
+    @property
+    def active_index(self) -> int:
+        """0-based index of the active match, or ``-1`` when none is active."""
+        return self._active
+
+    @property
+    def active(self) -> Match | None:
+        if 0 <= self._active < len(self._matches):
+            return self._matches[self._active]
+        return None
+
+    @property
+    def active_key(self) -> str | None:
+        m = self.active
+        return m.key if m is not None else None
+
+    def position(self) -> tuple[int, int]:
+        """``(current_1based, total)``; current is ``0`` when nothing active."""
+        cur = self._active + 1 if self._active >= 0 else 0
+        return cur, len(self._matches)
+
+    def label(self) -> str:
+        """Human counter: ``""`` (no term), ``"No matches"``, or ``"3 / 17"``."""
+        if not self._term:
+            return ""
+        cur, total = self.position()
+        if total == 0:
+            return "No matches"
+        return f"{cur} / {total}"
+
+    def set_term(self, term: str, items: list[TranscriptItem]) -> None:
+        """Set the search *term* and recompute over *items*.
+
+        A genuine term change jumps the active pointer to the first match; a
+        no-op term (same string) preserves the active match by key.
+        """
+        changed = term != self._term
+        self._term = term
+        self._recompute(items, reset=changed)
+
+    def recompute(self, items: list[TranscriptItem]) -> None:
+        """Recompute with the current term (live append), preserving by key."""
+        self._recompute(items, reset=False)
+
+    def _recompute(self, items: list[TranscriptItem], *, reset: bool) -> None:
+        prev = self.active
+        self._matches = compute_matches(items, self._term)
+        if not self._matches:
+            self._active = -1
+            return
+        if reset:
+            self._active = 0
+            return
+        if prev is not None:
+            # Prefer the identical hit, then any hit sharing the stable key.
+            for i, m in enumerate(self._matches):
+                if m == prev:
+                    self._active = i
+                    return
+            for i, m in enumerate(self._matches):
+                if m.key == prev.key:
+                    self._active = i
+                    return
+        # Active card vanished (or none was active): reset gracefully.
+        self._active = -1
+
+    def next(self) -> Match | None:
+        """Advance to the next match with wraparound; ``None`` if no matches."""
+        if not self._matches:
+            self._active = -1
+            return None
+        self._active = 0 if self._active < 0 else (self._active + 1) % len(self._matches)
+        return self.active
+
+    def prev(self) -> Match | None:
+        """Step to the previous match with wraparound; ``None`` if no matches."""
+        if not self._matches:
+            self._active = -1
+            return None
+        if self._active < 0:
+            self._active = len(self._matches) - 1
+        else:
+            self._active = (self._active - 1) % len(self._matches)
+        return self.active
+
+
 def normalize_message(m: Message) -> tuple[str, str, str]:
     """Return ``(role_category, header, body)`` for one message.
 
@@ -332,6 +495,8 @@ class TranscriptView(VerticalScroll):
         self._placeholder: Static | None = None
         #: interior-message-key -> agent-container-key (for reveal_key)
         self._parent_of: dict[str, str] = {}
+        #: Pure find-navigation model over the composed items (Phase 3).
+        self._finder = TranscriptFinder()
 
     # ---- Public surface (also used by the Phase 3 find-navigation) ----------
 
@@ -380,6 +545,15 @@ class TranscriptView(VerticalScroll):
         live_keys = _all_keys(items)
         self._expanded &= live_keys
         self._rebuild(preferred_key=prev_key)
+        # Reconcile find state: a new highlight term jumps to its first match; an
+        # unchanged term (a live append / toggle rerender) preserves the active
+        # match by stable key. Repaint but do not steal scroll on a passive
+        # rerender — the active card keeps its distinct style if still visible.
+        if highlight != self._finder.term:
+            self._finder.set_term(highlight, items)
+        else:
+            self._finder.recompute(items)
+        self.set_active_match(self._finder.active_key)
 
     def set_highlight(self, term: str) -> None:
         """Update the find highlight on all cards in place (cheap)."""
@@ -409,6 +583,76 @@ class TranscriptView(VerticalScroll):
         idx = self._cards.index(card)
         self._set_cursor(idx)
         return True
+
+    def reveal_match(self, match: Match) -> bool:
+        """Surface a find hit: expand its container/card and scroll it into view.
+
+        Reveals the card for ``match.key`` (expanding a collapsed sub-agent
+        container if needed via :meth:`reveal_key`). When the hit falls beyond a
+        collapsed non-agent card's preview boundary, the card is expanded so the
+        matched text is actually visible. Returns True if the card exists.
+        """
+        if not self.reveal_key(match.key):
+            return False
+        card = self.card_for_key(match.key)
+        if card is None:
+            return False
+        if (
+            not card.is_agent
+            and match.start >= PREVIEW_CHARS
+            and match.key not in self._expanded
+        ):
+            self._expanded.add(match.key)
+            card.set_expanded(True)
+        return True
+
+    # ---- Find navigation (Phase 3) -----------------------------------------
+
+    @property
+    def find_position(self) -> tuple[int, int]:
+        """``(current_1based, total)`` of the find match index."""
+        return self._finder.position()
+
+    @property
+    def find_label(self) -> str:
+        """Human counter string (``""`` / ``"No matches"`` / ``"3 / 17"``)."""
+        return self._finder.label()
+
+    @property
+    def find_active_key(self) -> str | None:
+        return self._finder.active_key
+
+    def find(self, term: str) -> tuple[int, int]:
+        """Set the find *term*, recompute matches, and reveal the first hit.
+
+        Highlights all occurrences in place and (when the term changed) jumps to
+        the first match, expanding/scrolling as needed. Returns ``find_position``.
+        """
+        self.set_highlight(term)
+        self._finder.set_term(term, self._items)
+        self._apply_active_match()
+        return self._finder.position()
+
+    def find_next(self) -> tuple[int, int]:
+        """Advance to the next match (wraparound) and reveal it."""
+        self._finder.next()
+        self._apply_active_match()
+        return self._finder.position()
+
+    def find_prev(self) -> tuple[int, int]:
+        """Step to the previous match (wraparound) and reveal it."""
+        self._finder.prev()
+        self._apply_active_match()
+        return self._finder.position()
+
+    def _apply_active_match(self) -> None:
+        """Reveal + paint the finder's active match (or clear if none)."""
+        match = self._finder.active
+        if match is None:
+            self.set_active_match(None)
+            return
+        self.reveal_match(match)
+        self.set_active_match(match.key)
 
     # ---- Rendering / mounting ----------------------------------------------
 
