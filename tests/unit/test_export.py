@@ -348,3 +348,42 @@ def test_format_session_markdown_no_subagents_unchanged() -> None:
         session, messages, []
     )
     assert "Sub-agent" not in format_session_markdown(session, messages)
+
+
+def test_html_message_keys_stay_stable_when_rows_are_inserted() -> None:
+    session = make_session()
+    existing = make_message(
+        role="assistant",
+        content="",
+        content_type="tool_use",
+        tool_name="bash",
+        tool_input="pwd",
+        timestamp=None,
+    )
+    before = _extract_payload(format_session_html(session, [existing]))
+    after = _extract_payload(
+        format_session_html(
+            session,
+            [make_message(content="inserted", timestamp=None), existing],
+        )
+    )
+
+    assert before["messages"][0]["key"] == after["messages"][1]["key"]
+
+
+def test_format_session_html_embeds_live_configuration() -> None:
+    out = format_session_html(
+        make_session(),
+        [make_message(content="live")],
+        live_api="./api/session",
+        live_revision=7,
+        live_poll_ms=800,
+    )
+    payload = _extract_payload(out)
+    assert payload["live"] == {
+        "api": "./api/session",
+        "revision": 7,
+        "poll_ms": 800,
+    }
+    assert 'id="live-status"' in out
+    assert "window.setInterval" in out

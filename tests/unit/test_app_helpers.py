@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from sesh.app import (
     SeshApp,
     _MODEL_SHORT,
@@ -17,6 +19,23 @@ from tests.helpers import make_message, make_session
 
 def setup_function() -> None:
     _MODEL_SHORT.clear()
+
+
+def test_validate_live_source_rejects_partial_gemini_json(tmp_path) -> None:
+    source = tmp_path / "session.json"
+    source.write_text('{"messages": [')
+    session = make_session(provider=Provider.GEMINI, source_path=str(source))
+
+    with pytest.raises(ValueError):
+        SeshApp._validate_live_source(session)
+
+
+def test_validate_live_source_accepts_complete_gemini_json(tmp_path) -> None:
+    source = tmp_path / "session.json"
+    source.write_text('{"messages": []}')
+    session = make_session(provider=Provider.GEMINI, source_path=str(source))
+
+    SeshApp._validate_live_source(session)
 
 
 def test_claude_opus() -> None:

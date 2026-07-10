@@ -385,6 +385,8 @@ class HelpScreen(ModalScreen[None]):
                 "Session Actions",
                 [
                     ("o", "Open / resume session"),
+                    ("v", "Open session in browser"),
+                    ("L", "Toggle live browser view"),
                     ("b", "Toggle bookmark"),
                     ("e", "Export session to clipboard"),
                     ("y", "Copy resume command"),
@@ -849,6 +851,8 @@ class SeshApp(App):
         Binding("escape", "clear_search", "Clear", show=False),
         Binding("f", "cycle_filter", "Filter"),
         Binding("o", "open_session", "Open"),
+        Binding("v", "view_browser", "Browser"),
+        Binding("L", "toggle_live_view", "Live", key_display="L"),
         Binding("e", "export_session", "Export"),
         Binding("d", "delete_session", "Delete"),
         Binding("m", "move_project", "Move"),
@@ -895,6 +899,10 @@ class SeshApp(App):
         self._fullscreen: bool = False
         self._status_base: str = "Loading..."
         self._aggregation_root: Path | None = aggregation_root
+        self._live_server = None
+        self._live_session_key: tuple[str, str] | None = None
+        self._live_starting_key: tuple[str, str] | None = None
+        self._live_generation = 0
 
         prefs = load_preferences()
         provider_pref = prefs.get("provider_filter")
@@ -1310,6 +1318,8 @@ class SeshApp(App):
             parts.append("Agents:ON")
         elif self._agents_override:
             parts.append("Agents:AUTO")
+        if self._live_server is not None and self._live_server.running:
+            parts.append("Live:ON")
         return (" \u00b7 " + " ".join(parts)) if parts else ""
 
     def _set_status(self, text: str) -> None:
@@ -1814,6 +1824,247 @@ class SeshApp(App):
         cmd_str = " ".join(cmd_args)
         self._copy_text(cmd_str)
         self._set_status(f"Copied: {cmd_str}")
+
+    def _selected_session(self) -> SessionMeta | None:
+        """Return the tree's selected session, including full-text results."""
+        tree = self.query_one("#session-tree", SessionTree)
+        node = tree.cursor_node
+        if node is None:
+            return None
+        if isinstance(node.data, SessionMeta):
+            return node.data
+        if isinstance(node.data, SearchResult):
+            return self._session_from_search_result(node.data)
+        return None
+
+    def _browser_snapshot(
+        self,
+        session: SessionMeta,
+        *,
+        include_agents_override: bool = False,
+    ) -> tuple[
+        SessionMeta,
+        list[Message],
+        list[tuple[SubagentMeta, list[Message]]] | None,
+    ]:
+        """Load one complete, filtered snapshot for static or live HTML."""
+        provider = self._provider_for(session)
+        if provider is None:
+            raise RuntimeError(f"No provider for {session.provider.value}")
+        messages = filter_messages(
+            provider.get_messages(session),
+            include_tools=self._show_tools,
+            include_thinking=self._show_thinking,
+        )
+        subagents = None
+        if (self._show_agents or include_agents_override) and hasattr(
+            provider, "load_subagents"
+        ):
+            loaded = provider.load_subagents(session)
+            subagents = [
+                (
+                    meta,
+                    filter_messages(
+                        interior,
+                        include_tools=self._show_tools,
+                        include_thinking=self._show_thinking,
+                    ),
+                )
+                for meta, interior in loaded
+            ]
+        return session, messages, subagents
+
+    def action_view_browser(self) -> None:
+        """Open the selected session in the stable, static HTML viewer."""
+        session = self._selected_session()
+        if session is None:
+            self._set_status("Select a session to open in the browser")
+            return
+        include_agents = self._agents_visible
+        self._set_status("Rendering browser view...")
+        self.run_worker(
+            lambda: self._open_static_browser_view(session, include_agents),
+            thread=True,
+            exclusive=True,
+            group="browser-view",
+        )
+
+    def _open_static_browser_view(
+        self, session: SessionMeta, include_agents: bool
+    ) -> None:
+        """Worker body for :meth:`action_view_browser`."""
+        import webbrowser
+
+        from sesh.export import format_session_html
+        from sesh.viewcache import sweep_view_cache, write_view
+
+        try:
+            loaded_session, messages, subagents = self._browser_snapshot(
+                session, include_agents_override=include_agents
+            )
+            content = format_session_html(loaded_session, messages, subagents)
+            path = write_view(session.id, content)
+            sweep_view_cache()
+            webbrowser.open(path.as_uri(), new=0)
+        except Exception as exc:
+            self.call_from_thread(self._set_status, f"Browser view failed: {exc}")
+            return
+        self.call_from_thread(self._set_status, f"Opened browser view: {path.name}")
+
+    def action_toggle_live_view(self) -> None:
+        """Start, switch, or stop the selected session's live browser view."""
+        session = self._selected_session()
+        if session is None:
+            self._set_status("Select a session to open live")
+            return
+        key = (session.provider.value, session.id)
+        self._live_generation += 1
+        generation = self._live_generation
+
+        if self._live_starting_key == key:
+            self._live_starting_key = None
+            self._set_status("Live browser view start cancelled")
+            return
+
+        if (
+            self._live_server is not None
+            and self._live_server.running
+            and self._live_session_key == key
+        ):
+            server = self._live_server
+            self._live_server = None
+            self._live_session_key = None
+            self._set_status("Stopping live browser view...")
+            self.run_worker(
+                lambda: self._stop_live_view(server, generation),
+                thread=True,
+                exclusive=True,
+                group="live-view",
+            )
+            return
+
+        # Preserve a search-result AUTO reveal for this pinned live session;
+        # the persisted `a` toggle remains dynamic while the server runs.
+        include_agents = self._agents_override
+        self._live_starting_key = key
+        self._set_status("Starting live browser view...")
+        self.run_worker(
+            lambda: self._start_live_view(session, key, include_agents, generation),
+            thread=True,
+            exclusive=True,
+            group="live-view",
+        )
+
+    @staticmethod
+    def _validate_live_source(session: SessionMeta) -> None:
+        """Raise on transient whole-file/SQLite states providers hide as empty.
+
+        Providers deliberately return an empty list for corrupt or locked
+        sources so ordinary browsing remains resilient. A live view already
+        has a last-good snapshot, however, and must distinguish that transient
+        state from a real empty update before publishing it.
+        """
+        if not session.source_path:
+            return
+        source = Path(session.source_path)
+        if session.provider == Provider.GEMINI and source.is_file():
+            import json
+
+            with open(source) as stream:
+                data = json.load(stream)
+            if not isinstance(data, dict):
+                raise ValueError("Gemini session is not a JSON object")
+        elif source.suffix == ".db" and source.is_file():
+            import sqlite3
+
+            connection = sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=0.2)
+            try:
+                connection.execute("PRAGMA schema_version").fetchone()
+            finally:
+                connection.close()
+
+    def _start_live_view(
+        self,
+        session: SessionMeta,
+        key: tuple[str, str],
+        include_agents: bool,
+        generation: int,
+    ) -> None:
+        """Worker body that replaces any server and opens its private URL."""
+        import webbrowser
+
+        from sesh.liveview import LiveViewServer
+
+        old = self._live_server
+        if old is not None:
+            old.stop()
+
+        def load_live_snapshot():
+            self._validate_live_source(session)
+            return self._browser_snapshot(
+                session, include_agents_override=include_agents
+            )
+
+        server = LiveViewServer(load_live_snapshot)
+        try:
+            url = server.start()
+            webbrowser.open(url, new=0)
+            self.call_from_thread(
+                self._apply_live_server, server, key, generation, url
+            )
+        except Exception as exc:
+            server.stop()
+            try:
+                self.call_from_thread(
+                    self._apply_live_error, generation, f"Live view failed: {exc}"
+                )
+            except RuntimeError:
+                # The app exited while the worker was starting the server.
+                pass
+
+    def _apply_live_server(
+        self,
+        server,
+        key: tuple[str, str],
+        generation: int,
+        url: str,
+    ) -> None:
+        """UI thread: publish a newly started server unless it was superseded."""
+        if generation != self._live_generation:
+            self.run_worker(server.stop, thread=True, group="live-cleanup")
+            return
+        self._live_starting_key = None
+        self._live_server = server
+        self._live_session_key = key
+        self._set_status(f"Live browser view: {url}")
+
+    def _apply_live_error(self, generation: int, message: str) -> None:
+        if generation == self._live_generation:
+            self._live_starting_key = None
+            self._live_server = None
+            self._live_session_key = None
+            self._set_status(message)
+
+    def _stop_live_view(self, server, generation: int) -> None:
+        server.stop()
+        try:
+            self.call_from_thread(self._apply_live_stopped, generation)
+        except RuntimeError:
+            pass
+
+    def _apply_live_stopped(self, generation: int) -> None:
+        if generation == self._live_generation:
+            self._set_status("Live browser view stopped")
+
+    def on_unmount(self) -> None:
+        """Release the private HTTP listener when the TUI exits."""
+        self._live_generation += 1
+        server = self._live_server
+        self._live_server = None
+        self._live_session_key = None
+        self._live_starting_key = None
+        if server is not None:
+            server.stop()
 
     def action_export_session(self) -> None:
         """Export the current session to Markdown and copy it to the clipboard."""

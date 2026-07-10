@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -193,6 +194,15 @@ def _html_messages(messages: list[Message]) -> list[dict]:
 
         out.append({"role": m.role, "label": f"{m.role}{ts}", "kind": "text", "content": m.content})
 
+    # Stable keys let live rerenders restore expanded details even when rows
+    # are inserted or visibility toggles change ahead of an existing item.
+    occurrences: dict[str, int] = {}
+    for entry in out:
+        material = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha1(material.encode("utf-8")).hexdigest()[:12]
+        occurrence = occurrences.get(digest, 0)
+        occurrences[digest] = occurrence + 1
+        entry["key"] = f"{digest}-{occurrence}"
     return out
 
 
@@ -208,6 +218,7 @@ def _agent_entry(meta: SubagentMeta, interior: list[Message]) -> dict:
         "role": "agent",
         "label": label,
         "kind": "agent",
+        "key": f"agent-{meta.agent_id}",
         "description": meta.description,
         "agent_type": meta.agent_type,
         "message_count": meta.message_count,
@@ -272,6 +283,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
   .wrap { max-width: 820px; margin: 0 auto; padding: 24px 16px 120px; }
   header.meta { font-size:13px; opacity:.65; border-bottom:1px solid #8884; padding-bottom:12px; margin-bottom:24px; }
   header.meta code { font-size:12px; }
+  #live-status { color:#16a34a; font-weight:600; }
+  #live-status.waiting { color:#ca8a04; }
+  #live-status.error { color:#dc2626; }
   .msg { margin: 18px 0; }
   .role { font-size:12px; text-transform:uppercase; letter-spacing:.06em; opacity:.6; margin-bottom:6px; }
   .bubble { border-radius:14px; padding:14px 18px; }
@@ -324,26 +338,27 @@ _HTML_TEMPLATE = r"""<!doctype html>
   // Render a list of message dicts into a container. Sub-agent entries
   // (kind:'agent') become a collapsed <details> whose interior is the same
   // thread rendering, recursed one level deeper.
-  function renderThread(list, container){
-    for (const m of list){
+  function renderThread(list, container, prefix='m'){
+    list.forEach((m, index)=>{
+      const key = prefix+'-'+(m.key || index);
       if (m.kind === 'agent'){
         const wrap = document.createElement('div'); wrap.className = 'msg agent';
-        const det = document.createElement('details');
+        const det = document.createElement('details'); det.dataset.liveKey = key;
         const sum = document.createElement('summary'); sum.textContent = m.label||'sub-agent';
         det.appendChild(sum);
         const inner = document.createElement('div'); inner.className = 'agent-thread';
-        renderThread(m.messages||[], inner);
+        renderThread(m.messages||[], inner, key);
         det.appendChild(inner);
         wrap.appendChild(det);
         container.appendChild(wrap);
-        continue;
+        return;
       }
       const role = (m.role||'assistant');
       const wrap = document.createElement('div'); wrap.className = 'msg '+role;
       const bub = document.createElement('div'); bub.className='bubble';
       const rendered = md.render(normMath(m.content||''));
       if (m.kind === 'tool' || m.kind === 'thinking'){
-        const det = document.createElement('details');
+        const det = document.createElement('details'); det.dataset.liveKey = key;
         const sum = document.createElement('summary'); sum.textContent = m.label||role;
         det.appendChild(sum);
         const inner = document.createElement('div'); inner.innerHTML = rendered;
@@ -356,18 +371,87 @@ _HTML_TEMPLATE = r"""<!doctype html>
         wrap.appendChild(lab); wrap.appendChild(bub);
       }
       container.appendChild(wrap);
-    }
+    });
   }
-  renderThread(data.messages, document.getElementById('thread'));
+  const thread = document.getElementById('thread');
+  renderThread(data.messages, thread);
+
+  // A live view polls a private loopback endpoint. Rerenders preserve the
+  // reader's position and expanded tool/sub-agent sections; it follows new
+  // output only when the reader was already near the bottom.
+  if (data.live){
+    let revision = data.live.revision || 0;
+    let polling = false;
+    const status = document.getElementById('live-status');
+    const setStatus = (text, cls='')=>{
+      if (!status) return;
+      status.textContent = text;
+      status.className = cls;
+    };
+    async function poll(){
+      if (polling) return;
+      polling = true;
+      try {
+        const separator = data.live.api.includes('?') ? '&' : '?';
+        const response = await fetch(
+          data.live.api + separator + 'revision=' + encodeURIComponent(revision),
+          {cache:'no-store'}
+        );
+        if (!response.ok) throw new Error('HTTP '+response.status);
+        const update = await response.json();
+        if (update.revision !== revision && update.payload){
+          const open = new Set(Array.from(thread.querySelectorAll('details[open]'))
+            .map((node)=>node.dataset.liveKey));
+          const oldY = window.scrollY;
+          const nearBottom = window.innerHeight + oldY >= document.documentElement.scrollHeight - 100;
+          thread.replaceChildren();
+          renderThread(update.payload.messages || [], thread);
+          thread.querySelectorAll('details').forEach((node)=>{
+            if (open.has(node.dataset.liveKey)) node.open = true;
+          });
+          revision = update.revision;
+          if (nearBottom) window.scrollTo(0, document.documentElement.scrollHeight);
+          else window.scrollTo(0, oldY);
+        }
+        if (update.error) setStatus('● LIVE · retrying', 'waiting');
+        else setStatus('● LIVE', '');
+      } catch (error) {
+        setStatus('● DISCONNECTED', 'error');
+      } finally {
+        polling = false;
+      }
+    }
+    window.setInterval(poll, data.live.poll_ms || 1500);
+  }
 </script>
 </body></html>
 """
+
+
+def session_html_payload(
+    session: SessionMeta,
+    messages: list[Message],
+    subagents: list[tuple[SubagentMeta, list[Message]]] | None = None,
+) -> dict:
+    """Return the normalized JSON payload consumed by the browser viewer."""
+    return {
+        "session_id": session.id,
+        "provider": session.provider.value,
+        "project_path": session.project_path,
+        "model": session.model,
+        "timestamp": session.timestamp.isoformat(),
+        "messages": _compose_thread(messages, subagents),
+    }
 
 
 def format_session_html(
     session: SessionMeta,
     messages: list[Message],
     subagents: list[tuple[SubagentMeta, list[Message]]] | None = None,
+    *,
+    live_api: str | None = None,
+    live_revision: int = 0,
+    live_poll_ms: int = 1500,
 ) -> str:
     """Render a session + messages as a self-contained HTML document.
 
@@ -390,15 +474,16 @@ def format_session_html(
     meta_parts.append(html.escape(session.timestamp.strftime("%Y-%m-%d %H:%M")))
     meta_parts.append(f"{len(messages)} msgs")
     meta = " &nbsp;·&nbsp; ".join(meta_parts)
+    if live_api is not None:
+        meta += ' &nbsp;·&nbsp; <span id="live-status">● LIVE</span>'
 
-    payload = {
-        "session_id": session.id,
-        "provider": session.provider.value,
-        "project_path": session.project_path,
-        "model": session.model,
-        "timestamp": session.timestamp.isoformat(),
-        "messages": _compose_thread(messages, subagents),
-    }
+    payload = session_html_payload(session, messages, subagents)
+    if live_api is not None:
+        payload["live"] = {
+            "api": live_api,
+            "revision": live_revision,
+            "poll_ms": max(250, live_poll_ms),
+        }
     # Escape "</" so the embedded JSON can't terminate the <script> early.
     data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
 
