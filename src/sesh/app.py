@@ -9,6 +9,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -28,7 +29,12 @@ from textual.widgets import (
 
 from sesh import transcript
 from sesh.bookmarks import load_bookmarks, save_bookmarks
-from sesh.export import format_session_markdown
+from sesh.export import (
+    format_duration as _format_duration,
+    format_session_markdown,
+    format_time_range,
+    token_summary_parts,
+)
 from sesh.models import (
     Message,
     Project,
@@ -105,31 +111,36 @@ def _relative_time(dt: datetime, now: datetime | None = None) -> str:
     return dt.strftime("%m-%d %H:%M")
 
 
-def _format_duration(start: datetime | None, end: datetime | None) -> str:
-    """Return a compact duration for a session span, or empty string if unavailable."""
-    if start is None or end is None:
-        return ""
+def format_session_header(
+    session: SessionMeta,
+    *,
+    message_count: int,
+    subagent_count: int = 0,
+    resume_cmd: str | None = None,
+) -> str:
+    """Compose the compact per-session details line shown above the transcript.
 
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    else:
-        start = start.astimezone(timezone.utc)
-
-    if end.tzinfo is None:
-        end = end.replace(tzinfo=timezone.utc)
-    else:
-        end = end.astimezone(timezone.utc)
-
-    delta_seconds = (end - start).total_seconds()
-    if delta_seconds <= 0:
-        return ""
-    if delta_seconds < 60:
-        return ""
-    if delta_seconds < 3600:
-        return f"{int(delta_seconds // 60)}m"
-    if delta_seconds < 86400:
-        return f"{int(delta_seconds // 3600)}h"
-    return f"{int(delta_seconds // 86400)}d"
+    Pure and side-effect free (no widget / PATH access) so it is unit-testable in
+    isolation. Mirrors the HTML viewer's meta header — provider, model, host,
+    full session id, start/end + duration, message and sub-agent counts, and
+    context/cumulative token totals — and, unlike the HTML header, appends the
+    resume command when the session is resumable and its CLI is installed
+    (``resume_cmd`` is precomputed by the caller). Empty fields are omitted.
+    """
+    parts: list[str] = [session.provider.value]
+    if session.model:
+        parts.append(f"model {session.model}")
+    if session.host:
+        parts.append(f"[{session.host}]")
+    parts.append(session.id)
+    parts.append(format_time_range(session))
+    parts.append(f"{message_count} msgs")
+    if subagent_count:
+        parts.append(f"⑂{subagent_count}")
+    parts.extend(token_summary_parts(session))
+    if resume_cmd:
+        parts.append(f"resume: {resume_cmd}")
+    return "  ·  ".join(parts)
 
 
 def _compact_tokens(input_tokens: int | None, output_tokens: int | None) -> str:
@@ -380,6 +391,7 @@ class HelpScreen(ModalScreen[None]):
                 [
                     ("Tab", "Move focus tree ↔ transcript"),
                     ("↑/↓", "Move message selection (or j/k)"),
+                    ("Home/End", "Jump to first / last message"),
                     ("Enter", "Expand / collapse selected message"),
                     ("C", "Copy full selected message"),
                 ],
@@ -852,6 +864,18 @@ class SeshApp(App):
         padding: 0 1;
     }
 
+    #message-header {
+        height: auto;
+        max-height: 3;
+        overflow: hidden;
+        color: $text-muted;
+        padding: 0 1;
+    }
+
+    #message-header.hidden {
+        display: none;
+    }
+
     #message-view {
         width: 1fr;
         border: solid $accent;
@@ -961,6 +985,7 @@ class SeshApp(App):
                 with Horizontal(id="message-search-bar"):
                     yield Input(placeholder="Find in messages...", id="message-search")
                     yield Static("", id="message-find-count")
+                yield Static("", id="message-header", classes="hidden")
                 yield TranscriptView(id="message-view")
         yield Static("Loading...", id="status-bar")
 
@@ -1641,7 +1666,38 @@ class SeshApp(App):
             else "No messages found."
         )
         view.set_transcript(items, highlight=highlight, empty_message=empty_message)
+        self._update_message_header(session, items)
         self._update_find_count()
+
+    def _update_message_header(
+        self, session: SessionMeta, items: list[transcript.TranscriptItem]
+    ) -> None:
+        """Refresh the compact per-session details header above the transcript.
+
+        ``message_count`` is the number of *visible* main-thread messages (so it
+        tracks tool/thinking toggles); sub-agent count prefers the loaded threads
+        and falls back to the session's cheap discovery badge. The resume command
+        is shown only when the session is resumable and its CLI is on PATH.
+        """
+        message_count = sum(1 for it in items if it.kind == "message")
+        subagent_count = (
+            len(self._current_subagents)
+            if self._current_subagents
+            else session.subagent_count
+        )
+        resume_cmd = None
+        result = self._resume_command(session)
+        if result is not None:
+            resume_cmd = " ".join(result[0])
+        header = format_session_header(
+            session,
+            message_count=message_count,
+            subagent_count=subagent_count,
+            resume_cmd=resume_cmd,
+        )
+        widget = self.query_one("#message-header", Static)
+        widget.update(Text(header))
+        widget.remove_class("hidden")
 
     def action_copy_focused_message(self) -> None:
         """Copy the complete body of the focused transcript message."""

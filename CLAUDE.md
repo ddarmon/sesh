@@ -54,8 +54,12 @@ The app has three layers:
     projects, lists sessions, and loads messages on demand. All I/O is
     synchronous (run in Textual thread workers).
 2.  **App** (`src/sesh/app.py`) -- Textual TUI with a `Tree` widget
-    (left pane) and `RichLog` (right pane). Background discovery runs in
-    a thread via `run_worker(thread=True)`.
+    (left pane) and a card-per-message `TranscriptView`
+    (`src/sesh/transcript_view.py`) in the right pane, above which a
+    compact per-session details header (`app.format_session_header`) is
+    shown. Message identity/composition is a pure layer in
+    `src/sesh/transcript.py`, shared with the HTML viewer. Background
+    discovery runs in a thread via `run_worker(thread=True)`.
 3.  **Cache** (`src/sesh/cache.py`) -- JSON file at
     `~/.cache/sesh/sessions.json` keyed by source file path +
     mtime/size.
@@ -181,6 +185,64 @@ CLI equivalents: `--include-tools`, `--include-thinking`, `--full`
 across launches in `~/.config/sesh/preferences.json` by default (or
 `$XDG_CONFIG_HOME/sesh/preferences.json`) (managed by `preferences.py`).
 
+## Transcript reading and navigation
+
+The message pane is `transcript_view.TranscriptView` (a card-per-message
+`VerticalScroll`), not a `RichLog`, so nothing is silently truncated.
+Identity/composition is provider-neutral and pure in `transcript.py`:
+
+-   **Stable keys** (`transcript.py`). Each message key is
+    `{namespace}-{digest}-{occurrence}` — a short SHA-1 over role, content
+    type, tool name, timestamp, system flag, and full content, plus a
+    per-digest occurrence counter; the visible-list index is never part of
+    identity. Keys are stable across appends, tool/thinking/agent toggles,
+    chronological sub-agent insertion, and duplicate content. Sub-agent
+    interior keys are namespaced by `agent_id`; a sub-agent container's own
+    anchor is `agent_anchor(agent_id)` = `agent-{id}`. `compose_transcript`
+    splices sub-agent containers in at their spawn timestamp.
+    `export.session_html_payload` reuses these exact keys, so TUI and HTML
+    share one identity model. Keys are internal viewer ids, not a public
+    schema.
+-   **Preview / expansion** (`transcript_view.py`). A body longer than
+    `PREVIEW_CHARS` (1600) renders a bounded preview plus an omission marker
+    (`omission_marker`, e.g. `… 4,280 more characters`). `Enter` on the
+    selected card expands it to the complete body (or expands a sub-agent
+    container); `Enter` again collapses. The full body always lives in the
+    model — only the preview renders until expansion — so a huge transcript
+    never renders every full body eagerly. `C` copies the **complete** body
+    (`copy_active`), never the preview. Expansion state and the selection
+    cursor are keyed by stable key, so they survive `t`/`T`/`a` toggles and
+    live rerenders.
+-   **Cursor / focus.** The `TranscriptView` container is the single focus
+    target (cards are not tab stops); `Tab`/`Shift+Tab` move focus
+    tree↔transcript. Within it, `↑`/`↓` (or `j`/`k`), `Home`, and `End`
+    move the selection cursor.
+-   **Transcript find** (`TranscriptFinder` + `compute_matches`, pure).
+    `n` opens/advances find, `N` steps back; in the find input, `Enter`/`↓`
+    = next and `Up`/`Shift+Enter` = previous; all wrap around. A `3 / 17`
+    counter shows position; the active match is painted distinctly from
+    other highlights and scrolled into view. Matching runs over complete
+    bodies (tool, thinking, sub-agent included), so a hit past a card's
+    preview boundary or inside a collapsed sub-agent is revealed
+    (`reveal_match`) rather than hidden. `Esc` closes find and restores
+    transcript focus without touching the unrelated session-tree search.
+    The active match is preserved by stable key across toggles and live
+    appends, and resets gracefully when its card disappears.
+
+### Session details header
+
+`app.format_session_header` (pure) composes the line shown in the
+`#message-header` `Static` above the transcript: provider, model, host
+(aggregation), full session id, start/end + duration
+(`export.format_time_range`), visible message count, sub-agent count,
+context/cumulative token totals (`export.token_summary_parts`), and the
+resume command when `resume.is_resumable` and the CLI is on PATH. Empty
+fields are omitted. The HTML viewer's `export.format_meta_header_html`
+mirrors the same fields (with a **Copy ID** button reusing the viewer's
+clipboard helper); `export.format_duration` and the two `export`
+token/time helpers are shared so both readers agree. `app._format_duration`
+is an alias of `export.format_duration`.
+
 ## Claude sub-agent transcripts
 
 Claude Code writes each sub-agent (Task/Agent tool) run to a separate
@@ -299,6 +361,18 @@ a just-created session — including `last` — is viewable without a manual
 `sesh refresh`; discovery is incremental via the on-disk cache so an
 unchanged tree costs only stats.
 
+The page has a details header (`format_meta_header_html`) and a **sticky
+reader toolbar** (`_toolbar_html`). Every message and sub-agent block
+carries a DOM `id` = its stable transcript key (see "Transcript reading
+and navigation"), so each has an `#anchor`, per-card hover **Copy** (full
+message) / **Link** (`#anchor` URL) actions, fragment highlight on
+load/`hashchange`, and open-`<details>` restoration keyed by identity.
+The toolbar's **transcript find** (input + `i / n` counter + prev/next,
+`/` focuses, `Enter`/`Shift+Enter` navigate) and message count render in
+**both** static and live documents and work from `file://` with no
+server; live-only controls are emitted only for live views, so a static
+export can never expose the private polling server.
+
 ### TUI browser and live views
 
 The TUI's `v` action reloads the selected session through its provider, applies
@@ -310,10 +384,18 @@ port and uses an unguessable path token; it has no permissive CORS, sends
 same-origin JSON endpoint (default 1.5 seconds). Each request reloads via the
 normal provider `get_messages` API, so live main-thread updates work for all
 providers; Claude sub-agents are reloaded when agent display is enabled. A
-failed loader refresh retains the last good payload. Browser rerenders happen
-only when a payload digest changes and preserve scroll position plus expanded
-tool/sub-agent details. In aggregation mode, live view follows changes in the
-mirror rather than connecting to the source host.
+failed loader refresh retains the last good payload and the page shows a
+retrying/disconnected status. The live toolbar adds a status indicator (live /
+paused / retrying / disconnected), the last-update time, a browser-side
+**Pause/Resume** (does not stop the server — `L` still owns server lifecycle),
+a **Follow** toggle (independent of pause), a manual **Refresh**, and an
+`N new ↓` badge when follow is off. A single self-rescheduling timer means polls
+never overlap. Rerenders are reconciled by stable key: when the old top-level
+keys are a strict prefix of the new ones it appends only the new nodes,
+otherwise it does a full rerender preserving open `<details>` by key. Scroll
+position is preserved and the page auto-follows to the bottom only when Follow is
+on and the reader is already near the bottom. In aggregation mode, live view
+follows changes in the mirror rather than connecting to the source host.
 
 ### View cache (`viewcache.py`)
 

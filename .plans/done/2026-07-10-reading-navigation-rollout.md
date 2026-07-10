@@ -1,5 +1,5 @@
 ---
-Status: active (planned)
+Status: done
 Type: rollout
 Owner: David
 Branch: bugfix/aggregation-cli-consistency → feature/reading-navigation
@@ -357,3 +357,18 @@ Test at least one session from Claude, Codex, pi, Gemini, and a SQLite provider
   expansion, matching, anchors, and live reconciliation share one model.
 - **2026-07-10:** Keep both TUI and browser complete; make the browser richer,
   but do not treat TUI truncation as an acceptable permanent preview mode.
+- **2026-07-10:** Both PRs implemented. PR 1 (aggregation + CLI consistency)
+  landed as its own PR **#48**. PR 2 (reading and navigation) was built on
+  `feature/reading-navigation` in five phases: `transcript.py` (stable keys /
+  composition), `transcript_view.py` (card-per-message preview/expansion),
+  deterministic transcript find (`TranscriptFinder`), HTML anchors + sticky
+  reader toolbar with live pause/follow and key-based reconciliation, and
+  Phase 5 (this) — a shared session details header in both readers
+  (`app.format_session_header` + `export.format_meta_header_html`, sharing
+  `format_duration` / `format_time_range` / `token_summary_parts`), README +
+  `?` help modal + CLAUDE.md docs, and the header/duration/token unit tests.
+  No package version bump (deferred to the release workflow).
+- **2026-07-10:** Deviation — the Phase 5 TUI header shows the visible
+  main-thread message count (tracks tool/thinking toggles) rather than the
+  index `message_count`, matching what the HTML header reports (`len(messages)`).
+  Screenshots not regenerated in this change (see note in the plan below).

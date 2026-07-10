@@ -639,3 +639,113 @@ def test_viewer_script_passes_node_check() -> None:
         import os
 
         os.unlink(path)
+
+
+def _meta_header(html_out: str) -> str:
+    """Return the inner HTML of the viewer's ``header.meta`` block."""
+    m = re.search(r'<header class="meta">(.*?)</header>', html_out, re.S)
+    assert m is not None
+    return m.group(1)
+
+
+def test_html_meta_header_full_fields() -> None:
+    """The meta header carries provider, model, project, host, id+copy, time,
+    duration, counts, and both token totals when all are available."""
+    session = make_session(
+        id="sess-abc-123",
+        provider=Provider.CLAUDE,
+        project_path="/repo/thing",
+        model="claude-opus-4-8",
+        start_timestamp=datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 7, 10, 15, 30, tzinfo=timezone.utc),
+        input_tokens=1000,
+        output_tokens=200,
+        cumulative_input_tokens=5000,
+        host="laptop",
+    )
+    meta, interior = _subagent()
+    out = format_session_html(
+        session,
+        [make_message(content="hi"), make_message(content="yo")],
+        subagents=[(meta, interior)],
+    )
+    header = _meta_header(out)
+    assert "<b>claude</b>" in header
+    assert "model <code>claude-opus-4-8</code>" in header
+    assert "<code>/repo/thing</code>" in header
+    assert "host <code>laptop</code>" in header
+    assert "<code>sess-abc-123</code>" in header
+    # Copy-ID control carries the id in data-copy and reuses the clipboard helper.
+    assert 'id="copy-session-id"' in header
+    assert 'data-copy="sess-abc-123"' in header
+    # Start → end range plus duration.
+    assert "2026-07-10 14:00 → 15:30 (1h)" in header
+    assert "2 msgs" in header
+    assert "⑂1 sub-agents" in header
+    # ctx = input+output = 1,200; cumulative = cumulative_input+output = 5,200.
+    assert "1,200 ctx tokens" in header
+    assert "5,200 cumulative" in header
+
+
+def test_html_meta_header_omits_empty_fields() -> None:
+    """Model, host, sub-agents, and token totals are omitted when unavailable."""
+    session = make_session(
+        id="s-min",
+        provider=Provider.CURSOR,
+        project_path="/p",
+        model=None,
+        host=None,
+        input_tokens=None,
+        output_tokens=None,
+        cumulative_input_tokens=None,
+    )
+    header = _meta_header(format_session_html(session, [make_message(content="x")]))
+    assert "model <code>" not in header
+    assert "host <code>" not in header
+    assert "sub-agents" not in header
+    assert "ctx tokens" not in header
+    assert "cumulative" not in header
+    # Core fields still present.
+    assert "<b>cursor</b>" in header
+    assert 'id="copy-session-id"' in header
+    assert "1 msgs" in header
+
+
+def test_html_meta_header_escapes_session_id() -> None:
+    """A hostile session id is html-escaped in both the code span and data-copy."""
+    session = make_session(id='a"><b>x', provider=Provider.CLAUDE)
+    header = _meta_header(format_session_html(session, [make_message(content="x")]))
+    assert "<b>x" not in header.replace("&lt;b&gt;x", "")
+    assert "a&quot;&gt;&lt;b&gt;x" in header
+
+
+def test_html_meta_header_copy_button_wired_in_script() -> None:
+    """The inline script wires the Copy-ID button through the clipboard helper."""
+    out = format_session_html(
+        make_session(id="s-btn", provider=Provider.CLAUDE),
+        [make_message(content="x")],
+    )
+    script = _viewer_script(out)
+    assert "copy-session-id" in script
+    assert "copyText(copyIdBtn.dataset.copy" in script
+
+
+def test_format_duration_and_time_range_helpers() -> None:
+    """Duration buckets (m/h/d, empty under a minute) and range formatting."""
+    from sesh.export import format_duration, format_time_range
+
+    d0 = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+    assert format_duration(None, d0) == ""
+    assert format_duration(d0, d0) == ""  # under a minute
+    assert format_duration(d0, datetime(2026, 7, 10, 12, 45, tzinfo=timezone.utc)) == "45m"
+    assert format_duration(d0, datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc)) == "2h"
+    assert format_duration(d0, datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)) == "3d"
+
+    # Same-day range abbreviates the end; no start falls back to the end stamp.
+    same = make_session(
+        start_timestamp=d0,
+        timestamp=datetime(2026, 7, 10, 13, 0, tzinfo=timezone.utc),
+    )
+    assert format_time_range(same) == "2026-07-10 12:00 → 13:00 (1h)"
+    endonly = make_session(start_timestamp=None, timestamp=d0)
+    assert format_time_range(endonly) == "2026-07-10 12:00"

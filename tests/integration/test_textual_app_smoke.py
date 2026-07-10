@@ -48,9 +48,41 @@ async def test_app_mounts_expected_widgets(app):
 
     sesh_app.query_one("#session-tree")
     sesh_app.query_one("#message-view")
+    sesh_app.query_one("#message-header")
     sesh_app.query_one("#status-bar")
     sesh_app.query_one("#search-input")
     sesh_app.query_one("#provider-filter")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_message_header_updates_on_render(app):
+    """Rendering a session reveals the details header with its key fields."""
+    from datetime import datetime, timezone
+
+    from textual.widgets import Static
+
+    sesh_app, pilot = app
+    header = sesh_app.query_one("#message-header", Static)
+    # Hidden until a session is rendered.
+    assert header.has_class("hidden")
+
+    session = make_session(
+        id="hdr-1",
+        provider=Provider.CLAUDE,
+        project_path="/repo",
+        model="claude-opus-4-8",
+        timestamp=datetime(2026, 7, 10, 15, 0, tzinfo=timezone.utc),
+    )
+    sesh_app._render_messages([make_message(content="hello")], session)
+    await pilot.pause()
+
+    assert not header.has_class("hidden")
+    rendered = header.render()
+    text = rendered.plain if hasattr(rendered, "plain") else str(rendered)
+    assert "hdr-1" in text
+    assert "model claude-opus-4-8" in text
+    assert "1 msgs" in text
 
 
 @pytest.mark.integration

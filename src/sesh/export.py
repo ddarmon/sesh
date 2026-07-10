@@ -5,10 +5,77 @@ from __future__ import annotations
 import html
 import json
 import re
+from datetime import datetime, timezone
 from importlib.resources import files
 
 from sesh import transcript
 from sesh.models import Message, SessionMeta, SubagentMeta
+
+
+def format_duration(start: datetime | None, end: datetime | None) -> str:
+    """Return a compact span (``45m`` / ``2h`` / ``3d``), or ``""`` if unavailable.
+
+    Shared by the TUI (session tree label + details header, aliased as
+    ``app._format_duration``) and the HTML viewer's meta header so both readers
+    report the same duration for a session. Timezone-naive datetimes are treated
+    as UTC; spans under a minute yield ``""``.
+    """
+    if start is None or end is None:
+        return ""
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    else:
+        end = end.astimezone(timezone.utc)
+    delta_seconds = (end - start).total_seconds()
+    if delta_seconds < 60:
+        return ""
+    if delta_seconds < 3600:
+        return f"{int(delta_seconds // 60)}m"
+    if delta_seconds < 86400:
+        return f"{int(delta_seconds // 3600)}h"
+    return f"{int(delta_seconds // 86400)}d"
+
+
+def format_time_range(session: SessionMeta) -> str:
+    """Plain-text start/end + duration for the session details header.
+
+    When a distinct start timestamp is known the range shows both endpoints
+    (abbreviating the end to a bare time on same-day spans); otherwise only the
+    end timestamp is shown. A non-empty duration is appended in parentheses.
+    Shared by both readers so their headers agree.
+    """
+    end = session.timestamp
+    start = session.start_timestamp
+    dur = format_duration(start, end)
+    if start is not None and start != end:
+        if start.date() == end.date():
+            base = f"{start:%Y-%m-%d %H:%M} → {end:%H:%M}"
+        else:
+            base = f"{start:%Y-%m-%d %H:%M} → {end:%Y-%m-%d %H:%M}"
+    else:
+        base = end.strftime("%Y-%m-%d %H:%M")
+    return f"{base} ({dur})" if dur else base
+
+
+def token_summary_parts(session: SessionMeta) -> list[str]:
+    """Plain-text token bits: context total then cumulative total (each optional).
+
+    ``context`` is the final-turn input context plus total output; ``cumulative``
+    sums every turn's input plus total output. Empty when the provider carries no
+    token data (e.g. Cursor). Shared by both readers so the numbers agree.
+    """
+    bits: list[str] = []
+    if session.input_tokens is not None or session.output_tokens is not None:
+        ctx = (session.input_tokens or 0) + (session.output_tokens or 0)
+        bits.append(f"{ctx:,} ctx tokens")
+    if session.cumulative_input_tokens is not None:
+        cumul = (session.cumulative_input_tokens or 0) + (session.output_tokens or 0)
+        bits.append(f"{cumul:,} cumulative")
+    return bits
 
 
 def _md_message_lines(m: Message, heading_offset: int = 0) -> list[str]:
@@ -246,6 +313,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
   .wrap { max-width: 820px; margin: 0 auto; padding: 16px 16px 160px; }
   header.meta { font-size:13px; opacity:.65; border-bottom:1px solid #8884; padding-bottom:12px; margin-bottom:24px; }
   header.meta code { font-size:12px; }
+  header.meta .metabtn { margin-left:6px; font-size:11px; padding:1px 7px; border:1px solid #8886;
+    border-radius:5px; background:transparent; color:inherit; cursor:pointer; font:inherit; vertical-align:baseline; }
+  header.meta .metabtn:hover { background:#8882; }
   /* Sticky reader toolbar */
   header.toolbar { position:sticky; top:0; z-index:30; display:flex; flex-wrap:wrap;
     gap:10px 16px; align-items:center; padding:8px 16px; font-size:13px;
@@ -691,6 +761,13 @@ __TOOLBAR__
     schedule();
   }
 
+  // ---- Copy session id (reuses the shared clipboard helper) ----
+  const copyIdBtn = document.getElementById('copy-session-id');
+  if (copyIdBtn) copyIdBtn.addEventListener('click', async ()=>{
+    const ok = await copyText(copyIdBtn.dataset.copy || data.session_id || '');
+    flash(copyIdBtn, ok ? 'Copied' : 'Failed');
+  });
+
   // Honor a #fragment present on initial load (after the thread is rendered).
   applyHash(true);
 </script>
@@ -712,6 +789,43 @@ def session_html_payload(
         "timestamp": session.timestamp.isoformat(),
         "messages": _compose_thread(messages, subagents),
     }
+
+
+def format_meta_header_html(
+    session: SessionMeta,
+    message_count: int,
+    subagent_count: int = 0,
+) -> str:
+    """Build the inner HTML of the viewer's ``header.meta`` details block.
+
+    Renders provider, model, project, aggregation host, the full session id with
+    a Copy-ID button, the start/end time + duration, message and sub-agent
+    counts, and context/cumulative token totals. Fields that are empty for a
+    given session/provider (model, host, sub-agents, tokens) are omitted
+    gracefully so the header never shows blank cells. All text is
+    ``html.escape``-d; the session id is also placed in the button's
+    ``data-copy`` attribute (read by the inline clipboard helper).
+    """
+    parts: list[str] = [f"<b>{html.escape(session.provider.value)}</b>"]
+    if session.model:
+        parts.append(f"model <code>{html.escape(str(session.model))}</code>")
+    parts.append(f"<code>{html.escape(session.project_path)}</code>")
+    if session.host:
+        parts.append(f"host <code>{html.escape(session.host)}</code>")
+    sid = html.escape(session.id)
+    parts.append(
+        f"id <code>{sid}</code>"
+        f'<button type="button" class="metabtn" id="copy-session-id" '
+        f'data-copy="{sid}" title="Copy session ID">Copy ID</button>'
+    )
+    parts.append(html.escape(format_time_range(session)))
+    counts = f"{message_count} msgs"
+    if subagent_count:
+        counts += f" · ⑂{subagent_count} sub-agents"
+    parts.append(counts)
+    for bit in token_summary_parts(session):
+        parts.append(html.escape(bit))
+    return " &nbsp;·&nbsp; ".join(parts)
 
 
 def _toolbar_html(is_live: bool) -> str:
@@ -783,13 +897,7 @@ def format_session_html(
     """
     title = f"{session.provider.value} · {session.id[:8]}"
 
-    meta_parts = [f"<b>{html.escape(session.provider.value)}</b>"]
-    if session.model:
-        meta_parts.append(f"model <code>{html.escape(str(session.model))}</code>")
-    meta_parts.append(f"<code>{html.escape(session.project_path)}</code>")
-    meta_parts.append(html.escape(session.timestamp.strftime("%Y-%m-%d %H:%M")))
-    meta_parts.append(f"{len(messages)} msgs")
-    meta = " &nbsp;·&nbsp; ".join(meta_parts)
+    meta = format_meta_header_html(session, len(messages), len(subagents or []))
 
     payload = session_html_payload(session, messages, subagents)
     if live_api is not None:
