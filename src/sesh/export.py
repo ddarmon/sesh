@@ -2,13 +2,80 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
 import json
 import re
+from datetime import datetime, timezone
 from importlib.resources import files
 
+from sesh import transcript
 from sesh.models import Message, SessionMeta, SubagentMeta
+
+
+def format_duration(start: datetime | None, end: datetime | None) -> str:
+    """Return a compact span (``45m`` / ``2h`` / ``3d``), or ``""`` if unavailable.
+
+    Shared by the TUI (session tree label + details header, aliased as
+    ``app._format_duration``) and the HTML viewer's meta header so both readers
+    report the same duration for a session. Timezone-naive datetimes are treated
+    as UTC; spans under a minute yield ``""``.
+    """
+    if start is None or end is None:
+        return ""
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    else:
+        end = end.astimezone(timezone.utc)
+    delta_seconds = (end - start).total_seconds()
+    if delta_seconds < 60:
+        return ""
+    if delta_seconds < 3600:
+        return f"{int(delta_seconds // 60)}m"
+    if delta_seconds < 86400:
+        return f"{int(delta_seconds // 3600)}h"
+    return f"{int(delta_seconds // 86400)}d"
+
+
+def format_time_range(session: SessionMeta) -> str:
+    """Plain-text start/end + duration for the session details header.
+
+    When a distinct start timestamp is known the range shows both endpoints
+    (abbreviating the end to a bare time on same-day spans); otherwise only the
+    end timestamp is shown. A non-empty duration is appended in parentheses.
+    Shared by both readers so their headers agree.
+    """
+    end = session.timestamp
+    start = session.start_timestamp
+    dur = format_duration(start, end)
+    if start is not None and start != end:
+        if start.date() == end.date():
+            base = f"{start:%Y-%m-%d %H:%M} → {end:%H:%M}"
+        else:
+            base = f"{start:%Y-%m-%d %H:%M} → {end:%Y-%m-%d %H:%M}"
+    else:
+        base = end.strftime("%Y-%m-%d %H:%M")
+    return f"{base} ({dur})" if dur else base
+
+
+def token_summary_parts(session: SessionMeta) -> list[str]:
+    """Plain-text token bits: context total then cumulative total (each optional).
+
+    ``context`` is the final-turn input context plus total output; ``cumulative``
+    sums every turn's input plus total output. Empty when the provider carries no
+    token data (e.g. Cursor). Shared by both readers so the numbers agree.
+    """
+    bits: list[str] = []
+    if session.input_tokens is not None or session.output_tokens is not None:
+        ctx = (session.input_tokens or 0) + (session.output_tokens or 0)
+        bits.append(f"{ctx:,} ctx tokens")
+    if session.cumulative_input_tokens is not None:
+        cumul = (session.cumulative_input_tokens or 0) + (session.output_tokens or 0)
+        bits.append(f"{cumul:,} cumulative")
+    return bits
 
 
 def _md_message_lines(m: Message, heading_offset: int = 0) -> list[str]:
@@ -138,91 +205,84 @@ def _load_asset(name: str) -> str:
     return files("sesh.viewer_assets").joinpath(name).read_text(encoding="utf-8")
 
 
-def _html_messages(messages: list[Message]) -> list[dict]:
-    """Map ``Message`` objects to the display dicts the viewer JS consumes.
+def _message_display_dict(m: Message) -> dict:
+    """Map one ``Message`` to the display dict the viewer JS consumes.
 
     Each dict has ``role`` (CSS class), ``label`` (heading text), ``kind``
     (``"text"`` | ``"tool"`` | ``"thinking"`` — drives collapsible wrapping),
-    and ``content`` (raw Markdown rendered client-side). The branching mirrors
-    ``format_session_markdown``.
+    and ``content`` (raw Markdown rendered client-side). The stable ``key`` is
+    attached separately by the caller from :mod:`sesh.transcript`. The
+    branching mirrors ``format_session_markdown``.
+
+    Tool messages wrap their body in a Markdown code fence for *rendering*, so
+    for those an extra ``match`` field carries the raw unfenced body (matching
+    the TUI's ``transcript_view.normalize_message`` semantics). The transcript
+    find matches against ``match`` in preference to the fenced ``content`` so a
+    query hits the same text the TUI would. ``match`` is emitted only when it
+    differs from ``content`` to keep the payload small.
     """
-    out: list[dict] = []
-    for m in messages:
-        ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
+    ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
 
-        if m.content_type == "thinking":
-            out.append({
-                "role": "tool",
-                "label": f"Thinking{ts}",
-                "kind": "thinking",
-                "content": m.thinking or "",
-            })
-            continue
+    if m.content_type == "thinking":
+        return {"role": "tool", "label": f"Thinking{ts}", "kind": "thinking", "content": m.thinking or ""}
 
-        if m.content_type == "tool_use":
-            tool = m.tool_name or "tool"
-            out.append({
-                "role": "tool",
-                "label": f"{tool} (call){ts}",
-                "kind": "tool",
-                "content": f"```json\n{m.tool_input or ''}\n```",
-            })
-            continue
+    if m.content_type == "tool_use":
+        tool = m.tool_name or "tool"
+        return {
+            "role": "tool",
+            "label": f"{tool} (call){ts}",
+            "kind": "tool",
+            "content": f"```json\n{m.tool_input or ''}\n```",
+            "match": m.tool_input or "",
+        }
 
-        if m.content_type == "tool_result":
-            tool = m.tool_name or "tool"
-            out.append({
-                "role": "tool",
-                "label": f"{tool} (result){ts}",
-                "kind": "tool",
-                "content": f"```\n{m.tool_output or ''}\n```",
-            })
-            continue
+    if m.content_type == "tool_result":
+        tool = m.tool_name or "tool"
+        return {
+            "role": "tool",
+            "label": f"{tool} (result){ts}",
+            "kind": "tool",
+            "content": f"```\n{m.tool_output or ''}\n```",
+            "match": m.tool_output or "",
+        }
 
-        if m.role == "user":
-            out.append({"role": "user", "label": f"User{ts}", "kind": "text", "content": m.content})
-            continue
+    if m.role == "user":
+        return {"role": "user", "label": f"User{ts}", "kind": "text", "content": m.content}
 
-        if m.role == "assistant":
-            out.append({"role": "assistant", "label": f"Assistant{ts}", "kind": "text", "content": m.content})
-            continue
+    if m.role == "assistant":
+        return {"role": "assistant", "label": f"Assistant{ts}", "kind": "text", "content": m.content}
 
-        if m.role == "tool":
-            tool = m.tool_name or "tool"
-            out.append({"role": "tool", "label": f"{tool}{ts}", "kind": "tool", "content": m.content})
-            continue
+    if m.role == "tool":
+        tool = m.tool_name or "tool"
+        return {"role": "tool", "label": f"{tool}{ts}", "kind": "tool", "content": m.content}
 
-        out.append({"role": m.role, "label": f"{m.role}{ts}", "kind": "text", "content": m.content})
-
-    # Stable keys let live rerenders restore expanded details even when rows
-    # are inserted or visibility toggles change ahead of an existing item.
-    occurrences: dict[str, int] = {}
-    for entry in out:
-        material = json.dumps(entry, ensure_ascii=False, sort_keys=True)
-        digest = hashlib.sha1(material.encode("utf-8")).hexdigest()[:12]
-        occurrence = occurrences.get(digest, 0)
-        occurrences[digest] = occurrence + 1
-        entry["key"] = f"{digest}-{occurrence}"
-    return out
+    return {"role": m.role, "label": f"{m.role}{ts}", "kind": "text", "content": m.content}
 
 
-def _agent_entry(meta: SubagentMeta, interior: list[Message]) -> dict:
-    """Build a ``kind: "agent"`` display dict for a sub-agent thread.
+def _agent_display_dict(item: transcript.TranscriptItem) -> dict:
+    """Build a ``kind: "agent"`` display dict from a composed agent item.
 
-    Carries the collapsed summary ``label`` plus the nested interior mapped
-    through :func:`_html_messages`, so the viewer JS can recurse into it.
+    Carries the collapsed summary ``label``, the container anchor ``key``, and
+    the already-keyed interior messages, so the viewer JS can recurse into it.
     """
+    meta = item.meta
+    assert meta is not None
     desc = meta.description or meta.agent_id
     label = f"⑂ {meta.agent_type or 'agent'} — {desc} · {meta.message_count} msgs"
+    messages: list[dict] = []
+    for interior in item.interior:
+        entry = _message_display_dict(interior.message)
+        entry["key"] = interior.key
+        messages.append(entry)
     return {
         "role": "agent",
         "label": label,
         "kind": "agent",
-        "key": f"agent-{meta.agent_id}",
+        "key": item.key,
         "description": meta.description,
         "agent_type": meta.agent_type,
         "message_count": meta.message_count,
-        "messages": _html_messages(interior),
+        "messages": messages,
     }
 
 
@@ -232,41 +292,20 @@ def _compose_thread(
 ) -> list[dict]:
     """Interleave sub-agent ``agent`` entries into the main message dicts.
 
-    Each sub-agent is anchored chronologically: it is spliced in just before
-    the first visible main-thread message with a later timestamp (so it works
-    even when tool rows are filtered out). Sub-agents with no timestamp fall
-    back to a trailing section appended after the whole thread.
+    Composition, chronological sub-agent anchoring, and stable keys all come
+    from :func:`sesh.transcript.compose_transcript`; this function only maps the
+    resulting items to the browser display dicts.
     """
-    base = _html_messages(messages)
-    if not subagents:
-        return base
-
-    anchored: list[tuple[int, dict]] = []
-    trailing: list[dict] = []
-    for meta, interior in subagents:
-        entry = _agent_entry(meta, interior)
-        ts = meta.first_timestamp
-        if ts is None:
-            trailing.append(entry)
-            continue
-        idx = len(messages)
-        for i, m in enumerate(messages):
-            if m.timestamp is not None and m.timestamp > ts:
-                idx = i
-                break
-        anchored.append((idx, entry))
-
-    anchored.sort(key=lambda t: t[0])
-    result: list[dict] = []
-    ai = 0
-    for i in range(len(base) + 1):
-        while ai < len(anchored) and anchored[ai][0] == i:
-            result.append(anchored[ai][1])
-            ai += 1
-        if i < len(base):
-            result.append(base[i])
-    result.extend(trailing)
-    return result
+    items = transcript.compose_transcript(messages, subagents)
+    out: list[dict] = []
+    for item in items:
+        if item.kind == "agent":
+            out.append(_agent_display_dict(item))
+        else:
+            entry = _message_display_dict(item.message)
+            entry["key"] = item.key
+            out.append(entry)
+    return out
 
 
 _HTML_TEMPLATE = r"""<!doctype html>
@@ -280,13 +319,34 @@ _HTML_TEMPLATE = r"""<!doctype html>
   body { margin:0; font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
          background:#fff; color:#1f2328; }
   @media (prefers-color-scheme: dark){ body{ background:#0d1117; color:#e6edf3; } }
-  .wrap { max-width: 820px; margin: 0 auto; padding: 24px 16px 120px; }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 16px 16px 160px; }
   header.meta { font-size:13px; opacity:.65; border-bottom:1px solid #8884; padding-bottom:12px; margin-bottom:24px; }
   header.meta code { font-size:12px; }
-  #live-status { color:#16a34a; font-weight:600; }
-  #live-status.waiting { color:#ca8a04; }
-  #live-status.error { color:#dc2626; }
-  .msg { margin: 18px 0; }
+  header.meta .metabtn { margin-left:6px; font-size:11px; padding:1px 7px; border:1px solid #8886;
+    border-radius:5px; background:transparent; color:inherit; cursor:pointer; font:inherit; vertical-align:baseline; }
+  header.meta .metabtn:hover { background:#8882; }
+  /* Sticky reader toolbar */
+  header.toolbar { position:sticky; top:0; z-index:30; display:flex; flex-wrap:wrap;
+    gap:10px 16px; align-items:center; padding:8px 16px; font-size:13px;
+    background:#ffffffe6; border-bottom:1px solid #8883; }
+  @media (prefers-color-scheme: dark){ header.toolbar{ background:#0d1117e6; } }
+  .tb-group { display:flex; align-items:center; gap:6px; }
+  .tb-find { flex:1 1 260px; }
+  #find-input { flex:1 1 auto; min-width:120px; max-width:340px; padding:4px 8px;
+    border:1px solid #8886; border-radius:6px; background:transparent; color:inherit; font:inherit; }
+  .tb-btn { padding:3px 9px; border:1px solid #8886; border-radius:6px; background:transparent;
+    color:inherit; cursor:pointer; font:inherit; line-height:1.3; }
+  .tb-btn:hover { background:#8882; }
+  .tb-btn.on { background:#2563eb22; border-color:#2563eb66; }
+  .tb-count { opacity:.7; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .tb-status { font-weight:600; color:#16a34a; white-space:nowrap; }
+  .tb-status.waiting { color:#ca8a04; }
+  .tb-status.paused { color:#ca8a04; }
+  .tb-status.error { color:#dc2626; }
+  .tb-meta { opacity:.6; white-space:nowrap; }
+  .tb-badge { background:#2563eb; color:#fff; border:none; border-radius:10px;
+    padding:2px 9px; cursor:pointer; font:inherit; font-size:12px; white-space:nowrap; }
+  .msg { margin: 18px 0; position:relative; scroll-margin-top:56px; }
   .role { font-size:12px; text-transform:uppercase; letter-spacing:.06em; opacity:.6; margin-bottom:6px; }
   .bubble { border-radius:14px; padding:14px 18px; }
   .user .bubble { background:#2563eb12; border:1px solid #2563eb33; }
@@ -298,6 +358,10 @@ _HTML_TEMPLATE = r"""<!doctype html>
   .agent > details[open] > summary { margin-bottom:10px; }
   .agent-thread { border-left:2px solid #8886; padding-left:16px; margin-left:4px; }
   .bubble > :first-child { margin-top:0; } .bubble > :last-child { margin-bottom:0; }
+  /* Find matches and fragment anchor highlight. */
+  .msg.match-hit > .bubble, .msg.match-hit > details { box-shadow:0 0 0 2px #f59e0b55; border-radius:10px; }
+  .msg.match-active > .bubble, .msg.match-active > details { box-shadow:0 0 0 3px #f59e0b; border-radius:10px; }
+  .msg.anchor-active > .bubble, .msg.anchor-active > details { box-shadow:0 0 0 3px #2563eb; border-radius:10px; }
   pre { background:#8881; padding:12px 14px; border-radius:8px; overflow:auto; font-size:13.5px; }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   :not(pre) > code { background:#8882; padding:.15em .4em; border-radius:5px; font-size:.9em; }
@@ -306,7 +370,9 @@ _HTML_TEMPLATE = r"""<!doctype html>
   a { color:#2563eb; }
   .katex-display { overflow-x:auto; overflow-y:hidden; }
 </style></head>
-<body><div class="wrap">
+<body>
+__TOOLBAR__
+<div class="wrap">
 <header class="meta">__META__</header>
 <div id="thread"></div>
 </div>
@@ -335,94 +401,401 @@ _HTML_TEMPLATE = r"""<!doctype html>
          .replace(/\\\(([\s\S]+?)\\\)/g, (_,m)=>'$'+m+'$')
     ).join('');
   }
-  // Render a list of message dicts into a container. Sub-agent entries
-  // (kind:'agent') become a collapsed <details> whose interior is the same
-  // thread rendering, recursed one level deeper.
-  function renderThread(list, container, prefix='m'){
-    list.forEach((m, index)=>{
-      const key = prefix+'-'+(m.key || index);
-      if (m.kind === 'agent'){
-        const wrap = document.createElement('div'); wrap.className = 'msg agent';
-        const det = document.createElement('details'); det.dataset.liveKey = key;
-        const sum = document.createElement('summary'); sum.textContent = m.label||'sub-agent';
-        det.appendChild(sum);
-        const inner = document.createElement('div'); inner.className = 'agent-thread';
-        renderThread(m.messages||[], inner, key);
-        det.appendChild(inner);
-        wrap.appendChild(det);
-        container.appendChild(wrap);
-        return;
+
+  // --- Clipboard (secure-context navigator.clipboard, execCommand fallback) ---
+  // file:// and 127.0.0.1 are secure contexts, but clipboard permissions vary,
+  // so we always keep the textarea + execCommand fallback.
+  async function copyText(text){
+    try {
+      if (navigator.clipboard && window.isSecureContext){
+        await navigator.clipboard.writeText(text);
+        return true;
       }
-      const role = (m.role||'assistant');
-      const wrap = document.createElement('div'); wrap.className = 'msg '+role;
-      const bub = document.createElement('div'); bub.className='bubble';
-      const rendered = md.render(normMath(m.content||''));
-      if (m.kind === 'tool' || m.kind === 'thinking'){
-        const det = document.createElement('details'); det.dataset.liveKey = key;
-        const sum = document.createElement('summary'); sum.textContent = m.label||role;
-        det.appendChild(sum);
-        const inner = document.createElement('div'); inner.innerHTML = rendered;
-        det.appendChild(inner);
-        bub.appendChild(det);
-        wrap.appendChild(bub);
-      } else {
-        const lab = document.createElement('div'); lab.className='role'; lab.textContent = m.label||role;
-        bub.innerHTML = rendered;
-        wrap.appendChild(lab); wrap.appendChild(bub);
-      }
-      container.appendChild(wrap);
-    });
+    } catch (e) {}
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed'; ta.style.top = '0'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) { return false; }
   }
+  function flash(btn, label){
+    const prev = btn.textContent;
+    btn.textContent = label;
+    window.setTimeout(()=>{ btn.textContent = prev; }, 1100);
+  }
+  // Raw body used as the find-match source for a message. Tool messages carry a
+  // `match` field with the unfenced body (matching the TUI); everything else
+  // falls back to its rendered-source `content`. Find searches this text, not
+  // the fenced/rendered card, so a query hits the same bytes the TUI would.
+  function matchSource(m){ return (m.match != null ? m.match : m.content) || ''; }
+
+  // Body-only match text per stable key (populated as cards are built). Find
+  // matches against this map, not the card's textContent, so chrome/labels are
+  // never counted as a hit.
+  const matchText = new Map();
+
+  // Build one message/agent node. The stable key becomes the DOM id (and the
+  // <details> liveKey), so anchors, open-state, and reconciliation are all
+  // keyed by identity rather than list position.
+  function buildNode(m, container){
+    const key = m.key || '';
+    if (m.kind === 'agent'){
+      const wrap = document.createElement('div'); wrap.className = 'msg agent';
+      if (key){ wrap.id = key; wrap.dataset.key = key; }
+      const det = document.createElement('details'); det.dataset.liveKey = key;
+      const sum = document.createElement('summary'); sum.textContent = m.label||'sub-agent';
+      det.appendChild(sum);
+      const inner = document.createElement('div'); inner.className = 'agent-thread';
+      (m.messages||[]).forEach((x)=> buildNode(x, inner));
+      det.appendChild(inner);
+      wrap.appendChild(det);
+      container.appendChild(wrap);
+      return;
+    }
+    const role = (m.role||'assistant');
+    const wrap = document.createElement('div'); wrap.className = 'msg '+role;
+    if (key){ wrap.id = key; wrap.dataset.key = key; }
+    // Record the body-only text (no header/chrome) for find matching, keyed by
+    // stable id, so searching matches the message body only.
+    if (key) matchText.set(key, matchSource(m).toLowerCase());
+    const bub = document.createElement('div'); bub.className='bubble';
+    const rendered = md.render(normMath(m.content||''));
+    if (m.kind === 'tool' || m.kind === 'thinking'){
+      const det = document.createElement('details'); det.dataset.liveKey = key;
+      const sum = document.createElement('summary'); sum.textContent = m.label||role;
+      det.appendChild(sum);
+      const inner = document.createElement('div'); inner.innerHTML = rendered;
+      det.appendChild(inner);
+      bub.appendChild(det);
+      wrap.appendChild(bub);
+    } else {
+      const lab = document.createElement('div'); lab.className='role'; lab.textContent = m.label||role;
+      bub.innerHTML = rendered;
+      wrap.appendChild(lab); wrap.appendChild(bub);
+    }
+    container.appendChild(wrap);
+  }
+  function renderThread(list, container){ (list||[]).forEach((m)=> buildNode(m, container)); }
+
+  // Count only real messages, excluding kind:'agent' container entries, so the
+  // toolbar count agrees with the meta header's "N messages" and a newly
+  // spawned sub-agent container never increments the message count / new badge.
+  function messageCount(list){
+    return (list||[]).filter((m)=> m.kind !== 'agent').length;
+  }
+  // Per-agent-container interior fingerprint (joined interior keys, which embed
+  // content digests). Lets the live append fast-path detect when a sub-agent's
+  // interior changed even though its container key stayed the same.
+  function agentFingerprints(list){
+    const fp = {};
+    (list||[]).forEach((m)=>{
+      if (m.kind === 'agent') fp[m.key || ''] = (m.messages||[]).map((x)=> x.key || '').join('\n');
+    });
+    return fp;
+  }
+
   const thread = document.getElementById('thread');
   renderThread(data.messages, thread);
+  let topKeys = (data.messages||[]).map((m)=> m.key || '');
+  let topFingerprints = agentFingerprints(data.messages);
 
-  // A live view polls a private loopback endpoint. Rerenders preserve the
-  // reader's position and expanded tool/sub-agent sections; it follows new
-  // output only when the reader was already near the bottom.
-  if (data.live){
-    let revision = data.live.revision || 0;
-    let polling = false;
-    const status = document.getElementById('live-status');
-    const setStatus = (text, cls='')=>{
-      if (!status) return;
-      status.textContent = text;
-      status.className = cls;
-    };
-    async function poll(){
-      if (polling) return;
-      polling = true;
-      try {
-        const separator = data.live.api.includes('?') ? '&' : '?';
-        const response = await fetch(
-          data.live.api + separator + 'revision=' + encodeURIComponent(revision),
-          {cache:'no-store'}
-        );
-        if (!response.ok) throw new Error('HTTP '+response.status);
-        const update = await response.json();
-        if (update.revision !== revision && update.payload){
-          const open = new Set(Array.from(thread.querySelectorAll('details[open]'))
-            .map((node)=>node.dataset.liveKey));
-          const oldY = window.scrollY;
-          const nearBottom = window.innerHeight + oldY >= document.documentElement.scrollHeight - 100;
-          thread.replaceChildren();
-          renderThread(update.payload.messages || [], thread);
-          thread.querySelectorAll('details').forEach((node)=>{
-            if (open.has(node.dataset.liveKey)) node.open = true;
-          });
-          revision = update.revision;
-          if (nearBottom) window.scrollTo(0, document.documentElement.scrollHeight);
-          else window.scrollTo(0, oldY);
-        }
-        if (update.error) setStatus('● LIVE · retrying', 'waiting');
-        else setStatus('● LIVE', '');
-      } catch (error) {
-        setStatus('● DISCONNECTED', 'error');
-      } finally {
-        polling = false;
-      }
-    }
-    window.setInterval(poll, data.live.poll_ms || 1500);
+  // ---- Message count + new-message indicator ----
+  const msgCountEl = document.getElementById('msg-count');
+  const newMsgsBtn = document.getElementById('new-msgs');
+  let renderedCount = messageCount(data.messages);
+  let pendingNew = 0;
+  function setMsgCount(n){
+    if (msgCountEl) msgCountEl.textContent = n + (n === 1 ? ' message' : ' messages');
   }
+  function updateNewBadge(){
+    if (!newMsgsBtn) return;
+    if (pendingNew > 0 && !follow){
+      newMsgsBtn.hidden = false;
+      newMsgsBtn.textContent = pendingNew + ' new ↓';
+    } else {
+      newMsgsBtn.hidden = true;
+    }
+  }
+  setMsgCount(renderedCount);
+
+  // ---- Transcript find (browser equivalent of the TUI find) ----
+  const findInput = document.getElementById('find-input');
+  const findCount = document.getElementById('find-count');
+  const findNext = document.getElementById('find-next');
+  const findPrev = document.getElementById('find-prev');
+  let matches = [];
+  let matchIndex = -1;
+  let findQuery = '';
+  let activeKey = '';
+
+  // Leaf message cards: a .msg with no nested .msg. This covers main-thread and
+  // sub-agent-interior messages without double-counting agent containers.
+  function leafCards(){
+    return Array.from(thread.querySelectorAll('.msg')).filter((el)=> !el.querySelector('.msg'));
+  }
+  function updateFindCount(){
+    if (!findCount) return;
+    if (!findQuery.trim()){ findCount.textContent = ''; return; }
+    findCount.textContent = matches.length ? (matchIndex + 1) + ' / ' + matches.length : '0 / 0';
+  }
+  function applyMatchClasses(){
+    thread.querySelectorAll('.match-hit, .match-active').forEach((el)=>
+      el.classList.remove('match-hit', 'match-active'));
+    matches.forEach((el)=> el.classList.add('match-hit'));
+    if (matchIndex >= 0 && matches[matchIndex]) matches[matchIndex].classList.add('match-active');
+  }
+  // Reveal a card: open its own <details> and every ancestor <details> so a hit
+  // hidden inside a collapsed tool/thinking/sub-agent block becomes visible.
+  function revealElement(el){
+    let node = el;
+    while (node && node !== document.body){
+      if (node.tagName === 'DETAILS') node.open = true;
+      node = node.parentElement;
+    }
+    el.querySelectorAll('details').forEach((d)=>{ d.open = true; });
+  }
+  function recomputeMatches(){
+    const q = (findQuery || '').trim().toLowerCase();
+    if (!q){
+      matches = []; matchIndex = -1; activeKey = '';
+      applyMatchClasses(); updateFindCount();
+      return;
+    }
+    matches = leafCards().filter((el)=> (matchText.get(el.dataset.key) || '').includes(q));
+    let idx = activeKey ? matches.findIndex((el)=> el.dataset.key === activeKey) : -1;
+    if (idx < 0) idx = matches.length ? 0 : -1;
+    matchIndex = idx;
+    activeKey = matchIndex >= 0 ? (matches[matchIndex].dataset.key || '') : '';
+    applyMatchClasses();
+    updateFindCount();
+  }
+  function gotoMatch(i){
+    if (!matches.length){ updateFindCount(); return; }
+    matchIndex = ((i % matches.length) + matches.length) % matches.length;
+    activeKey = matches[matchIndex].dataset.key || '';
+    applyMatchClasses();
+    revealElement(matches[matchIndex]);
+    matches[matchIndex].scrollIntoView({block:'center'});
+    updateFindCount();
+  }
+  if (findInput){
+    findInput.addEventListener('input', ()=>{ findQuery = findInput.value; recomputeMatches(); });
+    findInput.addEventListener('keydown', (e)=>{
+      if (e.key === 'Enter'){
+        e.preventDefault();
+        gotoMatch(e.shiftKey ? matchIndex - 1 : matchIndex + 1);
+      } else if (e.key === 'Escape'){
+        findInput.blur();
+      }
+    });
+  }
+  if (findNext) findNext.addEventListener('click', ()=> gotoMatch(matchIndex + 1));
+  if (findPrev) findPrev.addEventListener('click', ()=> gotoMatch(matchIndex - 1));
+  document.addEventListener('keydown', (e)=>{
+    if (e.key === '/' && findInput && document.activeElement !== findInput){
+      const tag = (document.activeElement && document.activeElement.tagName) || '';
+      if (tag !== 'INPUT' && tag !== 'TEXTAREA'){ e.preventDefault(); findInput.focus(); }
+    }
+  });
+
+  // ---- Fragment anchor highlight ----
+  // Resolve the element the current #fragment points at (decoded, may be null).
+  function anchoredElement(){
+    const raw = location.hash.slice(1);
+    if (!raw) return null;
+    let id;
+    try { id = decodeURIComponent(raw); } catch (e) { id = raw; }
+    return document.getElementById(id);
+  }
+  // Full navigation to a #fragment: force the target (and its ancestors) open,
+  // highlight it, and optionally scroll. Only ever driven by a real navigation
+  // — the initial load and genuine `hashchange` events — never by a live poll.
+  function applyHash(doScroll){
+    const el = anchoredElement();
+    if (!el) return;
+    document.querySelectorAll('.anchor-active').forEach((n)=> n.classList.remove('anchor-active'));
+    revealElement(el);
+    el.classList.add('anchor-active');
+    if (doScroll) el.scrollIntoView({block:'center'});
+  }
+  // After a live rerender rebuilds every card, the anchored card is a fresh DOM
+  // node that has lost its highlight class. Re-apply the highlight so a
+  // fragment-linked card stays marked, but deliberately DO NOT re-open its
+  // <details> and DO NOT scroll: the reader may have collapsed or scrolled away
+  // since arriving, and only a real navigation should force reveal. This keeps
+  // the poll from perpetually re-opening/re-centering the anchored card.
+  function reapplyAnchor(){
+    const el = anchoredElement();
+    if (!el) return;
+    document.querySelectorAll('.anchor-active').forEach((n)=> n.classList.remove('anchor-active'));
+    el.classList.add('anchor-active');
+  }
+  window.addEventListener('hashchange', ()=> applyHash(true));
+
+  // ---- Live view: polling transport with pause / follow / reconcile ----
+  const isLive = !!data.live;
+  let revision = isLive ? (data.live.revision || 0) : 0;
+  const pollMs = isLive ? (data.live.poll_ms || 1500) : 1500;
+  let paused = false;
+  let follow = true;
+  let inFlight = false;
+  let pollTimer = null;
+  const statusEl = document.getElementById('live-status');
+  const updatedEl = document.getElementById('updated-at');
+  const followBtn = document.getElementById('toggle-follow');
+  const pauseBtn = document.getElementById('toggle-pause');
+  const refreshBtn = document.getElementById('refresh-now');
+
+  function nearBottom(){
+    return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
+  }
+  function setStatus(text, cls){
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.className = 'tb-status' + (cls ? ' ' + cls : '');
+  }
+  function setUpdated(iso){
+    if (!updatedEl || !iso) return;
+    try { updatedEl.textContent = 'updated ' + new Date(iso).toLocaleTimeString(); }
+    catch (e) { updatedEl.textContent = ''; }
+  }
+  if (isLive && data.live.updated_at) setUpdated(data.live.updated_at);
+
+  // Reconcile a fresh payload against the DOM. Append-only when the old top-level
+  // keys are a strict prefix of the new ones (content edits change keys, so a
+  // prefix match means pure appends) AND no shared sub-agent container's interior
+  // changed. A container key is `agent-{id}`, stable regardless of interior
+  // content, so a poll can deliver a new main-thread message *and* new interior
+  // messages inside an existing sub-agent at once; taking the append fast-path
+  // then would leave the stale interior (and its `· N msgs` label) behind. When
+  // any shared agent's interior fingerprint changed we fall through to the full
+  // rerender, which rebuilds every card and preserves open <details> by key.
+  function applyPayload(payload){
+    const list = payload.messages || [];
+    const newKeys = list.map((m)=> m.key || '');
+    const newFingerprints = agentFingerprints(list);
+    const oldKeys = topKeys;
+    const wasNear = nearBottom();
+    const oldY = window.scrollY;
+    const newMsgCount = messageCount(list);
+    const added = Math.max(0, newMsgCount - renderedCount);
+    const followed = follow && wasNear;
+    const interiorChanged = Object.keys(topFingerprints).some(
+      (k)=> (k in newFingerprints) && newFingerprints[k] !== topFingerprints[k]);
+    const isPrefix = oldKeys.length < newKeys.length
+      && oldKeys.every((k, i)=> k === newKeys[i])
+      && !interiorChanged;
+    if (isPrefix){
+      const frag = document.createDocumentFragment();
+      for (let i = oldKeys.length; i < list.length; i++) buildNode(list[i], frag);
+      thread.appendChild(frag);
+    } else {
+      const open = new Set(Array.from(thread.querySelectorAll('details[open]'))
+        .map((node)=> node.dataset.liveKey));
+      thread.replaceChildren();
+      renderThread(list, thread);
+      thread.querySelectorAll('details').forEach((node)=>{
+        if (open.has(node.dataset.liveKey)) node.open = true;
+      });
+    }
+    topKeys = newKeys;
+    topFingerprints = newFingerprints;
+    renderedCount = newMsgCount;
+    setMsgCount(renderedCount);
+    if (followed){
+      pendingNew = 0;
+      window.scrollTo(0, document.documentElement.scrollHeight);
+    } else {
+      window.scrollTo(0, oldY);
+      if (added > 0) pendingNew += added;
+    }
+    updateNewBadge();
+    recomputeMatches();
+    // Re-mark (but never re-reveal/re-scroll) the anchored card after a rerender.
+    reapplyAnchor();
+  }
+
+  async function poll(manual){
+    if (inFlight) return;
+    if (paused && !manual) return;
+    inFlight = true;
+    try {
+      const separator = data.live.api.includes('?') ? '&' : '?';
+      const response = await fetch(
+        data.live.api + separator + 'revision=' + encodeURIComponent(revision),
+        {cache:'no-store'}
+      );
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const update = await response.json();
+      if (update.updated_at) setUpdated(update.updated_at);
+      if (update.revision !== revision && update.payload){
+        applyPayload(update.payload);
+        revision = update.revision;
+      }
+      if (paused) setStatus('❚❚ PAUSED', 'paused');
+      else if (update.error) setStatus('● RETRYING', 'waiting');
+      else setStatus('● LIVE', '');
+    } catch (error) {
+      setStatus('● DISCONNECTED', 'error');
+    } finally {
+      inFlight = false;
+    }
+  }
+  // A single self-rescheduling timer (never a repeating interval) so polls can
+  // never overlap or drift, and pausing is a browser-side no-op that keeps the timer.
+  function schedule(){
+    if (!isLive) return;
+    window.clearTimeout(pollTimer);
+    pollTimer = window.setTimeout(async ()=>{
+      if (!paused) await poll(false);
+      schedule();
+    }, pollMs);
+  }
+
+  if (pauseBtn) pauseBtn.addEventListener('click', ()=>{
+    paused = !paused;
+    pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+    pauseBtn.setAttribute('aria-pressed', paused ? 'true' : 'false');
+    if (paused){ setStatus('❚❚ PAUSED', 'paused'); }
+    else { setStatus('● LIVE', ''); poll(false); }
+  });
+  if (followBtn) followBtn.addEventListener('click', ()=>{
+    follow = !follow;
+    followBtn.setAttribute('aria-pressed', follow ? 'true' : 'false');
+    followBtn.classList.toggle('on', follow);
+    if (follow){
+      pendingNew = 0; updateNewBadge();
+      window.scrollTo(0, document.documentElement.scrollHeight);
+    }
+  });
+  if (refreshBtn) refreshBtn.addEventListener('click', ()=> poll(true));
+  if (newMsgsBtn) newMsgsBtn.addEventListener('click', ()=>{
+    pendingNew = 0; updateNewBadge();
+    window.scrollTo(0, document.documentElement.scrollHeight);
+  });
+
+  if (isLive){
+    document.body.classList.add('is-live');
+    if (followBtn) followBtn.classList.add('on');
+    setStatus('● LIVE', '');
+    schedule();
+  }
+
+  // ---- Copy session id (reuses the shared clipboard helper) ----
+  const copyIdBtn = document.getElementById('copy-session-id');
+  if (copyIdBtn) copyIdBtn.addEventListener('click', async ()=>{
+    const ok = await copyText(copyIdBtn.dataset.copy || data.session_id || '');
+    flash(copyIdBtn, ok ? 'Copied' : 'Failed');
+  });
+
+  // Honor a #fragment present on initial load (after the thread is rendered).
+  applyHash(true);
 </script>
 </body></html>
 """
@@ -444,6 +817,88 @@ def session_html_payload(
     }
 
 
+def format_meta_header_html(
+    session: SessionMeta,
+    message_count: int,
+    subagent_count: int = 0,
+) -> str:
+    """Build the inner HTML of the viewer's ``header.meta`` details block.
+
+    Renders provider, model, project, aggregation host, the full session id with
+    a Copy-ID button, the start/end time + duration, message and sub-agent
+    counts, and context/cumulative token totals. Fields that are empty for a
+    given session/provider (model, host, sub-agents, tokens) are omitted
+    gracefully so the header never shows blank cells. All text is
+    ``html.escape``-d; the session id is also placed in the button's
+    ``data-copy`` attribute (read by the inline clipboard helper).
+    """
+    parts: list[str] = [f"<b>{html.escape(session.provider.value)}</b>"]
+    if session.model:
+        parts.append(f"model <code>{html.escape(str(session.model))}</code>")
+    parts.append(f"<code>{html.escape(session.project_path)}</code>")
+    if session.host:
+        parts.append(f"host <code>{html.escape(session.host)}</code>")
+    sid = html.escape(session.id)
+    parts.append(
+        f"id <code>{sid}</code>"
+        f'<button type="button" class="metabtn" id="copy-session-id" '
+        f'data-copy="{sid}" title="Copy session ID">Copy ID</button>'
+    )
+    parts.append(html.escape(format_time_range(session)))
+    counts = f"{message_count} msgs"
+    if subagent_count:
+        counts += f" · ⑂{subagent_count} sub-agents"
+    parts.append(counts)
+    for bit in token_summary_parts(session):
+        parts.append(html.escape(bit))
+    return " &nbsp;·&nbsp; ".join(parts)
+
+
+def _toolbar_html(is_live: bool) -> str:
+    """Build the sticky reader toolbar.
+
+    The transcript-find group and message count work from ``file://`` with no
+    server, so they render in both static and live documents. The live-only
+    group (status, follow/pause/refresh, last-update, new-message indicator) is
+    emitted *only* for live views, so a static export cannot expose controls
+    that depend on the private polling server.
+    """
+    find_group = (
+        '<div class="tb-group tb-find">'
+        '<input id="find-input" type="search" placeholder="Find in transcript" '
+        'autocomplete="off" autocorrect="off" spellcheck="false" '
+        'aria-label="Find in transcript">'
+        '<span id="find-count" class="tb-count" aria-live="polite"></span>'
+        '<button id="find-prev" type="button" class="tb-btn" '
+        'title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>'
+        '<button id="find-next" type="button" class="tb-btn" '
+        'title="Next match (Enter)" aria-label="Next match">↓</button>'
+        "</div>"
+    )
+    if is_live:
+        info_group = (
+            '<div class="tb-group tb-live">'
+            '<span id="msg-count" class="tb-count"></span>'
+            '<button id="new-msgs" type="button" class="tb-badge" hidden></button>'
+            '<span id="live-status" class="tb-status">● LIVE</span>'
+            '<span id="updated-at" class="tb-meta"></span>'
+            '<button id="toggle-follow" type="button" class="tb-btn on" '
+            'aria-pressed="true" title="Follow new output">Follow</button>'
+            '<button id="toggle-pause" type="button" class="tb-btn" '
+            'aria-pressed="false" title="Pause live polling">Pause</button>'
+            '<button id="refresh-now" type="button" class="tb-btn" '
+            'title="Refresh now">Refresh</button>'
+            "</div>"
+        )
+    else:
+        info_group = (
+            '<div class="tb-group tb-info">'
+            '<span id="msg-count" class="tb-count"></span>'
+            "</div>"
+        )
+    return f'<header class="toolbar" role="toolbar">{find_group}{info_group}</header>'
+
+
 def format_session_html(
     session: SessionMeta,
     messages: list[Message],
@@ -452,6 +907,7 @@ def format_session_html(
     live_api: str | None = None,
     live_revision: int = 0,
     live_poll_ms: int = 1500,
+    live_updated_at: str | None = None,
 ) -> str:
     """Render a session + messages as a self-contained HTML document.
 
@@ -467,23 +923,18 @@ def format_session_html(
     """
     title = f"{session.provider.value} · {session.id[:8]}"
 
-    meta_parts = [f"<b>{html.escape(session.provider.value)}</b>"]
-    if session.model:
-        meta_parts.append(f"model <code>{html.escape(str(session.model))}</code>")
-    meta_parts.append(f"<code>{html.escape(session.project_path)}</code>")
-    meta_parts.append(html.escape(session.timestamp.strftime("%Y-%m-%d %H:%M")))
-    meta_parts.append(f"{len(messages)} msgs")
-    meta = " &nbsp;·&nbsp; ".join(meta_parts)
-    if live_api is not None:
-        meta += ' &nbsp;·&nbsp; <span id="live-status">● LIVE</span>'
+    meta = format_meta_header_html(session, len(messages), len(subagents or []))
 
     payload = session_html_payload(session, messages, subagents)
     if live_api is not None:
-        payload["live"] = {
+        live_cfg: dict = {
             "api": live_api,
             "revision": live_revision,
             "poll_ms": max(250, live_poll_ms),
         }
+        if live_updated_at is not None:
+            live_cfg["updated_at"] = live_updated_at
+        payload["live"] = live_cfg
     # Escape "</" so the embedded JSON can't terminate the <script> early.
     data = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
 
@@ -493,6 +944,7 @@ def format_session_html(
     # right pass and never rescans replacement text.
     mapping = {
         "__TITLE__": html.escape(title),
+        "__TOOLBAR__": _toolbar_html(live_api is not None),
         "__META__": meta,
         "__KATEX_CSS__": _load_asset("katex.min.css"),
         "__HLJS_CSS__": _load_asset("github.min.css"),
@@ -503,6 +955,6 @@ def format_session_html(
         "__DATA__": data,
     }
     pattern = re.compile(
-        "__(?:TITLE|META|KATEX_CSS|HLJS_CSS|MARKDOWNIT_JS|KATEX_JS|TEXMATH_JS|HLJS_JS|DATA)__"
+        "__(?:TITLE|TOOLBAR|META|KATEX_CSS|HLJS_CSS|MARKDOWNIT_JS|KATEX_JS|TEXMATH_JS|HLJS_JS|DATA)__"
     )
     return pattern.sub(lambda mo: mapping[mo.group(0)], _HTML_TEMPLATE)

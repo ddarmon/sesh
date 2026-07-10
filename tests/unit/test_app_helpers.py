@@ -189,24 +189,6 @@ def test_session_from_search_result_copilot_source_path() -> None:
     assert session.source_path == "/tmp/.copilot/session-state/abc-123"
 
 
-def test_highlight_text_case_insensitive() -> None:
-    """All case variants of the search term are highlighted."""
-    out = SeshApp._highlight_text("Needle and needle", "needle")
-    assert out.count("[reverse]") == 2
-    assert "Needle" in out
-
-
-def test_highlight_text_regex_special_chars() -> None:
-    """Regex metacharacters in the search term are escaped, not interpreted."""
-    out = SeshApp._highlight_text("a.b (x)", ".b (")
-    assert "[reverse].b ([/reverse]" in out
-
-
-def test_highlight_text_no_match() -> None:
-    """Text with no match is returned unchanged."""
-    assert SeshApp._highlight_text("hello", "zzz") == "hello"
-
-
 def test_resume_command_claude(monkeypatch) -> None:
     """Claude resume builds 'claude --resume <id>' with the project path."""
     monkeypatch.setattr("sesh.app.shutil.which", lambda name: "/bin/claude")
@@ -504,28 +486,62 @@ def test_agents_visible_reflects_override_without_persisting() -> None:
     assert "Agents:AUTO" not in app._format_status_suffix()
 
 
-def test_write_message_indents_markdown_assistant_body() -> None:
-    """[finding 6] A sub-agent assistant Markdown body is padded by the indent."""
-    from rich.markdown import Markdown
-    from rich.padding import Padding
 
-    app = SeshApp()
-    writes: list[object] = []
 
-    class _FakeView:
-        def write(self, renderable):
-            writes.append(renderable)
+def test_format_session_header_full_fields() -> None:
+    """The TUI details header carries provider, model, host, id, time range,
+    counts, token totals, and the resume command when provided."""
+    from sesh.app import format_session_header
 
-    msg = make_message(role="assistant", content="# Heading\n\nbody",
-                       content_type="text")
-    # Indented (sub-agent interior): the Markdown renderable is wrapped in
-    # Padding with a left offset equal to the indent width.
-    app._write_message(_FakeView(), msg, "", indent="  ")
-    pads = [w for w in writes if isinstance(w, Padding)]
-    assert pads and pads[0].left == 2
+    session = make_session(
+        id="sess-9",
+        provider=Provider.CLAUDE,
+        project_path="/repo",
+        model="claude-opus-4-8",
+        start_timestamp=datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 7, 10, 15, 0, tzinfo=timezone.utc),
+        input_tokens=1000,
+        output_tokens=200,
+        cumulative_input_tokens=5000,
+        host="laptop",
+    )
+    header = format_session_header(
+        session,
+        message_count=7,
+        subagent_count=2,
+        resume_cmd="claude --resume sess-9",
+    )
+    assert "claude" in header
+    assert "model claude-opus-4-8" in header
+    assert "[laptop]" in header
+    assert "sess-9" in header
+    assert "2026-07-10 14:00 → 15:00 (1h)" in header
+    assert "7 msgs" in header
+    assert "⑂2" in header
+    assert "1,200 ctx tokens" in header
+    assert "5,200 cumulative" in header
+    assert "resume: claude --resume sess-9" in header
 
-    # No indent (main thread): the Markdown renderable is written bare.
-    writes.clear()
-    app._write_message(_FakeView(), msg, "", indent="")
-    assert any(isinstance(w, Markdown) for w in writes)
-    assert not any(isinstance(w, Padding) for w in writes)
+
+def test_format_session_header_omits_empty_fields() -> None:
+    """Model, host, sub-agents, tokens, and resume are dropped when unavailable."""
+    from sesh.app import format_session_header
+
+    session = make_session(
+        id="s-min",
+        provider=Provider.CURSOR,
+        model=None,
+        host=None,
+        input_tokens=None,
+        output_tokens=None,
+        cumulative_input_tokens=None,
+    )
+    header = format_session_header(session, message_count=1)
+    assert "model " not in header
+    assert "[" not in header  # no host bracket
+    assert "⑂" not in header
+    assert "ctx tokens" not in header
+    assert "cumulative" not in header
+    assert "resume:" not in header
+    assert "cursor" in header
+    assert "1 msgs" in header

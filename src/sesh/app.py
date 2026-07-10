@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 import platform
-import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -22,13 +23,18 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
-    RichLog,
     Static,
     Tree,
 )
 
+from sesh import transcript
 from sesh.bookmarks import load_bookmarks, save_bookmarks
-from sesh.export import format_session_markdown
+from sesh.export import (
+    format_duration as _format_duration,
+    format_session_markdown,
+    format_time_range,
+    token_summary_parts,
+)
 from sesh.models import (
     Message,
     Project,
@@ -39,6 +45,7 @@ from sesh.models import (
     filter_messages,
 )
 from sesh.preferences import load_preferences, save_preferences
+from sesh.transcript_view import TranscriptView
 
 _DATETIME_MIN = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -104,31 +111,36 @@ def _relative_time(dt: datetime, now: datetime | None = None) -> str:
     return dt.strftime("%m-%d %H:%M")
 
 
-def _format_duration(start: datetime | None, end: datetime | None) -> str:
-    """Return a compact duration for a session span, or empty string if unavailable."""
-    if start is None or end is None:
-        return ""
+def format_session_header(
+    session: SessionMeta,
+    *,
+    message_count: int,
+    subagent_count: int = 0,
+    resume_cmd: str | None = None,
+) -> str:
+    """Compose the compact per-session details line shown above the transcript.
 
-    if start.tzinfo is None:
-        start = start.replace(tzinfo=timezone.utc)
-    else:
-        start = start.astimezone(timezone.utc)
-
-    if end.tzinfo is None:
-        end = end.replace(tzinfo=timezone.utc)
-    else:
-        end = end.astimezone(timezone.utc)
-
-    delta_seconds = (end - start).total_seconds()
-    if delta_seconds <= 0:
-        return ""
-    if delta_seconds < 60:
-        return ""
-    if delta_seconds < 3600:
-        return f"{int(delta_seconds // 60)}m"
-    if delta_seconds < 86400:
-        return f"{int(delta_seconds // 3600)}h"
-    return f"{int(delta_seconds // 86400)}d"
+    Pure and side-effect free (no widget / PATH access) so it is unit-testable in
+    isolation. Mirrors the HTML viewer's meta header — provider, model, host,
+    full session id, start/end + duration, message and sub-agent counts, and
+    context/cumulative token totals — and, unlike the HTML header, appends the
+    resume command when the session is resumable and its CLI is installed
+    (``resume_cmd`` is precomputed by the caller). Empty fields are omitted.
+    """
+    parts: list[str] = [session.provider.value]
+    if session.model:
+        parts.append(f"model {session.model}")
+    if session.host:
+        parts.append(f"[{session.host}]")
+    parts.append(session.id)
+    parts.append(format_time_range(session))
+    parts.append(f"{message_count} msgs")
+    if subagent_count:
+        parts.append(f"⑂{subagent_count}")
+    parts.extend(token_summary_parts(session))
+    if resume_cmd:
+        parts.append(f"resume: {resume_cmd}")
+    return "  ·  ".join(parts)
 
 
 def _compact_tokens(input_tokens: int | None, output_tokens: int | None) -> str:
@@ -192,12 +204,6 @@ class SessionTree(Tree):
     """Left pane: project/session tree."""
 
     BORDER_TITLE = "Sessions"
-
-
-class MessageView(RichLog):
-    """Right pane: message viewer."""
-
-    BORDER_TITLE = "Messages"
 
 
 class ConfirmDeleteScreen(ModalScreen[bool]):
@@ -373,12 +379,31 @@ class HelpScreen(ModalScreen[None]):
                 [
                     ("f", "Cycle provider filter"),
                     ("s", "Cycle sort mode"),
-                    ("n", "Find in current messages"),
                     ("t", "Toggle tool messages"),
                     ("T", "Toggle thinking messages"),
                     ("a", "Toggle sub-agent threads"),
                     ("F", "Toggle fullscreen message pane"),
                     ("S", "Open Terminal-tab snapshots (macOS)"),
+                ],
+            ),
+            (
+                "Transcript",
+                [
+                    ("Tab", "Move focus tree ↔ transcript"),
+                    ("↑/↓", "Move message selection (or j/k)"),
+                    ("Home/End", "Jump to first / last message"),
+                    ("Enter", "Expand / collapse selected message"),
+                    ("C", "Copy full selected message"),
+                ],
+            ),
+            (
+                "Find in transcript",
+                [
+                    ("n", "Open find / next match"),
+                    ("N", "Previous match"),
+                    ("Enter", "Next match (in find box)"),
+                    ("↑/↓", "Previous / next match (in find box)"),
+                    ("Esc", "Close find"),
                 ],
             ),
             (
@@ -816,15 +841,39 @@ class SeshApp(App):
         width: 1fr;
     }
 
-    #message-search {
+    #message-search-bar {
         display: none;
         dock: top;
         height: 3;
         padding: 0 1;
     }
 
-    #message-search.visible {
+    #message-search-bar.visible {
         display: block;
+    }
+
+    #message-search {
+        width: 1fr;
+    }
+
+    #message-find-count {
+        width: auto;
+        min-width: 10;
+        content-align: right middle;
+        color: $text-muted;
+        padding: 0 1;
+    }
+
+    #message-header {
+        height: auto;
+        max-height: 3;
+        overflow: hidden;
+        color: $text-muted;
+        padding: 0 1;
+    }
+
+    #message-header.hidden {
+        display: none;
     }
 
     #message-view {
@@ -863,6 +912,9 @@ class SeshApp(App):
         Binding("K", "prev_project", "Prev Proj", key_display="K"),
         Binding("b", "toggle_bookmark", "Bookmark"),
         Binding("n", "search_messages", "Find"),
+        Binding("N", "find_prev", "Find Prev", key_display="N", show=False),
+        Binding("shift+enter", "find_prev", "Find Prev", show=False),
+        Binding("C", "copy_focused_message", "Copy Msg", key_display="C"),
         Binding("t", "toggle_tools", "Tools"),
         Binding("T", "toggle_thinking", "Thinking", key_display="T"),
         Binding("a", "toggle_agents", "Agents"),
@@ -930,8 +982,11 @@ class SeshApp(App):
         with Horizontal(id="main"):
             yield SessionTree("Sessions", id="session-tree")
             with Vertical(id="message-pane"):
-                yield Input(placeholder="Find in messages...", id="message-search")
-                yield MessageView(id="message-view", wrap=True, markup=True)
+                with Horizontal(id="message-search-bar"):
+                    yield Input(placeholder="Find in messages...", id="message-search")
+                    yield Static("", id="message-find-count")
+                yield Static("", id="message-header", classes="hidden")
+                yield TranscriptView(id="message-view")
         yield Static("Loading...", id="status-bar")
 
     def on_mount(self) -> None:
@@ -1402,7 +1457,7 @@ class SeshApp(App):
         self._fullscreen = not self._fullscreen
         self.query_one("#main", Horizontal).toggle_class("fullscreen")
         if self._fullscreen:
-            self.query_one("#message-view", MessageView).focus()
+            self.query_one("#message-view", TranscriptView).focus()
         self._save_current_prefs()
         self._refresh_status()
 
@@ -1467,7 +1522,17 @@ class SeshApp(App):
         """UI thread: store the freshly loaded main thread and reset agent state."""
         self._current_subagents = []
         self._subagents_loaded = False
-        self._render_messages(messages, session, subagents=[])
+        # A new session starts with transcript find cleared so match state never
+        # bleeds across sessions.
+        self._reset_transcript_find()
+        self._render_messages(messages, session, subagents=[], highlight="")
+
+    def _reset_transcript_find(self) -> None:
+        """Hide the transcript-find bar and clear its query + counter."""
+        bar = self.query_one("#message-search-bar", Horizontal)
+        bar.remove_class("visible")
+        self.query_one("#message-search", Input).value = ""
+        self.query_one("#message-find-count", Static).update("")
 
     def _load_subagents(self, session: SessionMeta) -> None:
         """Worker-thread body: single-pass discover+load of sub-agent threads."""
@@ -1537,52 +1602,24 @@ class SeshApp(App):
             return None
         return cls(base_dir=base_dir, host=host)
 
-    def _render_messages(
-        self,
-        messages: list[Message],
-        session: SessionMeta,
-        highlight: str = "",
-        subagents: list[tuple[SubagentMeta, list[Message]]] | None = None,
-    ) -> None:
-        """Render messages in the right pane.
+    def _compose_transcript_items(
+        self, messages: list[Message]
+    ) -> list[transcript.TranscriptItem]:
+        """Filter + compose the current visible transcript into keyed items.
 
-        ``subagents`` (loaded off-thread by :meth:`_load_messages`) is stored so
-        the ``a`` toggle and t/T re-renders can splice sub-agent threads without
-        re-reading files. Passing None (a re-render) keeps the stored threads.
+        Sub-agent threads (already loaded off-thread by :meth:`_load_messages`)
+        are spliced in chronologically when agents are visible. Visibility
+        filtering happens here so tool/thinking/agent toggles change the composed
+        item set while stable keys stay put (see :mod:`sesh.transcript`).
         """
-        self._current_messages = messages
-        self._current_session = session
-        if subagents is not None:
-            self._current_subagents = subagents
-
-        view = self.query_one("#message-view", MessageView)
-        view.clear()
-
-        # A session can have zero parseable main messages but visible sub-agent
-        # threads — don't early-return on empty main until agents are ruled out.
-        has_agents = bool(self._agents_visible and self._current_subagents)
-
-        if not messages and not has_agents:
-            view.write("[dim]No messages found.[/dim]")
-            return
-
         visible = filter_messages(
             messages,
             include_tools=self._show_tools,
             include_thinking=self._show_thinking,
         )
-
-        if not visible and not has_agents:
-            if messages:
-                view.write("[dim]No visible messages. Press t for tool calls, T for thinking.[/dim]")
-            else:
-                view.write("[dim]No messages found.[/dim]")
-            return
-
-        hl = highlight.lower()
-
-        if has_agents:
-            filtered_subagents = [
+        subagents_arg = None
+        if self._agents_visible and self._current_subagents:
+            subagents_arg = [
                 (
                     meta,
                     filter_messages(
@@ -1593,127 +1630,147 @@ class SeshApp(App):
                 )
                 for meta, interior in self._current_subagents
             ]
-            for kind, payload in splice_subagent_threads(visible, filtered_subagents):
-                if kind == "message":
-                    self._write_message(view, payload, hl)
-                else:
-                    meta, interior = payload
-                    self._write_subagent(view, meta, interior, hl)
-        else:
-            for msg in visible:
-                self._write_message(view, msg, hl)
+        return transcript.compose_transcript(visible, subagents_arg)
 
-    def _write_subagent(
+    def _render_messages(
         self,
-        view: MessageView,
-        meta: SubagentMeta,
-        interior: list[Message],
-        hl: str,
+        messages: list[Message],
+        session: SessionMeta,
+        highlight: str | None = None,
+        subagents: list[tuple[SubagentMeta, list[Message]]] | None = None,
     ) -> None:
-        """Write a sub-agent thread: a header line, then indented interior."""
-        desc = meta.description or meta.agent_id
-        atype = meta.agent_type or "agent"
-        view.write(
-            f"\n[bold magenta]⑂ {atype}[/bold magenta] "
-            f"[dim]— {desc} · {meta.message_count} msgs[/dim]"
+        """Render the transcript in the right pane.
+
+        Builds stable, keyed :class:`~sesh.transcript.TranscriptItem` entries and
+        hands them to the :class:`~sesh.transcript_view.TranscriptView`, which
+        preserves per-message expansion state, the selection cursor, and the
+        active find match by stable key across tool/thinking/agent toggles and
+        live rerenders. ``highlight`` defaults to the current transcript-find
+        term so a toggle/append rerender keeps the highlight and active match;
+        pass an explicit value to override. ``subagents`` (loaded off-thread) is
+        stored so re-renders can splice sub-agent threads without re-reading
+        files; None keeps the stored ones.
+        """
+        self._current_messages = messages
+        self._current_session = session
+        if subagents is not None:
+            self._current_subagents = subagents
+        if highlight is None:
+            highlight = self._current_find_term()
+
+        view = self.query_one("#message-view", TranscriptView)
+        items = self._compose_transcript_items(messages)
+        empty_message = (
+            "No visible messages. Press t for tool calls, T for thinking."
+            if messages and not items
+            else "No messages found."
         )
-        if not interior:
-            view.write("  [dim](no visible sub-agent messages)[/dim]")
-            return
-        for msg in interior:
-            self._write_message(view, msg, hl, indent="  ")
+        view.set_transcript(items, highlight=highlight, empty_message=empty_message)
+        self._update_message_header(session, items)
+        self._update_find_count()
 
-    def _write_message(
-        self, view: MessageView, msg: Message, hl: str, indent: str = ""
+    def _update_message_header(
+        self, session: SessionMeta, items: list[transcript.TranscriptItem]
     ) -> None:
-        """Write one message to the pane. ``indent`` nests sub-agent interiors."""
-        ts = f" [dim]({msg.timestamp.strftime('%H:%M')})[/dim]" if msg.timestamp else ""
-        body = f"{indent}  "
+        """Refresh the compact per-session details header above the transcript.
 
-        if msg.content_type == "thinking":
-            view.write(f"\n{indent}[dim magenta]Thinking[/dim magenta]{ts}:")
-            thinking_text = (msg.thinking or "")[:3000]
-            view.write(f"{body}[dim]{self._highlight_text(thinking_text, hl)}[/dim]")
+        ``message_count`` is the number of *visible* main-thread messages (so it
+        tracks tool/thinking toggles); sub-agent count prefers the loaded threads
+        and falls back to the session's cheap discovery badge. The resume command
+        is shown only when the session is resumable and its CLI is on PATH.
+        """
+        message_count = sum(1 for it in items if it.kind == "message")
+        subagent_count = (
+            len(self._current_subagents)
+            if self._current_subagents
+            else session.subagent_count
+        )
+        resume_cmd = None
+        result = self._resume_command(session)
+        if result is not None:
+            resume_cmd = " ".join(result[0])
+        header = format_session_header(
+            session,
+            message_count=message_count,
+            subagent_count=subagent_count,
+            resume_cmd=resume_cmd,
+        )
+        widget = self.query_one("#message-header", Static)
+        widget.update(Text(header))
+        widget.remove_class("hidden")
 
-        elif msg.content_type == "tool_use":
-            tool = msg.tool_name or "tool"
-            view.write(f"\n{indent}[bold yellow]{tool}[/bold yellow] [dim](call)[/dim]{ts}:")
-            inp = (msg.tool_input or "")[:1000]
-            view.write(f"{body}{self._highlight_text(inp, hl)}")
-
-        elif msg.content_type == "tool_result":
-            tool = msg.tool_name or "tool"
-            view.write(f"\n{indent}[bold yellow]{tool}[/bold yellow] [dim](result)[/dim]{ts}:")
-            out = (msg.tool_output or "")[:2000]
-            view.write(f"{body}{self._highlight_text(out, hl)}")
-
-        elif msg.role == "user":
-            view.write(f"\n{indent}[bold cyan]User[/bold cyan]{ts}:")
-            content = msg.content[:2000]
-            view.write(f"{body}{self._highlight_text(content, hl)}")
-        elif msg.role == "assistant":
-            view.write(f"\n{indent}[bold green]Assistant[/bold green]{ts}:")
-            if hl:
-                content = msg.content[:5000]
-                view.write(f"{body}{self._highlight_text(content, hl)}")
-            else:
-                try:
-                    from rich.markdown import Markdown
-                    renderable = Markdown(msg.content[:5000])
-                    if indent:
-                        # Indent the Markdown renderable so sub-agent interior
-                        # assistant bodies keep the same nesting every other
-                        # message type gets (Rich Markdown ignores a text prefix).
-                        from rich.padding import Padding
-                        renderable = Padding(renderable, (0, 0, 0, len(indent)))
-                    view.write(renderable)
-                except Exception:
-                    view.write(f"{body}{msg.content[:2000]}")
-        elif msg.role == "tool":
-            tool = msg.tool_name or "tool"
-            view.write(f"\n{indent}[bold yellow]{tool}[/bold yellow]{ts}:")
-            content = msg.content[:500]
-            view.write(f"{body}{self._highlight_text(content, hl)}")
-
-    @staticmethod
-    def _highlight_text(text: str, term: str) -> str:
-        """Wrap case-insensitive matches of *term* in reverse markup."""
-        if not term:
-            return text
-        # Escape Rich markup in the term, then do case-insensitive replace
-        escaped = re.escape(term)
-        def _repl(m: re.Match) -> str:
-            return f"[reverse]{m.group()}[/reverse]"
-        return re.sub(escaped, _repl, text, flags=re.IGNORECASE)
+    def action_copy_focused_message(self) -> None:
+        """Copy the complete body of the focused transcript message."""
+        view = self.query_one("#message-view", TranscriptView)
+        body = view.copy_active()
+        if body is None:
+            self._set_status("No message selected to copy")
+            return
+        self._copy_text(body)
+        self._set_status("Message copied to clipboard")
 
     def action_search_messages(self) -> None:
-        """Toggle the message search input."""
+        """Open/focus transcript find; advance to the next hit if a query exists.
+
+        Unlike the old toggle, ``n`` never closes find (Escape does). When the
+        bar is already showing a query, ``n`` acts as "find next"; ``N`` /
+        :meth:`action_find_prev` goes backward.
+        """
+        bar = self.query_one("#message-search-bar", Horizontal)
         search = self.query_one("#message-search", Input)
-        if search.has_class("visible"):
-            search.remove_class("visible")
-            search.value = ""
-            # Re-render without highlights
-            if self._current_messages and self._current_session:
-                self._render_messages(self._current_messages, self._current_session)
+        if not bar.has_class("visible"):
+            bar.add_class("visible")
+        if search.value.strip():
+            self._find_next()
+            search.focus()
         else:
-            search.add_class("visible")
             search.focus()
 
+    def action_find_prev(self) -> None:
+        """Move to the previous transcript match (``N`` / ``Shift+Enter``)."""
+        search = self.query_one("#message-search", Input)
+        if not search.value.strip():
+            return
+        bar = self.query_one("#message-search-bar", Horizontal)
+        if not bar.has_class("visible"):
+            bar.add_class("visible")
+        self._find_prev()
+
+    def _find_next(self) -> None:
+        view = self.query_one("#message-view", TranscriptView)
+        view.find_next()
+        self._update_find_count()
+
+    def _find_prev(self) -> None:
+        view = self.query_one("#message-view", TranscriptView)
+        view.find_prev()
+        self._update_find_count()
+
+    def _update_find_count(self) -> None:
+        """Sync the ``i / n`` match counter from the transcript view."""
+        view = self.query_one("#message-view", TranscriptView)
+        self.query_one("#message-find-count", Static).update(view.find_label)
+
+    def _current_find_term(self) -> str:
+        """The active transcript-find term (empty when find is not showing)."""
+        bar = self.query_one("#message-search-bar", Horizontal)
+        if not bar.has_class("visible"):
+            return ""
+        return self.query_one("#message-search", Input).value
+
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Filter sessions as user types, or highlight in messages."""
+        """Filter sessions as user types, or drive transcript find in messages."""
         if event.input.id == "search-input":
             self._populate_tree(
                 filter_text=event.value,
                 provider_filter=self.current_filter,
             )
         elif event.input.id == "message-search":
-            if self._current_messages and self._current_session:
-                self._render_messages(
-                    self._current_messages, self._current_session, highlight=event.value
-                )
+            self.query_one("#message-view", TranscriptView).find(event.value)
+            self._update_find_count()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        """Full-text search on Enter."""
+        """Full-text search on Enter (session search); find-next in transcript find."""
         if event.input.id == "search-input" and event.value.strip():
             self.run_worker(
                 lambda: self._fulltext_search(event.value.strip()),
@@ -1721,6 +1778,27 @@ class SeshApp(App):
                 exclusive=True,
                 group="search",
             )
+        elif event.input.id == "message-search":
+            self._find_next()
+
+    def on_key(self, event: events.Key) -> None:
+        """Robust transcript-find navigation while the find input is focused.
+
+        ``Shift+Enter`` is not reliably delivered by every terminal, so
+        ``Up``/``Down`` (which the single-line find input does not otherwise use)
+        also navigate previous/next. ``Enter`` is left to ``on_input_submitted``.
+        """
+        focused = self.focused
+        if focused is None or focused.id != "message-search":
+            return
+        if event.key in ("shift+enter", "up"):
+            event.stop()
+            event.prevent_default()
+            self._find_prev()
+        elif event.key == "down":
+            event.stop()
+            event.prevent_default()
+            self._find_next()
 
     def _build_cwd_lookup(self) -> dict[tuple[str, str], str] | None:
         """Build a (session_id, provider) → project_path lookup from in-memory sessions."""
@@ -1774,13 +1852,17 @@ class SeshApp(App):
         self.query_one("#search-input", Input).focus()
 
     def action_clear_search(self) -> None:
-        # If message search is active, close it first
-        msg_search = self.query_one("#message-search", Input)
-        if msg_search.has_class("visible"):
-            msg_search.remove_class("visible")
+        # If transcript find is active, close it first (leaving the unrelated
+        # session-tree search state untouched) and restore focus to the pane.
+        bar = self.query_one("#message-search-bar", Horizontal)
+        if bar.has_class("visible"):
+            bar.remove_class("visible")
+            msg_search = self.query_one("#message-search", Input)
             msg_search.value = ""
-            if self._current_messages and self._current_session:
-                self._render_messages(self._current_messages, self._current_session)
+            view = self.query_one("#message-view", TranscriptView)
+            view.find("")
+            self._update_find_count()
+            view.focus()
             return
         search = self.query_one("#search-input", Input)
         search.value = ""

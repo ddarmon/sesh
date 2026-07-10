@@ -4,6 +4,8 @@ import json
 import re
 from datetime import datetime, timezone
 
+import pytest
+
 from sesh.export import format_session_html, format_session_markdown
 from sesh.models import Provider, SubagentMeta
 from tests.helpers import make_message, make_session
@@ -39,6 +41,13 @@ def _extract_payload(html_out: str) -> dict:
     )
     assert m is not None
     return json.loads(m.group(1).replace("<\\/", "</"))
+
+
+def _viewer_script(html_out: str) -> str:
+    """Return the final authored inline viewer script (after vendored libs)."""
+    scripts = re.findall(r"<script>(.*?)</script>", html_out, re.S)
+    assert scripts, "no attribute-free <script> block found"
+    return scripts[-1]
 
 
 def test_format_session_markdown_renders_message_types() -> None:
@@ -371,6 +380,44 @@ def test_html_message_keys_stay_stable_when_rows_are_inserted() -> None:
     assert before["messages"][0]["key"] == after["messages"][1]["key"]
 
 
+def test_html_payload_reuses_shared_transcript_keys() -> None:
+    """The embedded payload keys come from sesh.transcript, not a private algo."""
+    from sesh import transcript
+    from sesh.export import session_html_payload
+
+    session = make_session(id="s-keys", provider=Provider.CLAUDE)
+    msgs = [
+        make_message(role="user", content="hi", timestamp=None),
+        make_message(role="assistant", content="yo", timestamp=None),
+    ]
+    payload = session_html_payload(session, msgs)
+    expected = transcript.assign_message_keys(msgs)
+    assert [e["key"] for e in payload["messages"]] == expected
+
+
+def test_html_payload_agent_key_is_shared_container_anchor() -> None:
+    from sesh import transcript
+    from sesh.export import session_html_payload
+
+    session = make_session(id="s-agent-key", provider=Provider.CLAUDE)
+    messages = [
+        make_message(role="user", content="go",
+                     timestamp=datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)),
+        make_message(role="assistant", content="ok",
+                     timestamp=datetime(2025, 1, 1, 1, 0, tzinfo=timezone.utc)),
+    ]
+    meta, interior = _subagent(
+        interior=[make_message(role="assistant", content="nested", timestamp=None)]
+    )
+    payload = session_html_payload(session, messages, [(meta, interior)])
+    agent = next(e for e in payload["messages"] if e.get("kind") == "agent")
+    assert agent["key"] == transcript.agent_anchor(meta.agent_id)
+    # Interior message keys are namespaced by the sub-agent's agent_id.
+    assert agent["messages"][0]["key"] == transcript.assign_message_keys(
+        interior, namespace=meta.agent_id
+    )[0]
+
+
 def test_format_session_html_embeds_live_configuration() -> None:
     out = format_session_html(
         make_session(),
@@ -386,4 +433,449 @@ def test_format_session_html_embeds_live_configuration() -> None:
         "poll_ms": 800,
     }
     assert 'id="live-status"' in out
-    assert "window.setInterval" in out
+    # A single self-rescheduling timer (never setInterval) prevents overlapping
+    # polls; pause/follow/refresh controls are present in the live toolbar.
+    script = _viewer_script(out)
+    assert "window.setTimeout" in script
+    assert "setInterval" not in script
+    assert 'id="toggle-pause"' in out
+    assert 'id="toggle-follow"' in out
+    assert 'id="refresh-now"' in out
+
+
+# --- Phase 4: HTML anchors and reader controls ---------------------------
+
+
+def _thread_message_ids(html_out: str) -> list[str]:
+    """DOM ids the viewer JS will assign are the payload message/agent keys."""
+
+    def walk(entries: list[dict]) -> list[str]:
+        ids: list[str] = []
+        for e in entries:
+            if "key" in e:
+                ids.append(e["key"])
+            if e.get("kind") == "agent":
+                ids.extend(walk(e.get("messages", [])))
+        return ids
+
+    return walk(_extract_payload(html_out)["messages"])
+
+
+def test_html_anchor_ids_are_unique_and_fragment_safe() -> None:
+    """Every message/agent key (which becomes a DOM id) is unique and safe."""
+    session = make_session(id="s-anchor", provider=Provider.CLAUDE)
+    dup = make_message(role="user", content="same body", timestamp=None)
+    messages = [
+        make_message(role="user", content="same body", timestamp=None),
+        make_message(role="assistant", content="answer", timestamp=None),
+        dup,  # identical content to the first -> distinct occurrence key
+    ]
+    meta, interior = _subagent(
+        interior=[make_message(role="assistant", content="nested", timestamp=None)]
+    )
+    out = format_session_html(session, messages, [(meta, interior)])
+
+    ids = _thread_message_ids(out)
+    # Duplicate content still yields distinct keys (occurrence counter).
+    assert len(ids) == len(set(ids))
+    # Keys are DOM-id / URL-fragment safe by construction.
+    for key in ids:
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", key), key
+    # The viewer assigns the key as the element id and reveals #fragments.
+    script = _viewer_script(out)
+    assert "wrap.id = key" in script
+    assert "location.hash" in script
+    assert "anchor-active" in script
+
+
+def test_html_details_open_state_restored_by_stable_key() -> None:
+    """Live rerender restores open <details> by the stable key, not position."""
+    out = format_session_html(
+        make_session(id="s-open", provider=Provider.CLAUDE),
+        [make_message(content="x")],
+        live_api="./api/session",
+    )
+    script = _viewer_script(out)
+    # <details> carry the stable key, and restoration keys off dataset.liveKey.
+    assert "det.dataset.liveKey = key" in script
+    assert "open.has(node.dataset.liveKey)" in script
+    # No list-index fallback: the key is used directly as identity.
+    assert "|| index" not in script
+
+
+def test_html_live_rerender_reapplies_anchor_without_reforcing() -> None:
+    """[finding 6] A live poll re-marks the anchored card but never re-reveals it.
+
+    `applyPayload` must NOT call `applyHash` (which force-opens the anchored
+    card's <details> and scrolls); it uses `reapplyAnchor`, which only re-adds
+    the highlight class. Full reveal stays reserved for initial load / hashchange.
+    """
+    out = format_session_html(
+        make_session(id="s-anchor-live", provider=Provider.CLAUDE),
+        [make_message(content="x")],
+        live_api="./api/session",
+    )
+    script = _viewer_script(out)
+    # The reveal-only helper exists and is what applyPayload calls.
+    assert "function reapplyAnchor()" in script
+    assert "reapplyAnchor();" in script
+    # applyPayload no longer force-reveals on every poll.
+    assert "applyHash(false)" not in script
+    # reapplyAnchor re-adds the highlight class but does not open <details>
+    # (revealElement) or scroll.
+    anchor_body = script.split("function reapplyAnchor()", 1)[1].split("}", 1)[0]
+    assert "anchor-active" in anchor_body
+    assert "revealElement" not in anchor_body
+    assert "scrollIntoView" not in anchor_body
+    # Initial load and real hashchange still perform the full reveal.
+    assert "applyHash(true)" in script
+    assert 'addEventListener(\'hashchange\', ()=> applyHash(true))' in script
+
+
+def test_html_no_per_card_copy_or_link_chrome() -> None:
+    """Per-card hover Copy/Link buttons were removed; only the anchors remain."""
+    out = format_session_html(
+        make_session(id="s-copy", provider=Provider.CLAUDE),
+        [make_message(content="hello")],
+    )
+    script = _viewer_script(out)
+    # No per-message action chrome or its link machinery survives.
+    assert "buildActions" not in script
+    assert "msg-actions" not in out
+    assert "linkFor" not in script
+    # Anchors stay: every card still becomes an addressable #fragment target.
+    assert "wrap.id = key" in script
+    assert "anchor-active" in script
+
+
+def test_html_static_export_hides_live_only_controls() -> None:
+    """A static export exposes find + count but no live-only server controls."""
+    out = format_session_html(
+        make_session(id="s-static", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+    )
+    # Find controls and the message count work from file:// without a server.
+    assert 'id="find-input"' in out
+    assert 'id="msg-count"' in out
+    # Live-only toolbar controls are absent from the static document.
+    for control in (
+        'id="live-status"',
+        'id="toggle-pause"',
+        'id="toggle-follow"',
+        'id="refresh-now"',
+        'id="new-msgs"',
+        'id="updated-at"',
+    ):
+        assert control not in out
+
+
+def test_html_live_export_shows_full_toolbar() -> None:
+    """A live document adds the live-only controls on top of find + count."""
+    out = format_session_html(
+        make_session(id="s-live", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+        live_api="./api/session",
+    )
+    for control in (
+        'id="find-input"',
+        'id="msg-count"',
+        'id="live-status"',
+        'id="toggle-pause"',
+        'id="toggle-follow"',
+        'id="refresh-now"',
+        'id="new-msgs"',
+        'id="updated-at"',
+    ):
+        assert control in out
+
+
+def test_html_find_navigation_is_present() -> None:
+    """The transcript find implements counted, wrap-around next/prev with reveal."""
+    out = format_session_html(
+        make_session(id="s-find", provider=Provider.CLAUDE),
+        [make_message(content="find me")],
+    )
+    script = _viewer_script(out)
+    assert "recomputeMatches" in script
+    assert "gotoMatch" in script
+    # Match count "i / n" display.
+    assert "' / '" in script
+    # Reveal a hidden match by opening its own + ancestor <details>.
+    assert "revealElement" in script
+    # Find matches against the body-only match map, not the card's textContent,
+    # so only the message body is ever counted as a hit.
+    assert "matchText.get(el.dataset.key)" in script
+    assert "el.textContent" not in script
+
+
+def test_html_find_scopes_matching_to_message_body() -> None:
+    """[finding 5] The find map is populated with body-only text per key, so only
+    the message body (never rendered chrome) can be matched."""
+    out = format_session_html(
+        make_session(id="s-find2", provider=Provider.CLAUDE),
+        [make_message(content="body text")],
+    )
+    script = _viewer_script(out)
+    # A per-key map holds the lowercased body used for matching.
+    assert "const matchText = new Map();" in script
+    assert "matchText.set(key, matchSource(m).toLowerCase())" in script
+
+
+def test_html_tool_message_match_field_is_raw_body() -> None:
+    """[finding 4] Tool messages carry a `match` field with the raw (unfenced)
+    body matching the TUI, while `content` keeps the render-time code fence."""
+    out = format_session_html(
+        make_session(id="s-matchfield", provider=Provider.CLAUDE),
+        [
+            make_message(
+                role="assistant",
+                content="",
+                content_type="tool_use",
+                tool_name="bash",
+                tool_input='{"cmd": "ls"}',
+            ),
+            make_message(
+                role="user",
+                content="",
+                content_type="tool_result",
+                tool_name="bash",
+                tool_output="file-a\nfile-b",
+            ),
+            make_message(role="assistant", content="plain answer"),
+        ],
+    )
+    payload = _extract_payload(out)
+    tool_use = next(m for m in payload["messages"] if "(call)" in m["label"])
+    tool_res = next(m for m in payload["messages"] if "(result)" in m["label"])
+    text_msg = next(m for m in payload["messages"] if m["label"].startswith("Assistant"))
+    # Raw body in `match`, fenced body in `content`.
+    assert tool_use["match"] == '{"cmd": "ls"}'
+    assert tool_use["content"] == '```json\n{"cmd": "ls"}\n```'
+    assert tool_res["match"] == "file-a\nfile-b"
+    assert tool_res["content"] == "```\nfile-a\nfile-b\n```"
+    # Plain text messages don't carry a redundant `match` field.
+    assert "match" not in text_msg
+
+
+def test_html_find_source_prefers_match_over_content() -> None:
+    """[finding 4] The find match-source helper prefers m.match (raw) over
+    m.content, so a query hits the same unfenced bytes the TUI would."""
+    out = format_session_html(
+        make_session(id="s-matchprefer", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+    )
+    script = _viewer_script(out)
+    # A shared helper resolves the raw body, preferring `match` when present.
+    assert "function matchSource(m){ return (m.match != null ? m.match : m.content) || ''; }" in script
+    # The find map is populated from it.
+    assert "matchText.set(key, matchSource(m).toLowerCase())" in script
+
+
+def test_html_message_count_excludes_agent_containers() -> None:
+    """[finding 3] The toolbar message count and new-badge count only real
+    messages, never kind:'agent' container entries."""
+    out = format_session_html(
+        make_session(id="s-count", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+    )
+    script = _viewer_script(out)
+    # A helper filters out agent containers, and both the initial count and the
+    # live-update added-count derive from it (not raw key-list length).
+    assert "function messageCount(list){" in script
+    assert "(list||[]).filter((m)=> m.kind !== 'agent').length" in script
+    assert "let renderedCount = messageCount(data.messages);" in script
+    assert "const newMsgCount = messageCount(list);" in script
+    assert "const added = Math.max(0, newMsgCount - renderedCount);" in script
+
+
+def test_html_live_append_guards_subagent_interior_fingerprint() -> None:
+    """[finding 1] The append fast-path falls through to a full rerender when a
+    shared sub-agent container's interior fingerprint changed, so stale interior
+    (and its `· N msgs` label) can't survive a pure-append poll."""
+    out = format_session_html(
+        make_session(id="s-fp", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+        live_api="./api/session",
+    )
+    script = _viewer_script(out)
+    # A fingerprint keyed by agent container id (joined interior keys).
+    assert "function agentFingerprints(list){" in script
+    assert "let topFingerprints = agentFingerprints(data.messages);" in script
+    # The fast-path is gated on both the prefix check AND unchanged interiors.
+    assert "const interiorChanged = Object.keys(topFingerprints).some(" in script
+    assert "&& !interiorChanged;" in script
+    # Fingerprints refresh after each reconcile.
+    assert "topFingerprints = newFingerprints;" in script
+
+
+def test_html_live_config_carries_updated_at_when_provided() -> None:
+    """Live config includes updated_at only when the caller passes it."""
+    without = _extract_payload(
+        format_session_html(
+            make_session(), [make_message(content="x")], live_api="./api/session"
+        )
+    )
+    assert "updated_at" not in without["live"]
+
+    with_ts = _extract_payload(
+        format_session_html(
+            make_session(),
+            [make_message(content="x")],
+            live_api="./api/session",
+            live_updated_at="2026-07-10T12:00:00+00:00",
+        )
+    )
+    assert with_ts["live"]["updated_at"] == "2026-07-10T12:00:00+00:00"
+
+
+def test_html_markdown_stays_html_disabled_and_escapes_script() -> None:
+    """Security invariants preserved: html:false and </ escaping in embedded JSON."""
+    out = format_session_html(
+        make_session(id="s-sec", provider=Provider.CLAUDE),
+        [make_message(role="user", content="</script><b>x</b>")],
+    )
+    assert "html:false" in out
+    assert "<\\/script>" in out
+    # Raw content is assigned via textContent / md.render, never innerHTML of raw.
+    script = _viewer_script(out)
+    assert "sum.textContent" in script
+
+
+def test_viewer_script_passes_node_check() -> None:
+    """The final inline viewer script is syntactically valid JS (node --check)."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+
+    out = format_session_html(
+        make_session(id="s-node", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+        live_api="./api/session",
+    )
+    script = _viewer_script(out)
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(script)
+        path = fh.name
+    try:
+        result = subprocess.run(
+            [node, "--check", path], capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+    finally:
+        import os
+
+        os.unlink(path)
+
+
+def _meta_header(html_out: str) -> str:
+    """Return the inner HTML of the viewer's ``header.meta`` block."""
+    m = re.search(r'<header class="meta">(.*?)</header>', html_out, re.S)
+    assert m is not None
+    return m.group(1)
+
+
+def test_html_meta_header_full_fields() -> None:
+    """The meta header carries provider, model, project, host, id+copy, time,
+    duration, counts, and both token totals when all are available."""
+    session = make_session(
+        id="sess-abc-123",
+        provider=Provider.CLAUDE,
+        project_path="/repo/thing",
+        model="claude-opus-4-8",
+        start_timestamp=datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 7, 10, 15, 30, tzinfo=timezone.utc),
+        input_tokens=1000,
+        output_tokens=200,
+        cumulative_input_tokens=5000,
+        host="laptop",
+    )
+    meta, interior = _subagent()
+    out = format_session_html(
+        session,
+        [make_message(content="hi"), make_message(content="yo")],
+        subagents=[(meta, interior)],
+    )
+    header = _meta_header(out)
+    assert "<b>claude</b>" in header
+    assert "model <code>claude-opus-4-8</code>" in header
+    assert "<code>/repo/thing</code>" in header
+    assert "host <code>laptop</code>" in header
+    assert "<code>sess-abc-123</code>" in header
+    # Copy-ID control carries the id in data-copy and reuses the clipboard helper.
+    assert 'id="copy-session-id"' in header
+    assert 'data-copy="sess-abc-123"' in header
+    # Start → end range plus duration.
+    assert "2026-07-10 14:00 → 15:30 (1h)" in header
+    assert "2 msgs" in header
+    assert "⑂1 sub-agents" in header
+    # ctx = input+output = 1,200; cumulative = cumulative_input+output = 5,200.
+    assert "1,200 ctx tokens" in header
+    assert "5,200 cumulative" in header
+
+
+def test_html_meta_header_omits_empty_fields() -> None:
+    """Model, host, sub-agents, and token totals are omitted when unavailable."""
+    session = make_session(
+        id="s-min",
+        provider=Provider.CURSOR,
+        project_path="/p",
+        model=None,
+        host=None,
+        input_tokens=None,
+        output_tokens=None,
+        cumulative_input_tokens=None,
+    )
+    header = _meta_header(format_session_html(session, [make_message(content="x")]))
+    assert "model <code>" not in header
+    assert "host <code>" not in header
+    assert "sub-agents" not in header
+    assert "ctx tokens" not in header
+    assert "cumulative" not in header
+    # Core fields still present.
+    assert "<b>cursor</b>" in header
+    assert 'id="copy-session-id"' in header
+    assert "1 msgs" in header
+
+
+def test_html_meta_header_escapes_session_id() -> None:
+    """A hostile session id is html-escaped in both the code span and data-copy."""
+    session = make_session(id='a"><b>x', provider=Provider.CLAUDE)
+    header = _meta_header(format_session_html(session, [make_message(content="x")]))
+    assert "<b>x" not in header.replace("&lt;b&gt;x", "")
+    assert "a&quot;&gt;&lt;b&gt;x" in header
+
+
+def test_html_meta_header_copy_button_wired_in_script() -> None:
+    """The inline script wires the Copy-ID button through the clipboard helper."""
+    out = format_session_html(
+        make_session(id="s-btn", provider=Provider.CLAUDE),
+        [make_message(content="x")],
+    )
+    script = _viewer_script(out)
+    assert "copy-session-id" in script
+    assert "copyText(copyIdBtn.dataset.copy" in script
+
+
+def test_format_duration_and_time_range_helpers() -> None:
+    """Duration buckets (m/h/d, empty under a minute) and range formatting."""
+    from sesh.export import format_duration, format_time_range
+
+    d0 = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
+    assert format_duration(None, d0) == ""
+    assert format_duration(d0, d0) == ""  # under a minute
+    assert format_duration(d0, datetime(2026, 7, 10, 12, 45, tzinfo=timezone.utc)) == "45m"
+    assert format_duration(d0, datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc)) == "2h"
+    assert format_duration(d0, datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)) == "3d"
+
+    # Same-day range abbreviates the end; no start falls back to the end stamp.
+    same = make_session(
+        start_timestamp=d0,
+        timestamp=datetime(2026, 7, 10, 13, 0, tzinfo=timezone.utc),
+    )
+    assert format_time_range(same) == "2026-07-10 12:00 → 13:00 (1h)"
+    endonly = make_session(start_timestamp=None, timestamp=d0)
+    assert format_time_range(endonly) == "2026-07-10 12:00"

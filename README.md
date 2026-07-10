@@ -67,10 +67,36 @@ resolution should work via `Path.home()`. Ripgrep is available on Windows via `w
 
 Launch with `sesh`. The TUI loads sessions in the background and
 populates a project tree on the left. Select a session to view its
-messages on the right. Session labels show relative timestamps ("2h
-ago", "yesterday") and session durations ("\~45m", "\~2h") for recent
+messages on the right. A compact details header above the transcript
+shows the provider, model, project, aggregation host, full session id,
+start/end time and duration, message and sub-agent counts, context and
+cumulative token totals, and the resume command when the session is
+resumable. Session labels show relative timestamps ("2h ago",
+"yesterday") and session durations ("\~45m", "\~2h") for recent
 sessions. View preferences -- provider filter, sort mode, and visibility
 toggles -- persist across launches.
+
+#### Reading and navigating a transcript
+
+The message pane is a list of message cards, not a scrolling log, so
+nothing is silently truncated. A long body is shown as a bounded preview
+with an explicit omission marker (`… 4,280 more characters`); press
+`Enter` on the selected card to expand it to the complete content and
+`Enter` again to collapse it. `C` always copies the **full** message
+(never the preview). Move the selection with `↑`/`↓` (or `j`/`k`),
+`Home`/`End` for the ends, and `Tab` to move focus between the tree and
+the transcript.
+
+Press `n` to open transcript find; it shows a live `3 / 17` match
+counter, scrolls the active match into view, and distinguishes it from
+the other highlights. `n` (or `Enter`/`↓` in the find box) advances to
+the next match and `N` (or `↑`/`Shift+Enter`) steps back, both wrapping
+around. Find searches complete message bodies -- including tool,
+thinking, and sub-agent content -- so a hit inside a collapsed card or
+sub-agent block is revealed automatically. `Esc` closes find and returns
+focus to the transcript. Expansion state and the active match are keyed
+by message identity, so they survive the `t`/`T`/`a` visibility toggles
+and live updates.
 
 #### Keybindings
 
@@ -85,6 +111,12 @@ toggles -- persist across launches.
 | `e`      | Export session to clipboard as Markdown                    |
 | `d`      | Delete the selected session (with confirmation)            |
 | `m`      | Move selected project path (full or metadata-only)         |
+| `Tab`    | Move focus between the session tree and the transcript      |
+| `↑`/`↓`  | Move the message selection (also `j`/`k`; `Home`/`End` jump) |
+| `Enter`  | Expand / collapse the selected message or sub-agent block   |
+| `C`      | Copy the full selected message to the clipboard             |
+| `n`      | Open transcript find / jump to next match                   |
+| `N`      | Jump to the previous transcript match                       |
 | `t`      | Toggle tool call/result visibility                         |
 | `T`      | Toggle thinking/reasoning visibility                       |
 | `a`      | Toggle Claude sub-agent thread visibility                  |
@@ -203,16 +235,35 @@ page to a stable per-session cache path and opens it in your default browser;
 `--no-open` just prints the path. Both honor the usual `--include-tools` /
 `--include-thinking` / `--full` toggles.
 
+The page opens with a details header (provider, model, project, host,
+full session id with a **Copy ID** button, start/end time and duration,
+message and sub-agent counts, and context/cumulative token totals) and a
+sticky reader toolbar. The toolbar always offers a **transcript find**
+box with a match counter and previous/next controls (`Enter` /
+`Shift+Enter` in the box; `/` focuses it) and a message count; find and
+anchors work from `file://` with no server. Every message and sub-agent
+block has a stable DOM anchor: opening a `#anchor` link highlights,
+reveals, and scrolls to that message. (For full-body copy, use the TUI's
+`C` or `sesh export`.) Expanded `<details>` state is preserved by message
+identity across live updates.
+
 From the TUI, press `v` to open the selected session in the same browser
 viewer while honoring the current tools, thinking, and sub-agent toggles.
 Press `L` to start a **live browser view** instead: sesh serves a private,
 tokenized `127.0.0.1` URL and the page polls for new messages while the TUI is
-running. New content appears without a page reload; the viewer preserves its
-scroll position and expanded tool/sub-agent sections. Press `L` again on the
-same session to stop the server. Live mode uses the normalized provider API and
-works with Claude, Codex, Cursor, Copilot, pi, Gemini, and opencode. In
-aggregation mode it follows the mirrored files, so update latency is determined
-by the external sync schedule.
+running. The live toolbar adds a status indicator (live / paused / retrying /
+disconnected), the last-update time, a **Pause/Resume** button (browser-side;
+it does not stop the private server), a **Follow** toggle, a manual **Refresh**,
+and an `N new ↓` badge when follow is off. New content appears without a page
+reload and is reconciled by message identity (appends fast-path, full rerender
+only on structural change); the viewer preserves its scroll position and
+expanded tool/sub-agent sections, and auto-follows only when Follow is on and
+the reader is already near the bottom. A transient provider error keeps the last
+good transcript and shows the retrying state. Press `L` again on the same
+session to stop the server. Live mode uses the normalized provider API and works
+with Claude, Codex, Cursor, Copilot, pi, Gemini, and opencode. In aggregation
+mode it follows the mirrored files, so update latency is determined by the
+external sync schedule.
 
 Both commands also accept `--file <path.jsonl>` in place of a session ID,
 which renders a **loose Claude Code transcript directly by path** —

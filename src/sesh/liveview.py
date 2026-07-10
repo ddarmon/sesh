@@ -165,6 +165,7 @@ class LiveViewServer:
         with self._state_lock:
             snapshot = self._snapshot
             revision = self._revision
+            updated_at = self._updated_at
         if snapshot is None:
             handler.send_error(503)
             return
@@ -176,6 +177,7 @@ class LiveViewServer:
             live_api="./api/session",
             live_revision=revision,
             live_poll_ms=self.poll_ms,
+            live_updated_at=updated_at,
         ).encode("utf-8")
         self._response_headers(handler, "text/html; charset=utf-8", len(page))
         handler.wfile.write(page)

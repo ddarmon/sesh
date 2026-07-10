@@ -43,6 +43,9 @@ def _install_textual_stubs() -> None:
     class Vertical(Horizontal):
         pass
 
+    class VerticalScroll(Horizontal):
+        pass
+
     class Tree(_Base):
         class NodeSelected:
             pass
@@ -95,6 +98,7 @@ def _install_textual_stubs() -> None:
     binding_mod.Binding = Binding
     containers_mod.Horizontal = Horizontal
     containers_mod.Vertical = Vertical
+    containers_mod.VerticalScroll = VerticalScroll
     screen_mod.ModalScreen = ModalScreen
     widgets_mod.Button = Button
     widgets_mod.Checkbox = Checkbox
