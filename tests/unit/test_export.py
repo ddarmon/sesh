@@ -4,6 +4,8 @@ import json
 import re
 from datetime import datetime, timezone
 
+import pytest
+
 from sesh.export import format_session_html, format_session_markdown
 from sesh.models import Provider, SubagentMeta
 from tests.helpers import make_message, make_session
@@ -39,6 +41,13 @@ def _extract_payload(html_out: str) -> dict:
     )
     assert m is not None
     return json.loads(m.group(1).replace("<\\/", "</"))
+
+
+def _viewer_script(html_out: str) -> str:
+    """Return the final authored inline viewer script (after vendored libs)."""
+    scripts = re.findall(r"<script>(.*?)</script>", html_out, re.S)
+    assert scripts, "no attribute-free <script> block found"
+    return scripts[-1]
 
 
 def test_format_session_markdown_renders_message_types() -> None:
@@ -424,4 +433,209 @@ def test_format_session_html_embeds_live_configuration() -> None:
         "poll_ms": 800,
     }
     assert 'id="live-status"' in out
-    assert "window.setInterval" in out
+    # A single self-rescheduling timer (never setInterval) prevents overlapping
+    # polls; pause/follow/refresh controls are present in the live toolbar.
+    script = _viewer_script(out)
+    assert "window.setTimeout" in script
+    assert "setInterval" not in script
+    assert 'id="toggle-pause"' in out
+    assert 'id="toggle-follow"' in out
+    assert 'id="refresh-now"' in out
+
+
+# --- Phase 4: HTML anchors and reader controls ---------------------------
+
+
+def _thread_message_ids(html_out: str) -> list[str]:
+    """DOM ids the viewer JS will assign are the payload message/agent keys."""
+
+    def walk(entries: list[dict]) -> list[str]:
+        ids: list[str] = []
+        for e in entries:
+            if "key" in e:
+                ids.append(e["key"])
+            if e.get("kind") == "agent":
+                ids.extend(walk(e.get("messages", [])))
+        return ids
+
+    return walk(_extract_payload(html_out)["messages"])
+
+
+def test_html_anchor_ids_are_unique_and_fragment_safe() -> None:
+    """Every message/agent key (which becomes a DOM id) is unique and safe."""
+    session = make_session(id="s-anchor", provider=Provider.CLAUDE)
+    dup = make_message(role="user", content="same body", timestamp=None)
+    messages = [
+        make_message(role="user", content="same body", timestamp=None),
+        make_message(role="assistant", content="answer", timestamp=None),
+        dup,  # identical content to the first -> distinct occurrence key
+    ]
+    meta, interior = _subagent(
+        interior=[make_message(role="assistant", content="nested", timestamp=None)]
+    )
+    out = format_session_html(session, messages, [(meta, interior)])
+
+    ids = _thread_message_ids(out)
+    # Duplicate content still yields distinct keys (occurrence counter).
+    assert len(ids) == len(set(ids))
+    # Keys are DOM-id / URL-fragment safe by construction.
+    for key in ids:
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", key), key
+    # The viewer assigns the key as the element id and reveals #fragments.
+    script = _viewer_script(out)
+    assert "wrap.id = key" in script
+    assert "location.hash" in script
+    assert "anchor-active" in script
+
+
+def test_html_details_open_state_restored_by_stable_key() -> None:
+    """Live rerender restores open <details> by the stable key, not position."""
+    out = format_session_html(
+        make_session(id="s-open", provider=Provider.CLAUDE),
+        [make_message(content="x")],
+        live_api="./api/session",
+    )
+    script = _viewer_script(out)
+    # <details> carry the stable key, and restoration keys off dataset.liveKey.
+    assert "det.dataset.liveKey = key" in script
+    assert "open.has(node.dataset.liveKey)" in script
+    # No list-index fallback: the key is used directly as identity.
+    assert "|| index" not in script
+
+
+def test_html_copy_controls_present_for_every_card() -> None:
+    """Each card gets copy-message and copy-link actions with a clipboard fallback."""
+    out = format_session_html(
+        make_session(id="s-copy", provider=Provider.CLAUDE),
+        [make_message(content="hello")],
+    )
+    script = _viewer_script(out)
+    assert "buildActions" in script
+    assert "msg-actions" in script
+    # Copy-message copies the full content; copy-link copies the #anchor URL.
+    assert "copyText(getText())" in script
+    assert "linkFor(key)" in script
+    # Clipboard uses navigator.clipboard in secure contexts with a fallback.
+    assert "navigator.clipboard" in script
+    assert "execCommand('copy')" in script
+
+
+def test_html_static_export_hides_live_only_controls() -> None:
+    """A static export exposes find + count but no live-only server controls."""
+    out = format_session_html(
+        make_session(id="s-static", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+    )
+    # Find controls and the message count work from file:// without a server.
+    assert 'id="find-input"' in out
+    assert 'id="msg-count"' in out
+    # Live-only toolbar controls are absent from the static document.
+    for control in (
+        'id="live-status"',
+        'id="toggle-pause"',
+        'id="toggle-follow"',
+        'id="refresh-now"',
+        'id="new-msgs"',
+        'id="updated-at"',
+    ):
+        assert control not in out
+
+
+def test_html_live_export_shows_full_toolbar() -> None:
+    """A live document adds the live-only controls on top of find + count."""
+    out = format_session_html(
+        make_session(id="s-live", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+        live_api="./api/session",
+    )
+    for control in (
+        'id="find-input"',
+        'id="msg-count"',
+        'id="live-status"',
+        'id="toggle-pause"',
+        'id="toggle-follow"',
+        'id="refresh-now"',
+        'id="new-msgs"',
+        'id="updated-at"',
+    ):
+        assert control in out
+
+
+def test_html_find_navigation_is_present() -> None:
+    """The transcript find implements counted, wrap-around next/prev with reveal."""
+    out = format_session_html(
+        make_session(id="s-find", provider=Provider.CLAUDE),
+        [make_message(content="find me")],
+    )
+    script = _viewer_script(out)
+    assert "recomputeMatches" in script
+    assert "gotoMatch" in script
+    # Match count "i / n" display.
+    assert "' / '" in script
+    # Reveal a hidden match by opening its own + ancestor <details>.
+    assert "revealElement" in script
+    # Full DOM text is matched (includes collapsed details content).
+    assert "el.textContent" in script
+
+
+def test_html_live_config_carries_updated_at_when_provided() -> None:
+    """Live config includes updated_at only when the caller passes it."""
+    without = _extract_payload(
+        format_session_html(
+            make_session(), [make_message(content="x")], live_api="./api/session"
+        )
+    )
+    assert "updated_at" not in without["live"]
+
+    with_ts = _extract_payload(
+        format_session_html(
+            make_session(),
+            [make_message(content="x")],
+            live_api="./api/session",
+            live_updated_at="2026-07-10T12:00:00+00:00",
+        )
+    )
+    assert with_ts["live"]["updated_at"] == "2026-07-10T12:00:00+00:00"
+
+
+def test_html_markdown_stays_html_disabled_and_escapes_script() -> None:
+    """Security invariants preserved: html:false and </ escaping in embedded JSON."""
+    out = format_session_html(
+        make_session(id="s-sec", provider=Provider.CLAUDE),
+        [make_message(role="user", content="</script><b>x</b>")],
+    )
+    assert "html:false" in out
+    assert "<\\/script>" in out
+    # Raw content is assigned via textContent / md.render, never innerHTML of raw.
+    script = _viewer_script(out)
+    assert "sum.textContent" in script
+
+
+def test_viewer_script_passes_node_check() -> None:
+    """The final inline viewer script is syntactically valid JS (node --check)."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not available")
+
+    out = format_session_html(
+        make_session(id="s-node", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+        live_api="./api/session",
+    )
+    script = _viewer_script(out)
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(script)
+        path = fh.name
+    try:
+        result = subprocess.run(
+            [node, "--check", path], capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+    finally:
+        import os
+
+        os.unlink(path)
