@@ -80,6 +80,8 @@ toggles -- persist across launches.
 | `Escape` | Clear search and return to full tree                       |
 | `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi/Gemini/opencode) |
 | `o`      | Open/resume the selected session in its CLI                |
+| `v`      | Open the selected session in the browser viewer             |
+| `L`      | Toggle a live-updating browser view                         |
 | `e`      | Export session to clipboard as Markdown                    |
 | `d`      | Delete the selected session (with confirmation)            |
 | `m`      | Move selected project path (full or metadata-only)         |
@@ -197,9 +199,20 @@ ChatGPT/Claude.
 The renderer (KaTeX, markdown-it + markdown-it-texmath, highlight.js) is
 **vendored and inlined** into the output, so the file works completely
 offline from `file://` — no network, no CDN. `sesh view <id>` writes the
-page to a temp file and opens it in your default browser; `--no-open`
-just prints the path. Both honor the usual `--include-tools` /
+page to a stable per-session cache path and opens it in your default browser;
+`--no-open` just prints the path. Both honor the usual `--include-tools` /
 `--include-thinking` / `--full` toggles.
+
+From the TUI, press `v` to open the selected session in the same browser
+viewer while honoring the current tools, thinking, and sub-agent toggles.
+Press `L` to start a **live browser view** instead: sesh serves a private,
+tokenized `127.0.0.1` URL and the page polls for new messages while the TUI is
+running. New content appears without a page reload; the viewer preserves its
+scroll position and expanded tool/sub-agent sections. Press `L` again on the
+same session to stop the server. Live mode uses the normalized provider API and
+works with Claude, Codex, Cursor, Copilot, pi, Gemini, and opencode. In
+aggregation mode it follows the mirrored files, so update latency is determined
+by the external sync schedule.
 
 Both commands also accept `--file <path.jsonl>` in place of a session ID,
 which renders a **loose Claude Code transcript directly by path** —
@@ -492,7 +505,9 @@ src/sesh/
   app.py             # Textual TUI, layout, keybindings
   bookmarks.py       # bookmark persistence (load/save)
   preferences.py     # view preference persistence (load/save)
-  export.py          # shared Markdown export formatter
+  export.py          # shared Markdown/JSON/HTML rendering
+  liveview.py        # private loopback server for live browser views
+  viewcache.py       # stable, private HTML view cache
   discovery.py       # shared discovery logic (used by TUI and CLI)
   models.py          # Project, SessionMeta, Message, SearchResult, MoveReport
   move.py            # project move orchestration across providers
@@ -506,5 +521,7 @@ src/sesh/
     cursor.py        # Cursor SQLite parser
     pi.py            # pi JSONL parser
     gemini.py        # Gemini CLI JSON parser
+    opencode.py      # opencode SQLite + legacy JSON parser
+  snapshots/         # Terminal.app snapshot core and backend
 ```
 

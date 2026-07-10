@@ -143,7 +143,9 @@ are honored; empty/relative values fall back to defaults):
 ## Session resume
 
 Pressing `o` on a session node suspends sesh and launches the provider's
-CLI to resume the session. Per-provider commands:
+CLI to resume the session. Pressing `v` opens the selected session in the
+stable HTML browser viewer; `L` toggles a private live-updating browser view
+(see HTML rendering below). Per-provider commands:
 
 -   **Claude**: `claude --resume <session-id>` (runs in the project
     directory)
@@ -296,6 +298,22 @@ in the browser (`new=0`) unless `--no-open`. Both honor `--include-tools`
 a just-created session — including `last` — is viewable without a manual
 `sesh refresh`; discovery is incremental via the on-disk cache so an
 unchanged tree costs only stats.
+
+### TUI browser and live views
+
+The TUI's `v` action reloads the selected session through its provider, applies
+the current tools/thinking/agents toggles, writes through `viewcache.write_view`,
+and opens the stable `file://` URL. `L` starts/stops `liveview.LiveViewServer`
+for the selected session. The server binds only to `127.0.0.1` on an ephemeral
+port and uses an unguessable path token; it has no permissive CORS, sends
+`no-store`/security headers, and stops when the TUI exits. The browser polls its
+same-origin JSON endpoint (default 1.5 seconds). Each request reloads via the
+normal provider `get_messages` API, so live main-thread updates work for all
+providers; Claude sub-agents are reloaded when agent display is enabled. A
+failed loader refresh retains the last good payload. Browser rerenders happen
+only when a payload digest changes and preserve scroll position plus expanded
+tool/sub-agent details. In aggregation mode, live view follows changes in the
+mirror rather than connecting to the source host.
 
 ### View cache (`viewcache.py`)
 

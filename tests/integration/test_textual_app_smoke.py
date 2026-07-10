@@ -409,6 +409,36 @@ async def test_export_includes_subagents_when_toggled_on(app):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_browser_snapshot_uses_normalized_provider_and_visibility(app):
+    """Browser views reload any provider and honor the TUI visibility flags."""
+    from types import SimpleNamespace
+
+    sesh_app, _pilot = app
+    session = make_session(provider=Provider.PI)
+    visible = make_message(role="user", content="visible")
+    tool = make_message(
+        role="assistant",
+        content="",
+        content_type="tool_use",
+        tool_name="bash",
+        tool_input="pwd",
+    )
+    sesh_app._provider_for = lambda _session: SimpleNamespace(
+        get_messages=lambda _session: [visible, tool]
+    )
+
+    sesh_app._show_tools = False
+    _session, messages, subagents = sesh_app._browser_snapshot(session)
+    assert messages == [visible]
+    assert subagents is None
+
+    sesh_app._show_tools = True
+    _session, messages, _subagents = sesh_app._browser_snapshot(session)
+    assert messages == [visible, tool]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_fullscreen_toggle_updates_state_and_class(app):
     """Pressing 'F' toggles fullscreen state and the main container class."""
     sesh_app, pilot = app
