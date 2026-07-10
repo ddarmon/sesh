@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import platform
-import re
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -22,11 +21,11 @@ from textual.widgets import (
     Label,
     ListItem,
     ListView,
-    RichLog,
     Static,
     Tree,
 )
 
+from sesh import transcript
 from sesh.bookmarks import load_bookmarks, save_bookmarks
 from sesh.export import format_session_markdown
 from sesh.models import (
@@ -39,6 +38,7 @@ from sesh.models import (
     filter_messages,
 )
 from sesh.preferences import load_preferences, save_preferences
+from sesh.transcript_view import TranscriptView
 
 _DATETIME_MIN = datetime.min.replace(tzinfo=timezone.utc)
 
@@ -192,12 +192,6 @@ class SessionTree(Tree):
     """Left pane: project/session tree."""
 
     BORDER_TITLE = "Sessions"
-
-
-class MessageView(RichLog):
-    """Right pane: message viewer."""
-
-    BORDER_TITLE = "Messages"
 
 
 class ConfirmDeleteScreen(ModalScreen[bool]):
@@ -379,6 +373,15 @@ class HelpScreen(ModalScreen[None]):
                     ("a", "Toggle sub-agent threads"),
                     ("F", "Toggle fullscreen message pane"),
                     ("S", "Open Terminal-tab snapshots (macOS)"),
+                ],
+            ),
+            (
+                "Transcript",
+                [
+                    ("Tab", "Move focus tree ↔ transcript"),
+                    ("↑/↓", "Move message selection (or j/k)"),
+                    ("Enter", "Expand / collapse selected message"),
+                    ("C", "Copy full selected message"),
                 ],
             ),
             (
@@ -863,6 +866,7 @@ class SeshApp(App):
         Binding("K", "prev_project", "Prev Proj", key_display="K"),
         Binding("b", "toggle_bookmark", "Bookmark"),
         Binding("n", "search_messages", "Find"),
+        Binding("C", "copy_focused_message", "Copy Msg", key_display="C"),
         Binding("t", "toggle_tools", "Tools"),
         Binding("T", "toggle_thinking", "Thinking", key_display="T"),
         Binding("a", "toggle_agents", "Agents"),
@@ -931,7 +935,7 @@ class SeshApp(App):
             yield SessionTree("Sessions", id="session-tree")
             with Vertical(id="message-pane"):
                 yield Input(placeholder="Find in messages...", id="message-search")
-                yield MessageView(id="message-view", wrap=True, markup=True)
+                yield TranscriptView(id="message-view")
         yield Static("Loading...", id="status-bar")
 
     def on_mount(self) -> None:
@@ -1402,7 +1406,7 @@ class SeshApp(App):
         self._fullscreen = not self._fullscreen
         self.query_one("#main", Horizontal).toggle_class("fullscreen")
         if self._fullscreen:
-            self.query_one("#message-view", MessageView).focus()
+            self.query_one("#message-view", TranscriptView).focus()
         self._save_current_prefs()
         self._refresh_status()
 
@@ -1537,52 +1541,24 @@ class SeshApp(App):
             return None
         return cls(base_dir=base_dir, host=host)
 
-    def _render_messages(
-        self,
-        messages: list[Message],
-        session: SessionMeta,
-        highlight: str = "",
-        subagents: list[tuple[SubagentMeta, list[Message]]] | None = None,
-    ) -> None:
-        """Render messages in the right pane.
+    def _compose_transcript_items(
+        self, messages: list[Message]
+    ) -> list[transcript.TranscriptItem]:
+        """Filter + compose the current visible transcript into keyed items.
 
-        ``subagents`` (loaded off-thread by :meth:`_load_messages`) is stored so
-        the ``a`` toggle and t/T re-renders can splice sub-agent threads without
-        re-reading files. Passing None (a re-render) keeps the stored threads.
+        Sub-agent threads (already loaded off-thread by :meth:`_load_messages`)
+        are spliced in chronologically when agents are visible. Visibility
+        filtering happens here so tool/thinking/agent toggles change the composed
+        item set while stable keys stay put (see :mod:`sesh.transcript`).
         """
-        self._current_messages = messages
-        self._current_session = session
-        if subagents is not None:
-            self._current_subagents = subagents
-
-        view = self.query_one("#message-view", MessageView)
-        view.clear()
-
-        # A session can have zero parseable main messages but visible sub-agent
-        # threads — don't early-return on empty main until agents are ruled out.
-        has_agents = bool(self._agents_visible and self._current_subagents)
-
-        if not messages and not has_agents:
-            view.write("[dim]No messages found.[/dim]")
-            return
-
         visible = filter_messages(
             messages,
             include_tools=self._show_tools,
             include_thinking=self._show_thinking,
         )
-
-        if not visible and not has_agents:
-            if messages:
-                view.write("[dim]No visible messages. Press t for tool calls, T for thinking.[/dim]")
-            else:
-                view.write("[dim]No messages found.[/dim]")
-            return
-
-        hl = highlight.lower()
-
-        if has_agents:
-            filtered_subagents = [
+        subagents_arg = None
+        if self._agents_visible and self._current_subagents:
+            subagents_arg = [
                 (
                     meta,
                     filter_messages(
@@ -1593,98 +1569,47 @@ class SeshApp(App):
                 )
                 for meta, interior in self._current_subagents
             ]
-            for kind, payload in splice_subagent_threads(visible, filtered_subagents):
-                if kind == "message":
-                    self._write_message(view, payload, hl)
-                else:
-                    meta, interior = payload
-                    self._write_subagent(view, meta, interior, hl)
-        else:
-            for msg in visible:
-                self._write_message(view, msg, hl)
+        return transcript.compose_transcript(visible, subagents_arg)
 
-    def _write_subagent(
+    def _render_messages(
         self,
-        view: MessageView,
-        meta: SubagentMeta,
-        interior: list[Message],
-        hl: str,
+        messages: list[Message],
+        session: SessionMeta,
+        highlight: str = "",
+        subagents: list[tuple[SubagentMeta, list[Message]]] | None = None,
     ) -> None:
-        """Write a sub-agent thread: a header line, then indented interior."""
-        desc = meta.description or meta.agent_id
-        atype = meta.agent_type or "agent"
-        view.write(
-            f"\n[bold magenta]⑂ {atype}[/bold magenta] "
-            f"[dim]— {desc} · {meta.message_count} msgs[/dim]"
+        """Render the transcript in the right pane.
+
+        Builds stable, keyed :class:`~sesh.transcript.TranscriptItem` entries and
+        hands them to the :class:`~sesh.transcript_view.TranscriptView`, which
+        preserves per-message expansion state (and the selection cursor) by
+        stable key across tool/thinking/agent toggles and live rerenders.
+        ``subagents`` (loaded off-thread) is stored so re-renders can splice
+        sub-agent threads without re-reading files; None keeps the stored ones.
+        """
+        self._current_messages = messages
+        self._current_session = session
+        if subagents is not None:
+            self._current_subagents = subagents
+
+        view = self.query_one("#message-view", TranscriptView)
+        items = self._compose_transcript_items(messages)
+        empty_message = (
+            "No visible messages. Press t for tool calls, T for thinking."
+            if messages and not items
+            else "No messages found."
         )
-        if not interior:
-            view.write("  [dim](no visible sub-agent messages)[/dim]")
+        view.set_transcript(items, highlight=highlight, empty_message=empty_message)
+
+    def action_copy_focused_message(self) -> None:
+        """Copy the complete body of the focused transcript message."""
+        view = self.query_one("#message-view", TranscriptView)
+        body = view.copy_active()
+        if body is None:
+            self._set_status("No message selected to copy")
             return
-        for msg in interior:
-            self._write_message(view, msg, hl, indent="  ")
-
-    def _write_message(
-        self, view: MessageView, msg: Message, hl: str, indent: str = ""
-    ) -> None:
-        """Write one message to the pane. ``indent`` nests sub-agent interiors."""
-        ts = f" [dim]({msg.timestamp.strftime('%H:%M')})[/dim]" if msg.timestamp else ""
-        body = f"{indent}  "
-
-        if msg.content_type == "thinking":
-            view.write(f"\n{indent}[dim magenta]Thinking[/dim magenta]{ts}:")
-            thinking_text = (msg.thinking or "")[:3000]
-            view.write(f"{body}[dim]{self._highlight_text(thinking_text, hl)}[/dim]")
-
-        elif msg.content_type == "tool_use":
-            tool = msg.tool_name or "tool"
-            view.write(f"\n{indent}[bold yellow]{tool}[/bold yellow] [dim](call)[/dim]{ts}:")
-            inp = (msg.tool_input or "")[:1000]
-            view.write(f"{body}{self._highlight_text(inp, hl)}")
-
-        elif msg.content_type == "tool_result":
-            tool = msg.tool_name or "tool"
-            view.write(f"\n{indent}[bold yellow]{tool}[/bold yellow] [dim](result)[/dim]{ts}:")
-            out = (msg.tool_output or "")[:2000]
-            view.write(f"{body}{self._highlight_text(out, hl)}")
-
-        elif msg.role == "user":
-            view.write(f"\n{indent}[bold cyan]User[/bold cyan]{ts}:")
-            content = msg.content[:2000]
-            view.write(f"{body}{self._highlight_text(content, hl)}")
-        elif msg.role == "assistant":
-            view.write(f"\n{indent}[bold green]Assistant[/bold green]{ts}:")
-            if hl:
-                content = msg.content[:5000]
-                view.write(f"{body}{self._highlight_text(content, hl)}")
-            else:
-                try:
-                    from rich.markdown import Markdown
-                    renderable = Markdown(msg.content[:5000])
-                    if indent:
-                        # Indent the Markdown renderable so sub-agent interior
-                        # assistant bodies keep the same nesting every other
-                        # message type gets (Rich Markdown ignores a text prefix).
-                        from rich.padding import Padding
-                        renderable = Padding(renderable, (0, 0, 0, len(indent)))
-                    view.write(renderable)
-                except Exception:
-                    view.write(f"{body}{msg.content[:2000]}")
-        elif msg.role == "tool":
-            tool = msg.tool_name or "tool"
-            view.write(f"\n{indent}[bold yellow]{tool}[/bold yellow]{ts}:")
-            content = msg.content[:500]
-            view.write(f"{body}{self._highlight_text(content, hl)}")
-
-    @staticmethod
-    def _highlight_text(text: str, term: str) -> str:
-        """Wrap case-insensitive matches of *term* in reverse markup."""
-        if not term:
-            return text
-        # Escape Rich markup in the term, then do case-insensitive replace
-        escaped = re.escape(term)
-        def _repl(m: re.Match) -> str:
-            return f"[reverse]{m.group()}[/reverse]"
-        return re.sub(escaped, _repl, text, flags=re.IGNORECASE)
+        self._copy_text(body)
+        self._set_status("Message copied to clipboard")
 
     def action_search_messages(self) -> None:
         """Toggle the message search input."""
@@ -1692,9 +1617,7 @@ class SeshApp(App):
         if search.has_class("visible"):
             search.remove_class("visible")
             search.value = ""
-            # Re-render without highlights
-            if self._current_messages and self._current_session:
-                self._render_messages(self._current_messages, self._current_session)
+            self.query_one("#message-view", TranscriptView).set_highlight("")
         else:
             search.add_class("visible")
             search.focus()
@@ -1707,10 +1630,7 @@ class SeshApp(App):
                 provider_filter=self.current_filter,
             )
         elif event.input.id == "message-search":
-            if self._current_messages and self._current_session:
-                self._render_messages(
-                    self._current_messages, self._current_session, highlight=event.value
-                )
+            self.query_one("#message-view", TranscriptView).set_highlight(event.value)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Full-text search on Enter."""
@@ -1779,8 +1699,7 @@ class SeshApp(App):
         if msg_search.has_class("visible"):
             msg_search.remove_class("visible")
             msg_search.value = ""
-            if self._current_messages and self._current_session:
-                self._render_messages(self._current_messages, self._current_session)
+            self.query_one("#message-view", TranscriptView).set_highlight("")
             return
         search = self.query_one("#search-input", Input)
         search.value = ""

@@ -266,10 +266,9 @@ async def test_search_row_marks_agent_hits(app):
 async def test_toggle_agents_renders_on_empty_main_thread(app):
     """[finding 5] Pressing 'a' reveals sub-agent threads even when the main
     thread parsed to zero messages (was a visual no-op before)."""
-    sesh_app, pilot = app
+    from sesh.transcript_view import TranscriptView
 
-    rendered: list[object] = []
-    sesh_app._write_subagent = lambda *a, **k: rendered.append(a)
+    sesh_app, pilot = app
 
     session = make_session(id="empty-main", provider=Provider.CLAUDE)
     sesh_app._current_session = session
@@ -283,7 +282,10 @@ async def test_toggle_agents_renders_on_empty_main_thread(app):
     await pilot.pause()
 
     assert sesh_app._show_agents is True
-    assert rendered, "sub-agent thread should render despite an empty main thread"
+    view = sesh_app.query_one("#message-view", TranscriptView)
+    assert any(card.is_agent for card in view._cards), (
+        "sub-agent thread should render despite an empty main thread"
+    )
 
 
 @pytest.mark.integration
@@ -319,27 +321,53 @@ async def test_toggle_agents_clears_auto_override(app):
 async def test_toggle_tools_rerenders_agents_only_session(app):
     """[review] 't'/'T' re-render a session whose main thread is empty but
     which has visible sub-agent threads (interior honors the toggles)."""
-    sesh_app, pilot = app
+    from sesh.transcript_view import TranscriptView
 
-    rendered: list[object] = []
-    sesh_app._write_subagent = lambda *a, **k: rendered.append(a)
+    sesh_app, pilot = app
 
     session = make_session(id="agents-only", provider=Provider.CLAUDE)
     sesh_app._current_session = session
     sesh_app._current_messages = []
-    meta = SubagentMeta(agent_id="ag", file_path="/x", message_count=1)
-    sesh_app._current_subagents = [(meta, [make_message(content="interior")])]
+    # Interior has a text message plus a tool call so the 't' toggle changes the
+    # interior card set when the container is expanded.
+    interior = [
+        make_message(content="interior"),
+        make_message(
+            role="assistant",
+            content="",
+            content_type="tool_use",
+            tool_name="bash",
+            tool_input="pwd",
+        ),
+    ]
+    meta = SubagentMeta(agent_id="ag", file_path="/x", message_count=2)
+    sesh_app._current_subagents = [(meta, interior)]
     sesh_app._subagents_loaded = True
     sesh_app._show_agents = True
+    sesh_app._render_messages([], session)
+    await pilot.pause()
+
+    view = sesh_app.query_one("#message-view", TranscriptView)
+    agent_key = view._cards[0].key
+    view.reveal_key(agent_key)  # expand the agent container
+    # Ensure the agent is expanded so interior cards are visible.
+    if agent_key not in view.expanded_keys:
+        view.toggle_active()
+    await pilot.pause()
+    tool_cards_before = sum(1 for c in view._cards if "call" in c.entry.header)
+    assert tool_cards_before == 0, "tool interior hidden while tools are off"
 
     await pilot.press("t")
     await pilot.pause()
-    assert rendered, "toggling tools should re-render the spliced agent threads"
+    view = sesh_app.query_one("#message-view", TranscriptView)
+    tool_cards_after = sum(1 for c in view._cards if "call" in c.entry.header)
+    assert tool_cards_after == 1, "toggling tools reveals the interior tool card"
 
-    rendered.clear()
     await pilot.press("T")
     await pilot.pause()
-    assert rendered, "toggling thinking should re-render the spliced agent threads"
+    assert any(card.is_agent for card in view._cards), (
+        "toggling thinking should re-render the spliced agent threads"
+    )
 
 
 @pytest.mark.integration
