@@ -181,6 +181,29 @@ def test_local_mode_still_works(monkeypatch, capsys, tmp_claude_dir: Path) -> No
     assert all(s["host"] is None for s in data)
 
 
+def test_refresh_preserves_local_index_in_aggregation_mode(
+    monkeypatch, capsys, tmp_cache_dir: Path, tmp_aggregation_root: Path
+) -> None:
+    """`sesh --aggregation-root X refresh` must NOT overwrite the local index."""
+    monkeypatch.delenv("SESH_AGGREGATION_ROOT", raising=False)
+
+    from sesh import cache
+
+    # Place a sentinel local index that a correct aggregation refresh leaves alone.
+    sentinel = {"sentinel": "do-not-touch", "projects": [], "sessions": []}
+    cache.INDEX_FILE.parent.mkdir(parents=True, exist_ok=True)
+    cache.INDEX_FILE.write_text(json.dumps(sentinel))
+
+    cli.cmd_refresh(_ns(aggregation_root=str(tmp_aggregation_root)))
+
+    # Refresh still emits a JSON summary of the mirrored hosts...
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["sessions"] >= 2
+
+    # ...but the on-disk local index is byte-for-byte the sentinel.
+    assert json.loads(cache.INDEX_FILE.read_text()) == sentinel
+
+
 def test_bookmarks_refused_in_aggregation_mode(
     monkeypatch, capsys, tmp_aggregation_root: Path
 ) -> None:
