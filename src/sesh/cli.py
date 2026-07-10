@@ -29,6 +29,19 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Provider string values accepted by every ``--provider`` argument. Defined as a
+# plain tuple (not derived from the Provider enum) so parser construction stays
+# free of provider-implementation imports; kept in sync with sesh.models.Provider.
+PROVIDER_CHOICES = (
+    "claude",
+    "codex",
+    "cursor",
+    "copilot",
+    "pi",
+    "gemini",
+    "opencode",
+)
+
 
 def _refuse_in_aggregation(args: argparse.Namespace, what: str) -> None:
     """Exit with an error if aggregation mode is active for a destructive op."""
@@ -200,14 +213,22 @@ def _build_in_memory_index(projects, sessions) -> dict:
 
 
 def cmd_refresh(args: argparse.Namespace) -> None:
-    """Run full discovery and save the index."""
+    """Run full discovery and save the index.
+
+    In aggregation mode the on-disk index (owned by local-mode runs) is NOT
+    overwritten — discovery still runs and the source-file metadata cache is
+    saved (its keys are absolute source paths, so it never collides with the
+    local index), but ``save_index`` is skipped.
+    """
     from sesh.cache import SessionCache, save_index
     from sesh.discovery import discover_all
 
+    agg_root = _aggregation_root(args)
     cache = SessionCache()
-    projects, sessions = discover_all(cache=cache, aggregation_root=_aggregation_root(args))
+    projects, sessions = discover_all(cache=cache, aggregation_root=agg_root)
     cache.save()
-    save_index(projects, sessions)
+    if agg_root is None:
+        save_index(projects, sessions)
 
     total_sessions = sum(len(s) for s in sessions.values())
     providers = set()
@@ -1252,7 +1273,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         prog="sesh",
         description=(
-            "Browse and search LLM coding sessions (Claude Code, Codex, Cursor, Copilot).\n\n"
+            "Browse and search LLM coding sessions (Claude Code, Codex, Cursor, "
+            "Copilot, pi, Gemini, opencode).\n\n"
             "With no subcommand, launches the interactive TUI.\n"
             "Use subcommands for JSON output suitable for scripts and LLM agents.\n\n"
             "Typical workflow:\n"
@@ -1293,7 +1315,8 @@ def main() -> None:
         "refresh",
         help="Run full discovery across all providers and rebuild the index",
         description=(
-            "Scan Claude Code, Codex, Cursor, and Copilot session directories, "
+            "Scan Claude Code, Codex, Cursor, Copilot, pi, Gemini, and opencode "
+            "session directories, "
             "then write the index (default: ~/.cache/sesh/index.json, "
             "or $XDG_CACHE_HOME/sesh/index.json) for fast querying. "
             "Run this before other commands, or to pick up new sessions."
@@ -1325,8 +1348,11 @@ def main() -> None:
     p_sessions.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
-        help="Filter to sessions from this provider (claude, codex, cursor, copilot)",
+        choices=PROVIDER_CHOICES,
+        help=(
+            "Filter to sessions from this provider "
+            "(claude, codex, cursor, copilot, pi, gemini, opencode)"
+        ),
     )
     p_sessions.add_argument(
         "--since",
@@ -1381,8 +1407,11 @@ def main() -> None:
     p_stats.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi"],
-        help="Only aggregate sessions from this provider (claude, codex, cursor, copilot, pi)",
+        choices=PROVIDER_CHOICES,
+        help=(
+            "Only aggregate sessions from this provider "
+            "(claude, codex, cursor, copilot, pi, gemini, opencode)"
+        ),
     )
 
     # messages
@@ -1404,7 +1433,7 @@ def main() -> None:
     p_messages.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
+        choices=PROVIDER_CHOICES,
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_messages.add_argument(
@@ -1456,7 +1485,7 @@ def main() -> None:
     p_search.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi"],
+        choices=PROVIDER_CHOICES,
         help="Only return matches from this provider",
     )
     p_search.add_argument(
@@ -1484,7 +1513,8 @@ def main() -> None:
         description=(
             "Search for sessions using ripgrep and delete all matches. "
             "Use --dry-run to preview what would be deleted without making changes. "
-            "Supports Claude, Codex, Cursor, and Copilot sessions."
+            "Supports Claude, Codex, Cursor, Copilot, pi, Gemini, and opencode "
+            "sessions."
         ),
     )
     p_clean.add_argument(
@@ -1521,7 +1551,7 @@ def main() -> None:
     p_delete.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
+        choices=PROVIDER_CHOICES,
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_delete.add_argument(
@@ -1553,7 +1583,7 @@ def main() -> None:
     p_resume.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
+        choices=PROVIDER_CHOICES,
         help="Disambiguate if the same ID exists in multiple providers",
     )
 
@@ -1601,7 +1631,7 @@ def main() -> None:
     p_export.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
+        choices=PROVIDER_CHOICES,
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_export.add_argument(
@@ -1671,7 +1701,7 @@ def main() -> None:
     p_view.add_argument(
         "--provider",
         metavar="NAME",
-        choices=["claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode"],
+        choices=PROVIDER_CHOICES,
         help="Disambiguate if the same ID exists in multiple providers",
     )
     p_view.add_argument(

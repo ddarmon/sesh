@@ -615,3 +615,45 @@ async def test_bookmark_toggle_on_session_node(app):
 
     await pilot.press("b")
     assert ("claude", "bm1") not in sesh_app._bookmarks
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_aggregation_startup_skips_local_index(monkeypatch, tmp_path):
+    """Aggregation-mode startup must not read the local index or show local sessions.
+
+    The on-disk index is owned by local mode; loading it during on_mount would
+    briefly flash unrelated local sessions before the mirrored hosts discover.
+    """
+    monkeypatch.setattr("sesh.app.load_bookmarks", lambda: set())
+    monkeypatch.setattr("sesh.app.save_bookmarks", lambda _: None)
+
+    # Spy on the index loader; a correct aggregation startup never calls it.
+    calls: list[int] = []
+
+    def _spy_load_index():
+        calls.append(1)
+        return {
+            "projects": [
+                {
+                    "path": "/local/repo",
+                    "display_name": "local-repo",
+                    "providers": ["claude"],
+                    "session_count": 1,
+                }
+            ],
+            "sessions": [],
+        }
+
+    monkeypatch.setattr("sesh.cache.load_index", _spy_load_index)
+
+    app = SeshApp(aggregation_root=tmp_path)
+    # Keep real _load_from_index (under test); stub only background discovery.
+    app._discover_all = lambda: None
+
+    async with app.run_test():
+        pass
+
+    assert calls == [], "load_index must not be called during aggregation startup"
+    assert app.projects == {}
+    assert app.sessions == {}

@@ -956,7 +956,15 @@ class SeshApp(App):
         self.run_worker(self._discover_all, thread=True, exclusive=True)
 
     def _load_from_index(self) -> bool:
-        """Load projects and sessions from the cached index for instant display."""
+        """Load projects and sessions from the cached index for instant display.
+
+        Skipped entirely in aggregation mode: the on-disk index is owned by
+        local-mode runs, so loading it would briefly flash unrelated local
+        sessions before the mirrored hosts finish discovering.
+        """
+        if self._aggregation_root is not None:
+            return False
+
         from sesh.cache import _dict_to_session, load_index
 
         data = load_index()
