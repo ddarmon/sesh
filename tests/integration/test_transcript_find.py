@@ -67,27 +67,25 @@ async def test_find_counter_and_next_prev_navigation(app):
     view = sesh_app.query_one("#message-view", TranscriptView)
     view.find("needle")
     sesh_app._update_find_count()
-    # Three total matches; the first is active.
-    assert view.find_position == (1, 3)
-    assert view.find_label == "1 / 3"
-    assert _count_text(sesh_app) == "1 / 3"
+    # Per-card counting: two matching cards (the assistant's two hits collapse to
+    # one card match), first is active.
+    assert view.find_position == (1, 2)
+    assert view.find_label == "1 / 2"
+    assert _count_text(sesh_app) == "1 / 2"
     assert view.find_active_key == view.keys[0]
 
     view.find_next()
-    assert view.find_position == (2, 3)
+    assert view.find_position == (2, 2)
     assert view.find_active_key == view.keys[1]
-
-    view.find_next()
-    assert view.find_position == (3, 3)
 
     # Wrap forward back to the first match.
     view.find_next()
-    assert view.find_position == (1, 3)
+    assert view.find_position == (1, 2)
     assert view.find_active_key == view.keys[0]
 
     # Wrap backward to the last match.
     view.find_prev()
-    assert view.find_position == (3, 3)
+    assert view.find_position == (2, 2)
 
 
 @pytest.mark.integration

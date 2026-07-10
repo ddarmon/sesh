@@ -35,11 +35,11 @@ def test_compute_matches_over_text_bodies() -> None:
         ]
     )
     matches = compute_matches(items, "needle")
-    # One hit in the user message, two in the assistant message, document order.
-    assert len(matches) == 3
+    # Per-card counting: one match per matching body (the assistant's two hits
+    # collapse to a single card match), in document order.
+    assert len(matches) == 2
     assert matches[0].key == items[0].key
     assert matches[1].key == items[1].key
-    assert matches[2].key == items[1].key
 
 
 def test_compute_matches_empty_term_is_empty() -> None:
@@ -49,7 +49,19 @@ def test_compute_matches_empty_term_is_empty() -> None:
 
 def test_compute_matches_case_insensitive() -> None:
     items = compose_transcript([_msg(role="user", content="Needle NEEDLE needle")])
-    assert len(compute_matches(items, "needle")) == 3
+    # Case-insensitive match; per-card counting means one match for the one card.
+    matches = compute_matches(items, "needle")
+    assert len(matches) == 1
+    assert matches[0].start == 0  # first span, at the leading "Needle"
+
+
+def test_compute_matches_one_per_card_first_span() -> None:
+    # A single card with several hits yields exactly one match at the first span.
+    items = compose_transcript([_msg(role="user", content="a needle then needle")])
+    matches = compute_matches(items, "needle")
+    assert len(matches) == 1
+    assert matches[0].key == items[0].key
+    assert matches[0].start == 2  # offset of the first "needle"
 
 
 def test_compute_matches_includes_tool_and_thinking_bodies() -> None:
@@ -115,8 +127,12 @@ def _finder(term: str, items) -> TranscriptFinder:
 
 
 def test_set_term_jumps_to_first_match() -> None:
+    # Two separate cards -> two matches (per-card counting).
     items = compose_transcript(
-        [_msg(role="user", content="needle one needle two")]
+        [
+            _msg(role="user", content="needle one"),
+            _msg(role="assistant", content="needle two"),
+        ]
     )
     f = _finder("needle", items)
     assert f.count == 2
@@ -141,12 +157,17 @@ def test_empty_term_label_blank() -> None:
 
 
 def test_next_prev_wraparound() -> None:
+    # Three cards -> three matches (one per card) to exercise wraparound.
     items = compose_transcript(
-        [_msg(role="user", content="needle needle needle")]
+        [
+            _msg(role="user", content="needle a"),
+            _msg(role="assistant", content="needle b"),
+            _msg(role="user", content="needle c"),
+        ]
     )
     f = _finder("needle", items)
     assert f.active_index == 0
-    assert f.next().start == items_second_span(items)  # -> index 1
+    assert f.next().key == items[1].key  # -> index 1
     assert f.active_index == 1
     f.next()
     assert f.active_index == 2
@@ -158,22 +179,28 @@ def test_next_prev_wraparound() -> None:
     assert f.active_index == 2
 
 
-def items_second_span(items) -> int:
-    return compute_matches(items, "needle")[1].start
-
-
 def test_next_from_no_active_goes_first() -> None:
-    items = compose_transcript([_msg(role="user", content="needle needle")])
+    items = compose_transcript(
+        [
+            _msg(role="user", content="needle a"),
+            _msg(role="assistant", content="needle b"),
+        ]
+    )
     f = TranscriptFinder()
     f.set_term("needle", items)
     # Force "no active" then navigate.
     f._active = -1
-    assert f.next().start == 0
+    assert f.next().key == items[0].key
     assert f.active_index == 0
 
 
 def test_prev_from_no_active_goes_last() -> None:
-    items = compose_transcript([_msg(role="user", content="needle needle")])
+    items = compose_transcript(
+        [
+            _msg(role="user", content="needle a"),
+            _msg(role="assistant", content="needle b"),
+        ]
+    )
     f = TranscriptFinder()
     f.set_term("needle", items)
     f._active = -1
@@ -252,7 +279,12 @@ def test_recompute_to_empty_resets() -> None:
 
 
 def test_set_same_term_preserves_active() -> None:
-    items = compose_transcript([_msg(role="user", content="needle needle")])
+    items = compose_transcript(
+        [
+            _msg(role="user", content="needle a"),
+            _msg(role="assistant", content="needle b"),
+        ]
+    )
     f = _finder("needle", items)
     f.next()
     assert f.active_index == 1

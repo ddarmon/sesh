@@ -213,6 +213,13 @@ def _message_display_dict(m: Message) -> dict:
     and ``content`` (raw Markdown rendered client-side). The stable ``key`` is
     attached separately by the caller from :mod:`sesh.transcript`. The
     branching mirrors ``format_session_markdown``.
+
+    Tool messages wrap their body in a Markdown code fence for *rendering*, so
+    for those an extra ``copy`` field carries the raw body (matching the TUI's
+    ``transcript_view.normalize_message`` semantics). The Copy button prefers
+    ``copy`` over ``content`` so the clipboard bytes agree between the two
+    readers. ``copy`` is emitted only when it differs from ``content`` to keep
+    the payload small.
     """
     ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
 
@@ -226,6 +233,7 @@ def _message_display_dict(m: Message) -> dict:
             "label": f"{tool} (call){ts}",
             "kind": "tool",
             "content": f"```json\n{m.tool_input or ''}\n```",
+            "copy": m.tool_input or "",
         }
 
     if m.content_type == "tool_result":
@@ -235,6 +243,7 @@ def _message_display_dict(m: Message) -> dict:
             "label": f"{tool} (result){ts}",
             "kind": "tool",
             "content": f"```\n{m.tool_output or ''}\n```",
+            "copy": m.tool_output or "",
         }
 
     if m.role == "user":
@@ -427,9 +436,14 @@ __TOOLBAR__
     btn.textContent = label;
     window.setTimeout(()=>{ btn.textContent = prev; }, 1100);
   }
+  // Raw body a message copies to the clipboard. Tool messages carry a `copy`
+  // field with the unfenced body (matching the TUI); everything else copies its
+  // rendered-source `content`, so the two readers put identical bytes on the
+  // clipboard.
+  function copyBody(m){ return (m.copy != null ? m.copy : m.content) || ''; }
   // Full plain-text of a sub-agent container: its interior messages joined.
   function agentText(m){
-    return (m.messages||[]).map((x)=> (x.label ? x.label + '\n' : '') + (x.content||'')).join('\n\n');
+    return (m.messages||[]).map((x)=> (x.label ? x.label + '\n' : '') + copyBody(x)).join('\n\n');
   }
   function linkFor(key){
     const base = (location.origin && location.origin !== 'null')
@@ -464,6 +478,11 @@ __TOOLBAR__
     return box;
   }
 
+  // Body-only match text per stable key (populated as cards are built). Find
+  // matches against this map, not the card's textContent, so the hover
+  // Copy/Link button labels never count as a hit.
+  const matchText = new Map();
+
   // Build one message/agent node. The stable key becomes the DOM id (and the
   // <details> liveKey), so anchors, open-state, and reconciliation are all
   // keyed by identity rather than list position.
@@ -486,7 +505,10 @@ __TOOLBAR__
     const role = (m.role||'assistant');
     const wrap = document.createElement('div'); wrap.className = 'msg '+role;
     if (key){ wrap.id = key; wrap.dataset.key = key; }
-    wrap.appendChild(buildActions(key, ()=> m.content||''));
+    // Record the body-only text (no header/chrome) for find matching, keyed by
+    // stable id, so searching never matches the hover Copy/Link button labels.
+    if (key) matchText.set(key, copyBody(m).toLowerCase());
+    wrap.appendChild(buildActions(key, ()=> copyBody(m)));
     const bub = document.createElement('div'); bub.className='bubble';
     const rendered = md.render(normMath(m.content||''));
     if (m.kind === 'tool' || m.kind === 'thinking'){
@@ -506,14 +528,32 @@ __TOOLBAR__
   }
   function renderThread(list, container){ (list||[]).forEach((m)=> buildNode(m, container)); }
 
+  // Count only real messages, excluding kind:'agent' container entries, so the
+  // toolbar count agrees with the meta header's "N messages" and a newly
+  // spawned sub-agent container never increments the message count / new badge.
+  function messageCount(list){
+    return (list||[]).filter((m)=> m.kind !== 'agent').length;
+  }
+  // Per-agent-container interior fingerprint (joined interior keys, which embed
+  // content digests). Lets the live append fast-path detect when a sub-agent's
+  // interior changed even though its container key stayed the same.
+  function agentFingerprints(list){
+    const fp = {};
+    (list||[]).forEach((m)=>{
+      if (m.kind === 'agent') fp[m.key || ''] = (m.messages||[]).map((x)=> x.key || '').join('\n');
+    });
+    return fp;
+  }
+
   const thread = document.getElementById('thread');
   renderThread(data.messages, thread);
   let topKeys = (data.messages||[]).map((m)=> m.key || '');
+  let topFingerprints = agentFingerprints(data.messages);
 
   // ---- Message count + new-message indicator ----
   const msgCountEl = document.getElementById('msg-count');
   const newMsgsBtn = document.getElementById('new-msgs');
-  let renderedCount = topKeys.length;
+  let renderedCount = messageCount(data.messages);
   let pendingNew = 0;
   function setMsgCount(n){
     if (msgCountEl) msgCountEl.textContent = n + (n === 1 ? ' message' : ' messages');
@@ -572,7 +612,7 @@ __TOOLBAR__
       applyMatchClasses(); updateFindCount();
       return;
     }
-    matches = leafCards().filter((el)=> (el.textContent || '').toLowerCase().includes(q));
+    matches = leafCards().filter((el)=> (matchText.get(el.dataset.key) || '').includes(q));
     let idx = activeKey ? matches.findIndex((el)=> el.dataset.key === activeKey) : -1;
     if (idx < 0) idx = matches.length ? 0 : -1;
     matchIndex = idx;
@@ -655,18 +695,28 @@ __TOOLBAR__
 
   // Reconcile a fresh payload against the DOM. Append-only when the old top-level
   // keys are a strict prefix of the new ones (content edits change keys, so a
-  // prefix match means pure appends); otherwise a full rerender preserving open
-  // <details> state by stable key.
+  // prefix match means pure appends) AND no shared sub-agent container's interior
+  // changed. A container key is `agent-{id}`, stable regardless of interior
+  // content, so a poll can deliver a new main-thread message *and* new interior
+  // messages inside an existing sub-agent at once; taking the append fast-path
+  // then would leave the stale interior (and its `· N msgs` label) behind. When
+  // any shared agent's interior fingerprint changed we fall through to the full
+  // rerender, which rebuilds every card and preserves open <details> by key.
   function applyPayload(payload){
     const list = payload.messages || [];
     const newKeys = list.map((m)=> m.key || '');
+    const newFingerprints = agentFingerprints(list);
     const oldKeys = topKeys;
     const wasNear = nearBottom();
     const oldY = window.scrollY;
-    const added = Math.max(0, newKeys.length - oldKeys.length);
+    const newMsgCount = messageCount(list);
+    const added = Math.max(0, newMsgCount - renderedCount);
     const followed = follow && wasNear;
+    const interiorChanged = Object.keys(topFingerprints).some(
+      (k)=> (k in newFingerprints) && newFingerprints[k] !== topFingerprints[k]);
     const isPrefix = oldKeys.length < newKeys.length
-      && oldKeys.every((k, i)=> k === newKeys[i]);
+      && oldKeys.every((k, i)=> k === newKeys[i])
+      && !interiorChanged;
     if (isPrefix){
       const frag = document.createDocumentFragment();
       for (let i = oldKeys.length; i < list.length; i++) buildNode(list[i], frag);
@@ -681,7 +731,8 @@ __TOOLBAR__
       });
     }
     topKeys = newKeys;
-    renderedCount = newKeys.length;
+    topFingerprints = newFingerprints;
+    renderedCount = newMsgCount;
     setMsgCount(renderedCount);
     if (followed){
       pendingNew = 0;

@@ -122,16 +122,22 @@ def _match_bodies(items: list[TranscriptItem]):
 
 
 def compute_matches(items: list[TranscriptItem], term: str) -> list[Match]:
-    """Ordered ``Match`` list for *term* across full bodies of *items*.
+    """Ordered per-card ``Match`` list for *term* across full bodies of *items*.
 
-    Matching runs over complete bodies (not collapsed previews), so a hit past
-    a card's preview boundary is still found. Empty term yields ``[]``.
+    Counting is **per card**: a body that contains the term contributes exactly
+    one ``Match``, carrying the body's *first* span (used to reveal/scroll to the
+    hit). This matches the HTML viewer's find, which counts one matching card per
+    hit, so the two readers report the same ``i / n`` totals. Matching runs over
+    complete bodies (not collapsed previews), so a hit past a card's preview
+    boundary is still found. Empty term yields ``[]``.
     """
     if not term:
         return []
     matches: list[Match] = []
     for key, body in _match_bodies(items):
-        for start, end in find_match_spans(body, term):
+        spans = find_match_spans(body, term)
+        if spans:
+            start, end = spans[0]
             matches.append(Match(key, start, end))
     return matches
 
@@ -139,8 +145,9 @@ def compute_matches(items: list[TranscriptItem], term: str) -> list[Match]:
 class TranscriptFinder:
     """Pure match-index model for transcript find navigation.
 
-    Holds an ordered ``Match`` list (one entry per span, so a card with three
-    hits contributes three matches) plus a 0-based active pointer. ``next`` /
+    Holds an ordered ``Match`` list (one entry per matching card — a card with
+    three hits still contributes a single match, so the counter agrees with the
+    HTML viewer) plus a 0-based active pointer. ``next`` /
     ``prev`` wrap around. On recompute (a live append or rerender) the active
     match is preserved **by stable key** — the same key's hit stays active even
     though list positions shifted — and resets gracefully to no-active when the

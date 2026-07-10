@@ -574,8 +574,110 @@ def test_html_find_navigation_is_present() -> None:
     assert "' / '" in script
     # Reveal a hidden match by opening its own + ancestor <details>.
     assert "revealElement" in script
-    # Full DOM text is matched (includes collapsed details content).
-    assert "el.textContent" in script
+    # Find matches against the body-only match map, not the card's textContent,
+    # so the hover Copy/Link button labels are never counted as hits.
+    assert "matchText.get(el.dataset.key)" in script
+    assert "el.textContent" not in script
+
+
+def test_html_find_scopes_matching_to_message_body() -> None:
+    """[finding 5] The find map is populated with body-only text per key, so the
+    hover Copy/Link chrome cannot be matched."""
+    out = format_session_html(
+        make_session(id="s-find2", provider=Provider.CLAUDE),
+        [make_message(content="body text")],
+    )
+    script = _viewer_script(out)
+    # A per-key map holds the lowercased body used for matching.
+    assert "const matchText = new Map();" in script
+    assert "matchText.set(key, copyBody(m).toLowerCase())" in script
+
+
+def test_html_tool_message_copy_field_is_raw_body() -> None:
+    """[finding 4] Tool messages carry a `copy` field with the raw (unfenced)
+    body matching the TUI, while `content` keeps the render-time code fence."""
+    out = format_session_html(
+        make_session(id="s-copyfield", provider=Provider.CLAUDE),
+        [
+            make_message(
+                role="assistant",
+                content="",
+                content_type="tool_use",
+                tool_name="bash",
+                tool_input='{"cmd": "ls"}',
+            ),
+            make_message(
+                role="user",
+                content="",
+                content_type="tool_result",
+                tool_name="bash",
+                tool_output="file-a\nfile-b",
+            ),
+            make_message(role="assistant", content="plain answer"),
+        ],
+    )
+    payload = _extract_payload(out)
+    tool_use = next(m for m in payload["messages"] if "(call)" in m["label"])
+    tool_res = next(m for m in payload["messages"] if "(result)" in m["label"])
+    text_msg = next(m for m in payload["messages"] if m["label"].startswith("Assistant"))
+    # Raw body in `copy`, fenced body in `content`.
+    assert tool_use["copy"] == '{"cmd": "ls"}'
+    assert tool_use["content"] == '```json\n{"cmd": "ls"}\n```'
+    assert tool_res["copy"] == "file-a\nfile-b"
+    assert tool_res["content"] == "```\nfile-a\nfile-b\n```"
+    # Plain text messages don't carry a redundant `copy` field.
+    assert "copy" not in text_msg
+
+
+def test_html_copy_button_prefers_copy_over_content() -> None:
+    """[finding 4] The clipboard helper prefers m.copy (raw) over m.content."""
+    out = format_session_html(
+        make_session(id="s-copyprefer", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+    )
+    script = _viewer_script(out)
+    # A shared helper resolves the raw body, preferring `copy` when present.
+    assert "function copyBody(m){ return (m.copy != null ? m.copy : m.content) || ''; }" in script
+    # Both the per-message Copy button and the sub-agent aggregate use it.
+    assert "buildActions(key, ()=> copyBody(m))" in script
+    assert "copyBody(x)" in script
+
+
+def test_html_message_count_excludes_agent_containers() -> None:
+    """[finding 3] The toolbar message count and new-badge count only real
+    messages, never kind:'agent' container entries."""
+    out = format_session_html(
+        make_session(id="s-count", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+    )
+    script = _viewer_script(out)
+    # A helper filters out agent containers, and both the initial count and the
+    # live-update added-count derive from it (not raw key-list length).
+    assert "function messageCount(list){" in script
+    assert "(list||[]).filter((m)=> m.kind !== 'agent').length" in script
+    assert "let renderedCount = messageCount(data.messages);" in script
+    assert "const newMsgCount = messageCount(list);" in script
+    assert "const added = Math.max(0, newMsgCount - renderedCount);" in script
+
+
+def test_html_live_append_guards_subagent_interior_fingerprint() -> None:
+    """[finding 1] The append fast-path falls through to a full rerender when a
+    shared sub-agent container's interior fingerprint changed, so stale interior
+    (and its `· N msgs` label) can't survive a pure-append poll."""
+    out = format_session_html(
+        make_session(id="s-fp", provider=Provider.CLAUDE),
+        [make_message(content="hi")],
+        live_api="./api/session",
+    )
+    script = _viewer_script(out)
+    # A fingerprint keyed by agent container id (joined interior keys).
+    assert "function agentFingerprints(list){" in script
+    assert "let topFingerprints = agentFingerprints(data.messages);" in script
+    # The fast-path is gated on both the prefix check AND unchanged interiors.
+    assert "const interiorChanged = Object.keys(topFingerprints).some(" in script
+    assert "&& !interiorChanged;" in script
+    # Fingerprints refresh after each reconcile.
+    assert "topFingerprints = newFingerprints;" in script
 
 
 def test_html_live_config_carries_updated_at_when_provided() -> None:
