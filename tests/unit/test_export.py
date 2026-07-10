@@ -371,6 +371,44 @@ def test_html_message_keys_stay_stable_when_rows_are_inserted() -> None:
     assert before["messages"][0]["key"] == after["messages"][1]["key"]
 
 
+def test_html_payload_reuses_shared_transcript_keys() -> None:
+    """The embedded payload keys come from sesh.transcript, not a private algo."""
+    from sesh import transcript
+    from sesh.export import session_html_payload
+
+    session = make_session(id="s-keys", provider=Provider.CLAUDE)
+    msgs = [
+        make_message(role="user", content="hi", timestamp=None),
+        make_message(role="assistant", content="yo", timestamp=None),
+    ]
+    payload = session_html_payload(session, msgs)
+    expected = transcript.assign_message_keys(msgs)
+    assert [e["key"] for e in payload["messages"]] == expected
+
+
+def test_html_payload_agent_key_is_shared_container_anchor() -> None:
+    from sesh import transcript
+    from sesh.export import session_html_payload
+
+    session = make_session(id="s-agent-key", provider=Provider.CLAUDE)
+    messages = [
+        make_message(role="user", content="go",
+                     timestamp=datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)),
+        make_message(role="assistant", content="ok",
+                     timestamp=datetime(2025, 1, 1, 1, 0, tzinfo=timezone.utc)),
+    ]
+    meta, interior = _subagent(
+        interior=[make_message(role="assistant", content="nested", timestamp=None)]
+    )
+    payload = session_html_payload(session, messages, [(meta, interior)])
+    agent = next(e for e in payload["messages"] if e.get("kind") == "agent")
+    assert agent["key"] == transcript.agent_anchor(meta.agent_id)
+    # Interior message keys are namespaced by the sub-agent's agent_id.
+    assert agent["messages"][0]["key"] == transcript.assign_message_keys(
+        interior, namespace=meta.agent_id
+    )[0]
+
+
 def test_format_session_html_embeds_live_configuration() -> None:
     out = format_session_html(
         make_session(),

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import html
 import json
 import re
 from importlib.resources import files
 
+from sesh import transcript
 from sesh.models import Message, SessionMeta, SubagentMeta
 
 
@@ -138,91 +138,75 @@ def _load_asset(name: str) -> str:
     return files("sesh.viewer_assets").joinpath(name).read_text(encoding="utf-8")
 
 
-def _html_messages(messages: list[Message]) -> list[dict]:
-    """Map ``Message`` objects to the display dicts the viewer JS consumes.
+def _message_display_dict(m: Message) -> dict:
+    """Map one ``Message`` to the display dict the viewer JS consumes.
 
     Each dict has ``role`` (CSS class), ``label`` (heading text), ``kind``
     (``"text"`` | ``"tool"`` | ``"thinking"`` — drives collapsible wrapping),
-    and ``content`` (raw Markdown rendered client-side). The branching mirrors
-    ``format_session_markdown``.
+    and ``content`` (raw Markdown rendered client-side). The stable ``key`` is
+    attached separately by the caller from :mod:`sesh.transcript`. The
+    branching mirrors ``format_session_markdown``.
     """
-    out: list[dict] = []
-    for m in messages:
-        ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
+    ts = f" ({m.timestamp.strftime('%H:%M')})" if m.timestamp else ""
 
-        if m.content_type == "thinking":
-            out.append({
-                "role": "tool",
-                "label": f"Thinking{ts}",
-                "kind": "thinking",
-                "content": m.thinking or "",
-            })
-            continue
+    if m.content_type == "thinking":
+        return {"role": "tool", "label": f"Thinking{ts}", "kind": "thinking", "content": m.thinking or ""}
 
-        if m.content_type == "tool_use":
-            tool = m.tool_name or "tool"
-            out.append({
-                "role": "tool",
-                "label": f"{tool} (call){ts}",
-                "kind": "tool",
-                "content": f"```json\n{m.tool_input or ''}\n```",
-            })
-            continue
+    if m.content_type == "tool_use":
+        tool = m.tool_name or "tool"
+        return {
+            "role": "tool",
+            "label": f"{tool} (call){ts}",
+            "kind": "tool",
+            "content": f"```json\n{m.tool_input or ''}\n```",
+        }
 
-        if m.content_type == "tool_result":
-            tool = m.tool_name or "tool"
-            out.append({
-                "role": "tool",
-                "label": f"{tool} (result){ts}",
-                "kind": "tool",
-                "content": f"```\n{m.tool_output or ''}\n```",
-            })
-            continue
+    if m.content_type == "tool_result":
+        tool = m.tool_name or "tool"
+        return {
+            "role": "tool",
+            "label": f"{tool} (result){ts}",
+            "kind": "tool",
+            "content": f"```\n{m.tool_output or ''}\n```",
+        }
 
-        if m.role == "user":
-            out.append({"role": "user", "label": f"User{ts}", "kind": "text", "content": m.content})
-            continue
+    if m.role == "user":
+        return {"role": "user", "label": f"User{ts}", "kind": "text", "content": m.content}
 
-        if m.role == "assistant":
-            out.append({"role": "assistant", "label": f"Assistant{ts}", "kind": "text", "content": m.content})
-            continue
+    if m.role == "assistant":
+        return {"role": "assistant", "label": f"Assistant{ts}", "kind": "text", "content": m.content}
 
-        if m.role == "tool":
-            tool = m.tool_name or "tool"
-            out.append({"role": "tool", "label": f"{tool}{ts}", "kind": "tool", "content": m.content})
-            continue
+    if m.role == "tool":
+        tool = m.tool_name or "tool"
+        return {"role": "tool", "label": f"{tool}{ts}", "kind": "tool", "content": m.content}
 
-        out.append({"role": m.role, "label": f"{m.role}{ts}", "kind": "text", "content": m.content})
-
-    # Stable keys let live rerenders restore expanded details even when rows
-    # are inserted or visibility toggles change ahead of an existing item.
-    occurrences: dict[str, int] = {}
-    for entry in out:
-        material = json.dumps(entry, ensure_ascii=False, sort_keys=True)
-        digest = hashlib.sha1(material.encode("utf-8")).hexdigest()[:12]
-        occurrence = occurrences.get(digest, 0)
-        occurrences[digest] = occurrence + 1
-        entry["key"] = f"{digest}-{occurrence}"
-    return out
+    return {"role": m.role, "label": f"{m.role}{ts}", "kind": "text", "content": m.content}
 
 
-def _agent_entry(meta: SubagentMeta, interior: list[Message]) -> dict:
-    """Build a ``kind: "agent"`` display dict for a sub-agent thread.
+def _agent_display_dict(item: transcript.TranscriptItem) -> dict:
+    """Build a ``kind: "agent"`` display dict from a composed agent item.
 
-    Carries the collapsed summary ``label`` plus the nested interior mapped
-    through :func:`_html_messages`, so the viewer JS can recurse into it.
+    Carries the collapsed summary ``label``, the container anchor ``key``, and
+    the already-keyed interior messages, so the viewer JS can recurse into it.
     """
+    meta = item.meta
+    assert meta is not None
     desc = meta.description or meta.agent_id
     label = f"⑂ {meta.agent_type or 'agent'} — {desc} · {meta.message_count} msgs"
+    messages: list[dict] = []
+    for interior in item.interior:
+        entry = _message_display_dict(interior.message)
+        entry["key"] = interior.key
+        messages.append(entry)
     return {
         "role": "agent",
         "label": label,
         "kind": "agent",
-        "key": f"agent-{meta.agent_id}",
+        "key": item.key,
         "description": meta.description,
         "agent_type": meta.agent_type,
         "message_count": meta.message_count,
-        "messages": _html_messages(interior),
+        "messages": messages,
     }
 
 
@@ -232,41 +216,20 @@ def _compose_thread(
 ) -> list[dict]:
     """Interleave sub-agent ``agent`` entries into the main message dicts.
 
-    Each sub-agent is anchored chronologically: it is spliced in just before
-    the first visible main-thread message with a later timestamp (so it works
-    even when tool rows are filtered out). Sub-agents with no timestamp fall
-    back to a trailing section appended after the whole thread.
+    Composition, chronological sub-agent anchoring, and stable keys all come
+    from :func:`sesh.transcript.compose_transcript`; this function only maps the
+    resulting items to the browser display dicts.
     """
-    base = _html_messages(messages)
-    if not subagents:
-        return base
-
-    anchored: list[tuple[int, dict]] = []
-    trailing: list[dict] = []
-    for meta, interior in subagents:
-        entry = _agent_entry(meta, interior)
-        ts = meta.first_timestamp
-        if ts is None:
-            trailing.append(entry)
-            continue
-        idx = len(messages)
-        for i, m in enumerate(messages):
-            if m.timestamp is not None and m.timestamp > ts:
-                idx = i
-                break
-        anchored.append((idx, entry))
-
-    anchored.sort(key=lambda t: t[0])
-    result: list[dict] = []
-    ai = 0
-    for i in range(len(base) + 1):
-        while ai < len(anchored) and anchored[ai][0] == i:
-            result.append(anchored[ai][1])
-            ai += 1
-        if i < len(base):
-            result.append(base[i])
-    result.extend(trailing)
-    return result
+    items = transcript.compose_transcript(messages, subagents)
+    out: list[dict] = []
+    for item in items:
+        if item.kind == "agent":
+            out.append(_agent_display_dict(item))
+        else:
+            entry = _message_display_dict(item.message)
+            entry["key"] = item.key
+            out.append(entry)
+    return out
 
 
 _HTML_TEMPLATE = r"""<!doctype html>
