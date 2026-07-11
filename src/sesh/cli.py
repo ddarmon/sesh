@@ -1042,6 +1042,7 @@ def cmd_export(args: argparse.Namespace) -> None:
                     "agent_id": meta.agent_id,
                     "description": meta.description,
                     "agent_type": meta.agent_type,
+                    "workflow_id": meta.workflow_id,
                     "is_fork": meta.is_fork,
                     "tool_use_id": meta.tool_use_id,
                     "message_count": meta.message_count,

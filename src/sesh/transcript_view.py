@@ -48,7 +48,7 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
-from sesh.models import Message
+from sesh.models import Message, short_workflow_id
 from sesh.transcript import TranscriptItem
 
 #: Characters of a message body shown before collapsing to a preview + marker.
@@ -321,7 +321,8 @@ def _agent_header(item: TranscriptItem) -> str:
     assert meta is not None
     desc = meta.description or meta.agent_id
     atype = meta.agent_type or "agent"
-    return f"⑂ {atype} — {desc} · {meta.message_count} msgs"
+    marker = f"[{short_workflow_id(meta.workflow_id)}] " if meta.workflow_id else ""
+    return f"⑂ {marker}{atype} — {desc} · {meta.message_count} msgs"
 
 
 def build_rows(

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from importlib.resources import files
 
 from sesh import transcript
-from sesh.models import Message, SessionMeta, SubagentMeta
+from sesh.models import Message, SessionMeta, SubagentMeta, short_workflow_id
 
 
 def format_duration(start: datetime | None, end: datetime | None) -> str:
@@ -184,9 +184,12 @@ def format_session_markdown(
 
     for meta, interior in subagents or []:
         desc = meta.description or meta.agent_id
-        lines.append(f"## Sub-agent: {desc} ({meta.agent_id})")
+        wf = f"[{short_workflow_id(meta.workflow_id)}] " if meta.workflow_id else ""
+        lines.append(f"## Sub-agent: {wf}{desc} ({meta.agent_id})")
         lines.append("")
         meta_bits = [f"**Type:** {meta.agent_type or 'agent'}"]
+        if meta.workflow_id:
+            meta_bits.append(f"**Workflow:** {meta.workflow_id}")
         meta_bits.append(f"**Messages:** {meta.message_count}")
         if meta.output_tokens is not None:
             meta_bits.append(f"**Output tokens:** {meta.output_tokens:,}")
@@ -268,7 +271,10 @@ def _agent_display_dict(item: transcript.TranscriptItem) -> dict:
     meta = item.meta
     assert meta is not None
     desc = meta.description or meta.agent_id
-    label = f"⑂ {meta.agent_type or 'agent'} — {desc} · {meta.message_count} msgs"
+    marker = f"[{short_workflow_id(meta.workflow_id)}] " if meta.workflow_id else ""
+    label = (
+        f"⑂ {marker}{meta.agent_type or 'agent'} — {desc} · {meta.message_count} msgs"
+    )
     messages: list[dict] = []
     for interior in item.interior:
         entry = _message_display_dict(interior.message)
@@ -281,6 +287,7 @@ def _agent_display_dict(item: transcript.TranscriptItem) -> dict:
         "key": item.key,
         "description": meta.description,
         "agent_type": meta.agent_type,
+        "workflow_id": meta.workflow_id,
         "message_count": meta.message_count,
         "messages": messages,
     }

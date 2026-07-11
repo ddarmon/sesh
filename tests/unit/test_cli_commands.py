@@ -465,6 +465,37 @@ def test_cmd_export_json_format(monkeypatch, capsys) -> None:
     assert out["messages"][1]["tool_name"] == "Read"
 
 
+def test_cmd_export_json_carries_subagent_workflow_id(monkeypatch, capsys) -> None:
+    """JSON export includes workflow_id on each sub-agent entry."""
+    from sesh.models import SubagentMeta
+
+    session = make_session(id="s1", provider=Provider.CLAUDE, project_path="/repo")
+    meta = SubagentMeta(
+        agent_id="w1",
+        file_path="/repo/s1/subagents/workflows/wf_a1be27ca-98b/agent-w1.jsonl",
+        workflow_id="wf_a1be27ca-98b",
+    )
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: {"sessions": [_session_dict(id="s1")]})
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (session, []))
+    monkeypatch.setattr(
+        cli, "_resolve_subagents", lambda *a, **k: [(meta, [make_message(role="user", content="hi")])]
+    )
+
+    cli.cmd_export(
+        _ns(
+            session_id="s1",
+            provider=None,
+            output_format="json",
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_agents=False,
+        )
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["subagents"][0]["workflow_id"] == "wf_a1be27ca-98b"
+
+
 def test_cmd_export_markdown_format(monkeypatch, capsys) -> None:
     """Markdown export renders headings, blockquoted thinking, and fenced tool input."""
     session = make_session(

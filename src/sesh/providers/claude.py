@@ -566,12 +566,16 @@ def _parse_agent_file(agent_file: Path) -> tuple[dict, list[Message]] | None:
 
 
 def _meta_from_scan(
-    agent_file: Path, scan: dict, sidecar_data: dict | None
+    agent_file: Path,
+    scan: dict,
+    sidecar_data: dict | None,
+    workflow_id: str | None = None,
 ) -> SubagentMeta:
     """Build a :class:`SubagentMeta` from parsed scan metadata + optional sidecar.
 
     Description falls back to the first user message text (first 80 chars) when
-    the sidecar has none.
+    the sidecar has none. ``workflow_id`` is set for Workflow-tool sub-agents
+    (transcripts under ``subagents/workflows/{workflow_id}/``).
     """
     description = None
     agent_type = None
@@ -597,18 +601,19 @@ def _meta_from_scan(
         first_timestamp=scan["first_timestamp"],
         message_count=scan["message_count"],
         output_tokens=scan["output_tokens"] or None,
+        workflow_id=workflow_id,
     )
 
 
 def _load_agent_file(
-    agent_file: Path, sidecar_data: dict | None
+    agent_file: Path, sidecar_data: dict | None, workflow_id: str | None = None
 ) -> tuple[SubagentMeta, list[Message]] | None:
     """Parse one agent file into ``(SubagentMeta, interior messages)`` in one pass."""
     parsed = _parse_agent_file(agent_file)
     if parsed is None:
         return None
     scan, messages = parsed
-    return _meta_from_scan(agent_file, scan, sidecar_data), messages
+    return _meta_from_scan(agent_file, scan, sidecar_data, workflow_id), messages
 
 
 class ClaudeProvider(SessionProvider):
@@ -738,17 +743,40 @@ class ClaudeProvider(SessionProvider):
         messages.sort(key=lambda m: m.timestamp or datetime.min.replace(tzinfo=timezone.utc))
         return messages
 
+    def _workflow_subagent_files(
+        self, subagents_dir: Path
+    ) -> Iterator[tuple[Path, dict | None, bool, str | None]]:
+        """Yield Workflow-tool agent files under ``{subagents}/workflows/``.
+
+        Layout ``{subagents}/workflows/{workflowId}/agent-*.jsonl`` (only under
+        the current per-session layout — no legacy variants). Workflow agents
+        are grouped by workflow id (dirs sorted), each group sorted like the
+        existing glob-sort. Each workflow dir name is gated on the same
+        traversal-safe allowlist as session/agent ids so a hostile
+        ``../`` dir can't escape the subagents tree; the sidecar is honored.
+        """
+        workflows_dir = subagents_dir / "workflows"
+        if not workflows_dir.is_dir():
+            return
+        for wf_dir in sorted(workflows_dir.iterdir()):
+            if not wf_dir.is_dir() or not _is_safe_session_id(wf_dir.name):
+                continue
+            for agent_file in sorted(wf_dir.glob("agent-*.jsonl")):
+                yield agent_file, _read_agent_sidecar(agent_file), False, wf_dir.name
+
     def _subagent_files(
         self, session: SessionMeta
-    ) -> Iterator[tuple[Path, dict | None, bool]]:
-        """Yield ``(agent_file, sidecar_data, needs_session_probe)`` across layouts.
+    ) -> Iterator[tuple[Path, dict | None, bool, str | None]]:
+        """Yield ``(agent_file, sidecar_data, needs_probe, workflow_id)`` per layout.
 
-        ``needs_session_probe`` is True for legacy layouts (b/c) that have no
-        sidecar and must be attributed to this session by their internal parent
+        ``needs_probe`` is True for legacy layouts (b/c) that have no sidecar and
+        must be attributed to this session by their internal parent
         ``sessionId`` — callers probe the head cheaply and skip non-matching
-        files without a full read. The current per-session layout (a) is gated
-        on a traversal-safe ``session.id`` so a hostile id can't glob outside
-        the project dir.
+        files without a full read. ``workflow_id`` is set only for Workflow-tool
+        agents (layout d). The current per-session layouts (a/d) are gated on a
+        traversal-safe ``session.id`` so a hostile id can't glob outside the
+        project dir. Ordering: top-level agents first (existing order preserved),
+        then workflow agents grouped by workflow id.
         """
         source = Path(session.source_path)
 
@@ -760,24 +788,28 @@ class ClaudeProvider(SessionProvider):
                 current = project_dir / session.id / "subagents"
                 if current.is_dir():
                     for agent_file in sorted(current.glob("agent-*.jsonl")):
-                        yield agent_file, _read_agent_sidecar(agent_file), False
+                        yield agent_file, _read_agent_sidecar(agent_file), False, None
+                    # (d) Workflow-tool agents, one level deeper. Grouped after
+                    # the top-level agents so ordering stays deterministic.
+                    yield from self._workflow_subagent_files(current)
 
             # (b) legacy: project-level subagents dir, internal sessionId probe.
             legacy = project_dir / "subagents"
             if legacy.is_dir():
                 for agent_file in sorted(legacy.glob("agent-*.jsonl")):
-                    yield agent_file, None, True
+                    yield agent_file, None, True, None
 
             # (c) oldest: agent files loose in the project dir, same probe.
             for agent_file in sorted(project_dir.glob("agent-*.jsonl")):
-                yield agent_file, None, True
+                yield agent_file, None, True, None
         elif _is_safe_session_id(session.id):
             # Loose/archived transcript: only the current per-session layout,
             # relative to the file's own directory. Keep it simple.
             current = source.parent / session.id / "subagents"
             if current.is_dir():
                 for agent_file in sorted(current.glob("agent-*.jsonl")):
-                    yield agent_file, _read_agent_sidecar(agent_file), False
+                    yield agent_file, _read_agent_sidecar(agent_file), False, None
+                yield from self._workflow_subagent_files(current)
 
     def load_subagents(
         self, session: SessionMeta
@@ -797,10 +829,10 @@ class ClaudeProvider(SessionProvider):
             return []
 
         results: list[tuple[SubagentMeta, list[Message]]] = []
-        for agent_file, sidecar, needs_probe in self._subagent_files(session):
+        for agent_file, sidecar, needs_probe, workflow_id in self._subagent_files(session):
             if needs_probe and _probe_agent_session_id(agent_file) != session.id:
                 continue
-            loaded = _load_agent_file(agent_file, sidecar)
+            loaded = _load_agent_file(agent_file, sidecar, workflow_id)
             if loaded is not None:
                 results.append(loaded)
 
@@ -811,7 +843,7 @@ class ClaudeProvider(SessionProvider):
         return results
 
     def discover_subagents(self, session: SessionMeta) -> list[SubagentMeta]:
-        """Sub-agent metadata (meta-only) across all three on-disk layouts.
+        """Sub-agent metadata (meta-only) across all on-disk layouts.
 
         Shares :meth:`load_subagents`' single-pass parsing and drops the
         interior messages; use ``load_subagents`` directly when the messages
@@ -834,13 +866,20 @@ class ClaudeProvider(SessionProvider):
         return parsed[1] if parsed is not None else []
 
     def count_subagents(self, session_id: str, project_dir: Path) -> int:
-        """Cheap sub-agent count for tree badges — current layout only, no reads."""
+        """Cheap sub-agent count for tree badges — current layout only, no reads.
+
+        Counts both top-level agents (``subagents/agent-*.jsonl``) and
+        Workflow-tool agents one level deeper
+        (``subagents/workflows/*/agent-*.jsonl``). Both are cheap globs.
+        """
         if not _is_safe_session_id(session_id):
             return 0
         subdir = project_dir / session_id / "subagents"
         if not subdir.is_dir():
             return 0
-        return len(list(subdir.glob("agent-*.jsonl")))
+        return len(list(subdir.glob("agent-*.jsonl"))) + len(
+            list(subdir.glob("workflows/*/agent-*.jsonl"))
+        )
 
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a Claude session by removing its lines from JSONL files."""
@@ -956,11 +995,14 @@ class ClaudeProvider(SessionProvider):
                 if _rewrite_cwd_in_jsonl(jsonl_file, old_path, new_path):
                     files_modified += 1
 
-            # Also rewrite cwd inside sub-agent files across all three layouts.
+            # Also rewrite cwd inside sub-agent files across all layouts,
+            # including Workflow-tool agents one level deeper
+            # (``{sessionId}/subagents/workflows/{wf}/agent-*.jsonl``).
             for pattern in (
                 "agent-*.jsonl",
                 "subagents/*.jsonl",
                 "*/subagents/*.jsonl",
+                "*/subagents/workflows/*/agent-*.jsonl",
             ):
                 for jsonl_file in target_dir.glob(pattern):
                     if _rewrite_cwd_in_jsonl(jsonl_file, old_path, new_path):

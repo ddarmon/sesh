@@ -596,6 +596,169 @@ def test_load_subagents_returns_meta_and_messages_single_pass(tmp_path: Path) ->
     assert [m.content for m in messages] == ["Investigate the failing test", "Looking into it"]
 
 
+# --- Workflow-tool sub-agents (layout d) ----------------------------------
+
+
+def test_discover_workflow_agents_sets_workflow_id(tmp_path: Path) -> None:
+    """Layout (d): {sessionId}/subagents/workflows/{wf}/agent-*.jsonl."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-wf"
+    wf_id = "wf_a1be27ca-98b"
+    agent_file = (
+        project_dir / session_id / "subagents" / "workflows" / wf_id / "agent-w1.jsonl"
+    )
+    write_jsonl(agent_file, _agent_records(session_id, "w1"))
+    _write_sidecar(agent_file, {"agentType": "Worker", "description": "Step one"})
+
+    session = make_session(id=session_id, source_path=str(project_dir))
+    metas = claude.ClaudeProvider().discover_subagents(session)
+
+    assert len(metas) == 1
+    m = metas[0]
+    assert m.agent_id == "w1"
+    assert m.workflow_id == wf_id
+    assert m.agent_type == "Worker"
+    assert m.description == "Step one"
+    assert m.file_path == str(agent_file)
+
+
+def test_discover_top_level_agents_have_no_workflow_id(tmp_path: Path) -> None:
+    """Ordinary (layout a) sub-agents carry workflow_id=None (legacy unaffected)."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-plain"
+    agent_file = project_dir / session_id / "subagents" / "agent-p1.jsonl"
+    write_jsonl(agent_file, _agent_records(session_id, "p1"))
+
+    session = make_session(id=session_id, source_path=str(project_dir))
+    metas = claude.ClaudeProvider().discover_subagents(session)
+    assert len(metas) == 1
+    assert metas[0].workflow_id is None
+
+
+def test_workflow_ordering_top_level_first_then_grouped(tmp_path: Path) -> None:
+    """_subagent_files yields top-level agents first, then workflow groups."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-order"
+    subagents = project_dir / session_id / "subagents"
+    write_jsonl(subagents / "agent-top1.jsonl", _agent_records(session_id, "top1"))
+    write_jsonl(subagents / "agent-top2.jsonl", _agent_records(session_id, "top2"))
+    write_jsonl(
+        subagents / "workflows" / "wf_bbb-2" / "agent-b2.jsonl",
+        _agent_records(session_id, "b2"),
+    )
+    write_jsonl(
+        subagents / "workflows" / "wf_bbb-2" / "agent-b1.jsonl",
+        _agent_records(session_id, "b1"),
+    )
+    write_jsonl(
+        subagents / "workflows" / "wf_aaa-1" / "agent-a1.jsonl",
+        _agent_records(session_id, "a1"),
+    )
+
+    session = make_session(id=session_id, source_path=str(project_dir))
+    order = [
+        (Path(f).name, wf)
+        for f, _sidecar, _probe, wf in claude.ClaudeProvider()._subagent_files(session)
+    ]
+    assert order == [
+        ("agent-top1.jsonl", None),
+        ("agent-top2.jsonl", None),
+        # workflow dirs sorted (wf_aaa-1 before wf_bbb-2), files sorted within
+        ("agent-a1.jsonl", "wf_aaa-1"),
+        ("agent-b1.jsonl", "wf_bbb-2"),
+        ("agent-b2.jsonl", "wf_bbb-2"),
+    ]
+
+
+def test_count_subagents_includes_workflow_agents(tmp_path: Path) -> None:
+    """count_subagents counts top-level + workflow agents (cheap glob, no reads)."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-wfcount"
+    subdir = project_dir / session_id / "subagents"
+    write_jsonl(subdir / "agent-1.jsonl", _agent_records(session_id, "1"))
+    write_jsonl(
+        subdir / "workflows" / "wf_x-1" / "agent-2.jsonl", _agent_records(session_id, "2")
+    )
+    write_jsonl(
+        subdir / "workflows" / "wf_x-1" / "agent-3.jsonl", _agent_records(session_id, "3")
+    )
+
+    provider = claude.ClaudeProvider()
+    assert provider.count_subagents(session_id, project_dir) == 3
+
+
+def test_discover_skips_unsafe_workflow_dir(tmp_path: Path) -> None:
+    """[security] A workflow dir name failing the traversal-safe allowlist is
+    skipped (real dir names can't be ``..``/``/``, but a name with a disallowed
+    character exercises the same gate that guards against a hostile id)."""
+    project_dir = tmp_path / "proj"
+    session_id = "sess-evil"
+    subagents = project_dir / session_id / "subagents"
+    # A legit workflow agent and a hostile-named sibling dir (space is not in
+    # the [A-Za-z0-9._-] allowlist, so _is_safe_session_id rejects it).
+    write_jsonl(
+        subagents / "workflows" / "wf_ok-1" / "agent-good.jsonl",
+        _agent_records(session_id, "good"),
+    )
+    write_jsonl(
+        subagents / "workflows" / "wf evil" / "agent-bad.jsonl",
+        _agent_records(session_id, "bad"),
+    )
+    assert not claude._is_safe_session_id("wf evil")
+
+    session = make_session(id=session_id, source_path=str(project_dir))
+    metas = claude.ClaudeProvider().discover_subagents(session)
+    assert [m.agent_id for m in metas] == ["good"]
+
+
+def test_delete_session_removes_workflow_agents(tmp_path: Path) -> None:
+    """delete_session drops the sidecar dir including subagents/workflows/."""
+    project_dir = tmp_path / "proj"
+    session_id = "wf-drop"
+    write_jsonl(
+        project_dir / "main.jsonl",
+        [{"sessionId": session_id, "message": {"role": "user", "content": "hi"}}],
+    )
+    wf_file = (
+        project_dir
+        / session_id
+        / "subagents"
+        / "workflows"
+        / "wf_z-9"
+        / "agent-w.jsonl"
+    )
+    write_jsonl(wf_file, _agent_records(session_id, "w"))
+
+    session = make_session(id=session_id, source_path=str(project_dir))
+    claude.ClaudeProvider().delete_session(session)
+
+    assert not (project_dir / session_id).exists()
+    assert not wf_file.exists()
+
+
+def test_move_project_rewrites_cwd_in_workflow_agent_files(tmp_claude_dir) -> None:
+    """move_project rewrites cwd inside workflow agent files (layout d)."""
+    old_path = "/Users/me/old"
+    new_path = "/Users/me/new"
+    old_dir = tmp_claude_dir / "projects" / claude.encode_claude_path(old_path)
+
+    write_jsonl(old_dir / "session.jsonl", [{"cwd": old_path, "sessionId": "s1"}])
+    wf_file = old_dir / "s1" / "subagents" / "workflows" / "wf_q-1" / "agent-w.jsonl"
+    write_jsonl(wf_file, [{"cwd": old_path, "sessionId": "s1"}])
+
+    provider = claude.ClaudeProvider()
+    provider._path_to_dir[old_path] = old_dir
+    report = provider.move_project(old_path, new_path)
+
+    new_dir = tmp_claude_dir / "projects" / claude.encode_claude_path(new_path)
+    assert report.success is True
+    # main + 1 workflow agent file rewritten
+    assert report.files_modified == 2
+
+    new_wf = new_dir / "s1" / "subagents" / "workflows" / "wf_q-1" / "agent-w.jsonl"
+    assert json.loads(new_wf.read_text().splitlines()[0])["cwd"] == new_path
+
+
 def test_subagent_meta_is_claude_provider_dataclass() -> None:
     """SubagentMeta constructs with required fields and sane defaults."""
     m = claude.SubagentMeta(agent_id="x", file_path="/p")
@@ -604,4 +767,5 @@ def test_subagent_meta_is_claude_provider_dataclass() -> None:
     assert m.description is None
     assert m.is_fork is False
     assert m.message_count == 0
+    assert m.workflow_id is None
     assert Provider.CLAUDE  # sanity: models import path intact

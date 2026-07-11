@@ -300,6 +300,10 @@ def _agent_parent_session_from_path(fp: Path) -> str:
     grandparent directory name is the parent session id. The legacy layout
     ``{project}/subagents/agent-*.jsonl`` puts the encoded project dir there
     instead (it sits directly under ``projects``), so it is excluded.
+
+    Workflow-tool agents live one level deeper,
+    ``{project}/{sessionId}/subagents/workflows/{workflowId}/agent-*.jsonl``;
+    the parent session is four dirs up.
     """
     parents = fp.parents
     if (
@@ -308,6 +312,12 @@ def _agent_parent_session_from_path(fp: Path) -> str:
         and parents[2].name != "projects"
     ):
         return parents[1].name
+    if (
+        len(parents) >= 4
+        and parents[1].name == "workflows"
+        and parents[2].name == "subagents"
+    ):
+        return parents[3].name
     return ""
 
 
