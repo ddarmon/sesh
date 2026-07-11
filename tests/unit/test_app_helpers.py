@@ -161,6 +161,25 @@ def test_session_from_search_result_codex_source_path() -> None:
     assert session.source_path == "/tmp/.codex/sessions/x.jsonl"
 
 
+def test_session_from_codex_child_search_result_uses_root_path() -> None:
+    """A Codex child hit loads its root while retaining the matched child path."""
+    result = SearchResult(
+        session_id="root-1",
+        project_path="/repo",
+        provider=Provider.CODEX,
+        matched_line="needle",
+        file_path="/tmp/.codex/sessions/child.jsonl",
+        agent_id="child-1",
+        root_file_path="/tmp/.codex/sessions/root.jsonl",
+    )
+
+    session = SeshApp._session_from_search_result(result)
+
+    assert result.file_path.endswith("child.jsonl")
+    assert session is not None
+    assert session.source_path == "/tmp/.codex/sessions/root.jsonl"
+
+
 def test_session_from_search_result_cursor_source_path() -> None:
     """Cursor search results use the file_path directly as source_path."""
     result = SearchResult(

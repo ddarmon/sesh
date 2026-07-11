@@ -822,6 +822,54 @@ def _search_opencode_db(
     return results
 
 
+def _find_codex_root_rollout(sessions_dir: Path, root_id: str) -> str | None:
+    """Find a root rollout by first-line id without scanning transcript bodies."""
+    try:
+        files = sessions_dir.rglob("*.jsonl")
+        for file_path in files:
+            payload = _read_codex_session_header(file_path)
+            if (
+                payload.get("id") == root_id
+                and not _is_codex_subagent_header(payload)
+            ):
+                return str(file_path)
+    except OSError:
+        pass
+    return None
+
+
+def _read_codex_session_header(file_path: str | Path) -> dict:
+    """Return a Codex rollout's authoritative first-line metadata payload."""
+    try:
+        with open(file_path) as f:
+            first = json.loads(f.readline())
+        payload = first.get("payload")
+        if first.get("type") == "session_meta" and isinstance(payload, dict):
+            return payload
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    return {}
+
+
+def _is_codex_subagent_header(payload: dict) -> bool:
+    """Whether a Codex session_meta payload identifies a child rollout."""
+    source = payload.get("source")
+    return payload.get("thread_source") == "subagent" or (
+        isinstance(source, dict) and isinstance(source.get("subagent"), dict)
+    )
+
+
+def _codex_root_id_from_header(payload: dict) -> str:
+    """Extract a child rollout's root id across current header variants."""
+    root_id = payload.get("session_id") or payload.get("parent_thread_id")
+    if root_id:
+        return str(root_id)
+    source = payload.get("source")
+    subagent = source.get("subagent") if isinstance(source, dict) else None
+    spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+    return str(spawn.get("parent_thread_id") or "") if isinstance(spawn, dict) else ""
+
+
 def _search_one_host(
     rg: str,
     query: str,
@@ -842,6 +890,8 @@ def _search_one_host(
     results: list[SearchResult] = []
     seen_sessions: set[str] = set()
     file_cwd_cache: dict[str, str] = {}
+    codex_header_cache: dict[str, dict] = {}
+    codex_root_path_cache: dict[str, str] = {}
 
     if search_paths:
         cmd = [
@@ -891,6 +941,25 @@ def _search_one_host(
                 else:
                     provider = Provider.CLAUDE
 
+                # Codex child linkage lives only in the first-line session_meta,
+                # not necessarily in the matched record.  Always classify the
+                # matched file from that authoritative header: older indexes
+                # contain child rollout ids and cannot reliably identify roots.
+                codex_agent_id: str | None = None
+                codex_is_child = False
+                codex_filename_id = (
+                    _extract_codex_session_id(file_path)
+                    if provider == Provider.CODEX else ""
+                )
+                if provider == Provider.CODEX:
+                    header = _read_codex_session_header(file_path)
+                    codex_header_cache[file_path] = header
+                    codex_is_child = _is_codex_subagent_header(header)
+                    if codex_is_child:
+                        codex_agent_id = str(
+                            header.get("id") or codex_filename_id or ""
+                        ) or None
+
                 # Try to extract sessionId from the matched JSONL line
                 session_id = ""
                 entry = {}
@@ -905,9 +974,16 @@ def _search_one_host(
                 except (json.JSONDecodeError, AttributeError):
                     pass
 
-                # For Codex files, fall back to extracting UUID from filename
-                if not session_id and provider == Provider.CODEX:
-                    session_id = _extract_codex_session_id(file_path)
+                # Codex child hits belong to the root session, not the child
+                # rollout id. Ordinary rollouts still fall back to the filename.
+                if provider == Provider.CODEX:
+                    header = codex_header_cache.get(file_path, {})
+                    if codex_is_child:
+                        session_id = _codex_root_id_from_header(header) or session_id
+                    else:
+                        session_id = str(
+                            header.get("id") or session_id or codex_filename_id
+                        )
 
                 # For Copilot, session ID is the directory name (UUID)
                 if not session_id and provider == Provider.COPILOT:
@@ -925,7 +1001,7 @@ def _search_one_host(
                 # sessionId is the PARENT session — attribute the hit there and
                 # tag agent_id so downstream knows it's a "phantom" sub-agent
                 # match. Prefer the record's own agentId; fall back to filename.
-                agent_id: str | None = None
+                agent_id: str | None = codex_agent_id
                 if provider == Provider.CLAUDE and _is_claude_agent_file(file_path):
                     aid = ((entry.get("agentId") or "") if entry else "")
                     agent_id = (aid or _agent_id_from_filename(file_path)) or None
@@ -959,14 +1035,9 @@ def _search_one_host(
                     project_path = file_cwd_cache[file_path]
 
                 if not project_path and provider == Provider.CODEX:
-                    try:
-                        with open(file_path) as f:
-                            first = json.loads(f.readline())
-                            project_path = first.get("payload", {}).get("cwd", "") or ""
-                        if project_path:
-                            file_cwd_cache[file_path] = project_path
-                    except (OSError, json.JSONDecodeError, AttributeError):
-                        pass
+                    project_path = codex_header_cache.get(file_path, {}).get("cwd", "") or ""
+                    if project_path:
+                        file_cwd_cache[file_path] = project_path
 
                 if not project_path and provider == Provider.PI:
                     try:
@@ -1003,6 +1074,14 @@ def _search_one_host(
                     elif not display_text:
                         display_text = matched_text[:200]
 
+                root_file_path = None
+                if provider == Provider.CODEX and codex_agent_id and session_id:
+                    if session_id not in codex_root_path_cache:
+                        codex_root_path_cache[session_id] = _find_codex_root_rollout(
+                            roots.codex_sessions, session_id
+                        ) or ""
+                    root_file_path = codex_root_path_cache[session_id] or None
+
                 results.append(SearchResult(
                     session_id=session_id,
                     project_path=project_path,
@@ -1011,6 +1090,7 @@ def _search_one_host(
                     file_path=file_path,
                     host=roots.host,
                     agent_id=agent_id,
+                    root_file_path=root_file_path,
                 ))
 
     # Cursor search: transcripts (.txt) and store.db files

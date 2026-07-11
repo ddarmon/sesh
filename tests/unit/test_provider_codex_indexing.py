@@ -325,3 +325,255 @@ def test_delete_session_unlinks_source_file(tmp_path: Path) -> None:
     session = make_session(id="s1", provider=Provider.CODEX, source_path=str(file_path))
     codex.CodexProvider().delete_session(session)
     assert not file_path.exists()
+
+
+def _codex_subagent_entries(
+    *, child_id: str, root_id: str, agent_path: str, timestamp: str
+) -> list[dict]:
+    return [
+        {
+            "type": "session_meta",
+            "timestamp": timestamp,
+            "payload": {
+                "id": child_id,
+                "session_id": root_id,
+                "parent_thread_id": root_id,
+                "cwd": "/repo",
+                "thread_source": "subagent",
+                "agent_path": agent_path,
+                "agent_nickname": "Sagan",
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": root_id,
+                            "depth": 1,
+                            "agent_path": agent_path,
+                            "agent_nickname": "Sagan",
+                        }
+                    }
+                },
+            },
+        },
+        {
+            "type": "event_msg",
+            "timestamp": timestamp,
+            "payload": {"type": "user_message", "message": "inherited parent prompt"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": timestamp,
+            "payload": {
+                "type": "agent_message",
+                "author": "/root",
+                "recipient": agent_path,
+                "content": [
+                    {"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\n"}
+                ],
+            },
+        },
+        {
+            "type": "event_msg",
+            "timestamp": timestamp,
+            "payload": {"type": "agent_reasoning", "text": "child reasoning"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": timestamp,
+            "payload": {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "child answer"}],
+            },
+        },
+    ]
+
+
+def test_native_subagents_are_attached_not_listed(tmp_codex_dir) -> None:
+    """Native child rollouts become lazy subagents rather than standalone sessions."""
+    write_jsonl(
+        tmp_codex_dir / "root.jsonl",
+        [
+            {
+                "type": "session_meta",
+                "timestamp": "2026-07-11T18:00:00Z",
+                "payload": {"id": "root-id", "cwd": "/repo"},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-07-11T18:00:01Z",
+                "payload": {"type": "user_message", "message": "root prompt"},
+            },
+        ],
+    )
+    write_jsonl(
+        tmp_codex_dir / "child.jsonl",
+        _codex_subagent_entries(
+            child_id="child-id",
+            root_id="root-id",
+            agent_path="/root/inspect_tests",
+            timestamp="2026-07-11T18:00:02Z",
+        ),
+    )
+
+    provider = codex.CodexProvider()
+    sessions = provider.get_sessions("/repo")
+
+    assert [session.id for session in sessions] == ["root-id"]
+    assert sessions[0].subagent_count == 1
+
+    loaded = provider.load_subagents(sessions[0])
+    assert len(loaded) == 1
+    meta, messages = loaded[0]
+    assert meta.agent_id == "child-id"
+    assert meta.description == "/root/inspect_tests"
+    assert meta.agent_type == "Sagan"
+    assert meta.is_fork is True
+    assert [message.content for message in messages if message.content] == ["child answer"]
+    assert [message.thinking for message in messages if message.thinking] == ["child reasoning"]
+    assert all(message.content != "inherited parent prompt" for message in messages)
+
+
+def test_codex_subagents_are_sorted_by_child_start_time(tmp_codex_dir) -> None:
+    write_jsonl(
+        tmp_codex_dir / "root.jsonl",
+        [{
+            "type": "session_meta",
+            "timestamp": "2026-07-11T18:00:00Z",
+            "payload": {"id": "root-id", "cwd": "/repo"},
+        }],
+    )
+    write_jsonl(
+        tmp_codex_dir / "later.jsonl",
+        _codex_subagent_entries(
+            child_id="later", root_id="root-id", agent_path="/root/later",
+            timestamp="2026-07-11T18:00:03Z",
+        ),
+    )
+    write_jsonl(
+        tmp_codex_dir / "earlier.jsonl",
+        _codex_subagent_entries(
+            child_id="earlier", root_id="root-id", agent_path="/root/earlier",
+            timestamp="2026-07-11T18:00:01Z",
+        ),
+    )
+
+    provider = codex.CodexProvider()
+    session = provider.get_sessions("/repo")[0]
+    assert [meta.agent_id for meta, _ in provider.load_subagents(session)] == [
+        "earlier", "later"
+    ]
+
+
+def test_delete_root_removes_native_subagent_rollouts(tmp_codex_dir) -> None:
+    root_file = tmp_codex_dir / "root.jsonl"
+    child_file = tmp_codex_dir / "child.jsonl"
+    write_jsonl(root_file, [{
+        "type": "session_meta",
+        "timestamp": "2026-07-11T18:00:00Z",
+        "payload": {"id": "root-id", "cwd": "/repo"},
+    }])
+    write_jsonl(
+        child_file,
+        _codex_subagent_entries(
+            child_id="child-id", root_id="root-id", agent_path="/root/child",
+            timestamp="2026-07-11T18:00:01Z",
+        ),
+    )
+
+    provider = codex.CodexProvider()
+    session = provider.get_sessions("/repo")[0]
+    provider.delete_session(session)
+
+    assert not root_file.exists()
+    assert not child_file.exists()
+
+
+def test_get_messages_parses_current_custom_tool_records(tmp_path: Path) -> None:
+    file_path = tmp_path / "custom-tools.jsonl"
+    write_jsonl(file_path, [
+        {
+            "type": "session_meta",
+            "timestamp": "2026-07-11T18:00:00Z",
+            "payload": {"id": "root-id", "cwd": "/repo"},
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-07-11T18:00:01Z",
+            "payload": {
+                "type": "custom_tool_call",
+                "call_id": "call-1",
+                "name": "exec",
+                "input": "await tools.exec_command({cmd: 'pwd'})",
+            },
+        },
+        {
+            "type": "response_item",
+            "timestamp": "2026-07-11T18:00:02Z",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call-1",
+                "output": [{"type": "input_text", "text": "/repo\n"}],
+            },
+        },
+    ])
+    session = make_session(id="root-id", provider=Provider.CODEX, source_path=str(file_path))
+
+    messages = codex.CodexProvider().get_messages(session)
+
+    assert [(m.content_type, m.tool_name) for m in messages] == [
+        ("tool_use", "exec"), ("tool_result", "exec")
+    ]
+    assert "exec_command" in (messages[0].tool_input or "")
+    assert "/repo" in (messages[1].tool_output or "")
+
+
+def test_index_reads_only_child_header_and_loads_tokens_lazily(
+    tmp_codex_dir, monkeypatch,
+) -> None:
+    root_file = tmp_codex_dir / "root.jsonl"
+    child_file = tmp_codex_dir / "child.jsonl"
+    write_jsonl(root_file, [{
+        "type": "session_meta", "timestamp": "2026-07-11T18:00:00Z",
+        "payload": {"id": "root-id", "cwd": "/repo"},
+    }])
+    child_entries = _codex_subagent_entries(
+        child_id="child-id", root_id="root-id", agent_path="/root/child",
+        timestamp="2026-07-11T18:00:01Z",
+    )
+    child_entries.append({
+        "type": "event_msg",
+        "timestamp": "2026-07-11T18:00:02Z",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {"output_tokens": 21},
+                "total_token_usage": {"output_tokens": 321},
+            },
+        },
+    })
+    write_jsonl(child_file, child_entries)
+    provider = codex.CodexProvider()
+    original = provider._parse_session_file
+    original_rollout = provider._parse_rollout_file
+    parsed: list[Path] = []
+    parsed_rollouts: list[Path] = []
+
+    def tracking_parse(path: Path):
+        parsed.append(path)
+        return original(path)
+
+    def tracking_rollout(path: Path, **kwargs):
+        parsed_rollouts.append(path)
+        return original_rollout(path, **kwargs)
+
+    monkeypatch.setattr(provider, "_parse_session_file", tracking_parse)
+    monkeypatch.setattr(provider, "_parse_rollout_file", tracking_rollout)
+    sessions = provider.get_sessions("/repo")
+
+    assert [s.id for s in sessions] == ["root-id"]
+    assert parsed == [root_file]
+    assert parsed_rollouts == []
+
+    loaded = provider.load_subagents(sessions[0])
+
+    assert parsed_rollouts == [child_file]
+    assert loaded[0][0].output_tokens == 321

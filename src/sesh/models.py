@@ -54,12 +54,12 @@ class SessionMeta:
     output_tokens: int | None = None             # Total output across all turns
     cumulative_input_tokens: int | None = None   # Sum of all turns' inputs
     host: str | None = None  # Set in aggregation mode
-    subagent_count: int = 0  # Claude sub-agent transcripts (cheap directory count)
+    subagent_count: int = 0  # Provider-native child-agent transcripts
 
 
 @dataclass
 class SubagentMeta:
-    """Metadata for a Claude Code sub-agent (Task/Agent) transcript.
+    """Metadata for a provider-native sub-agent transcript.
 
     Pairs with ``list[Message]`` (loaded on demand by the provider) rather
     than carrying loaded messages itself.
@@ -100,7 +100,11 @@ class SearchResult:
     matched_line: str
     file_path: str
     host: str | None = None  # Set in aggregation mode
-    agent_id: str | None = None  # Set when the hit is inside a Claude sub-agent file
+    agent_id: str | None = None  # Set when the hit is inside a sub-agent transcript
+    # Root transcript to load/delete when file_path is a child transcript.  This
+    # is internal provenance; the search CLI intentionally keeps its existing
+    # JSON shape and reports file_path as the file that actually matched.
+    root_file_path: str | None = None
 
 
 def filter_messages(

@@ -1320,7 +1320,9 @@ class SeshApp(App):
         if not result.session_id:
             return None
 
-        source_path = result.file_path
+        # Child-search hits retain the actual matched file for provenance, but
+        # providers must load the root rollout to render the complete session.
+        source_path = result.root_file_path or result.file_path
 
         # For Claude, source_path must be the project directory (not a file).
         # ClaudeProvider.get_messages expects a directory to glob *.jsonl from.
@@ -1427,7 +1429,7 @@ class SeshApp(App):
         self._refresh_status()
 
     def action_toggle_agents(self) -> None:
-        """Toggle splicing of Claude sub-agent threads into the message pane."""
+        """Toggle splicing of provider-native sub-agent threads into the message pane."""
         self._show_agents = not self._show_agents
         # Drop any session-scoped auto-show override (⑂ search hit): after an
         # explicit toggle, `a` alone must deterministically control visibility

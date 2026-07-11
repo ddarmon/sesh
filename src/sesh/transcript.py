@@ -161,7 +161,7 @@ def compose_transcript(
     *,
     namespace: str = MAIN_NAMESPACE,
 ) -> list[TranscriptItem]:
-    """Compose messages + Claude sub-agents into an ordered, keyed item list.
+    """Compose messages + provider sub-agents into an ordered, keyed item list.
 
     Main-thread messages are keyed under ``namespace``. Each sub-agent becomes
     one ``kind == "agent"`` container (keyed by :func:`agent_anchor`) whose

@@ -152,7 +152,7 @@ def format_session_markdown(
 ) -> str:
     """Render a session + messages as Markdown.
 
-    When ``subagents`` is given (Claude sub-agent threads), each is appended
+    When ``subagents`` is given (provider-native child-agent threads), each is appended
     after the main thread as a ``## Sub-agent:`` section with its interior
     messages demoted one heading level.
     """
@@ -923,7 +923,7 @@ def format_session_html(
     ``.html`` file that works offline from ``file://``. ``messages`` should
     already be filtered (tools/thinking) by the caller.
 
-    When ``subagents`` is given (Claude sub-agent threads), each renders as a
+    When ``subagents`` is given (provider-native child-agent threads), each renders as a
     collapsed ``kind: "agent"`` block spliced into the thread at its spawn
     point (see :func:`_compose_thread`); its interior should already be
     filtered by the caller.
