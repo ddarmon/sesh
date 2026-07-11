@@ -239,34 +239,23 @@ page to a stable per-session cache path and opens it in your default browser;
 `--include-thinking` / `--full` toggles.
 
 The page opens with a details header (provider, model, project, host,
-full session id with a **Copy ID** button, start/end time and duration,
-message and sub-agent counts, and context/cumulative token totals) and a
-sticky reader toolbar. The toolbar always offers a **transcript find**
-box with a match counter and previous/next controls (`Enter` /
-`Shift+Enter` in the box; `/` focuses it) and a message count; find and
-anchors work from `file://` with no server. Every message and sub-agent
-block has a stable DOM anchor: opening a `#anchor` link highlights,
-reveals, and scrolls to that message. (For full-body copy, use the TUI's
-`C` or `sesh export`.) Expanded `<details>` state is preserved by message
-identity across live updates.
+session id, times, message/sub-agent counts, and token totals) and a
+sticky reader toolbar with a **transcript find** box (`/` focuses it;
+`Enter` / `Shift+Enter` navigate) and a message count — both work from
+`file://` with no server. Every message and sub-agent block has a stable
+DOM anchor, so a `#anchor` link highlights and scrolls to that message.
+(For full-body copy, use the TUI's `C` or `sesh export`.)
 
 From the TUI, press `v` to open the selected session in the same browser
 viewer while honoring the current tools, thinking, and sub-agent toggles.
 Press `L` to start a **live browser view** instead: sesh serves a private,
-tokenized `127.0.0.1` URL and the page polls for new messages while the TUI is
-running. The live toolbar adds a status indicator (live / paused / retrying /
-disconnected), the last-update time, a **Pause/Resume** button (browser-side;
-it does not stop the private server), a **Follow** toggle, a manual **Refresh**,
-and an `N new ↓` badge when follow is off. New content appears without a page
-reload and is reconciled by message identity (appends fast-path, full rerender
-only on structural change); the viewer preserves its scroll position and
-expanded tool/sub-agent sections, and auto-follows only when Follow is on and
-the reader is already near the bottom. A transient provider error keeps the last
-good transcript and shows the retrying state. Press `L` again on the same
-session to stop the server. Live mode uses the normalized provider API and works
-with Claude, Codex, Cursor, Copilot, pi, Gemini, and opencode. In aggregation
-mode it follows the mirrored files, so update latency is determined by the
-external sync schedule.
+tokenized `127.0.0.1` URL and the page polls for new messages while the TUI
+is running. The live toolbar adds a status indicator, **Pause/Resume**,
+**Follow**, and **Refresh** controls; new content streams in without a page
+reload while scroll position and expanded sections are preserved. Press `L`
+again to stop the server. Live mode works with all providers; in aggregation
+mode it follows the mirrored files, so update latency tracks your sync
+schedule.
 
 Both commands also accept `--file <path.jsonl>` in place of a session ID,
 which renders a **loose Claude Code transcript directly by path** —
@@ -276,34 +265,22 @@ has no index entry (the session id, project path, model, and token
 counts are recovered from the file's own records). `--file` currently
 assumes Claude JSONL format.
 
-### Claude sub-agent transcripts
+### Sub-agent transcripts
 
-Claude Code records each sub-agent (Task/Agent tool) run in its own
-`agent-{id}.jsonl` file. sesh discovers these lazily on session open and
-renders every sub-agent as one collapsible thread — headed
+Claude Code and Codex both record their native sub-agent runs, and sesh
+renders each one as a collapsible thread — headed
 `⑂ {type} — {description} · N msgs` — spliced into the parent transcript
-at the spawn point, with its interior honoring the same tool/thinking
-toggles as the main thread (in the TUI press `a` to toggle them — the
-agent transcripts are read lazily the first time you reveal them, so
-selecting a session never blocks on parsing agent files while they are
-hidden; on the CLI `sesh view`/`sesh export` show them by default,
-`--no-agents` suppresses). Four on-disk layouts are supported with graceful
-fallback: current per-session `{project}/{sessionId}/subagents/agent-*.jsonl`
-(with an optional `agent-{id}.meta.json` sidecar carrying agent type,
-fork flag, description, and spawning tool id), Workflow-tool agents one
-level deeper `{project}/{sessionId}/subagents/workflows/{workflowId}/agent-*.jsonl`
-(same sidecar; their thread header is prefixed with a shortened `[wf_…]`
-marker), legacy project-level `{project}/subagents/agent-*.jsonl`, and the
-oldest `{project}/agent-*.jsonl` — the latter two have no sidecar, so a file is
-attributed to a session by the parent `sessionId` inside its records.
-Session tree labels gain a `⑂N` badge (a cheap directory count, no file
-reads during discovery); `sesh sessions` output includes `subagent_count`
-per session; and full-text search hits inside an agent file are
-attributed to the parent session, marked `⑂` in the TUI, and carry an
-`agent_id` in `sesh search` JSON output. Opening a `⑂` search hit while
-sub-agent threads are hidden auto-shows them for that session (status
-bar reads `Agents:AUTO`) so the matched content is visible without
-flipping the persisted preference.
+at its spawn point, with its interior honoring the same tool/thinking
+toggles as the main thread. Agent transcripts are read lazily the first
+time you reveal them, so selecting a session never blocks on parsing
+them while they are hidden. Press `a` in the TUI to toggle them; on the
+CLI `sesh view`/`sesh export` show them by default and `--no-agents`
+suppresses. Session tree labels gain a `⑂N` badge, `sesh sessions`
+output includes `subagent_count`, and full-text search hits inside a
+sub-agent are attributed to the parent session, marked `⑂` in the TUI,
+and carry an `agent_id` in `sesh search` JSON. Opening a `⑂` search hit
+while sub-agent threads are hidden auto-shows them for that session
+(status bar reads `Agents:AUTO`).
 
 ### Session statistics
 
@@ -344,13 +321,9 @@ Codex, Cursor, Copilot, Gemini, pi, or opencode). Reopen the snapshot
 later to restore the same set of tabs, each one resumed against the
 same session.
 
-Resume metadata is resolved at capture time: `sesh` first scans
-scrollback for explicit `claude --resume`, `codex resume`,
-`agent --resume=`, `copilot --resume=`, `gemini --resume`,
-`pi --session`, and `opencode --session` lines, then
-falls back to a ripgrep-based search across your indexed sessions when
-the explicit line has scrolled off. This means reopens are deterministic
-and fast.
+Resume metadata is resolved at capture time — from explicit resume
+commands in the scrollback, or a search fallback when they have scrolled
+off — so reopens are deterministic and fast.
 
 ```
 sesh snapshot save                  # capture; prints id and counts
