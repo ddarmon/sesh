@@ -530,6 +530,7 @@ the index, then query it.
 | --------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `sesh`                                                                                                    | Launch the TUI (default, no subcommand)  |
 | `sesh refresh`                                                                                            | Discover sessions and rebuild the index  |
+| `sesh doctor [--provider NAME] [--strict] [--human]`                                                       | Read-only provider and dependency diagnostics (JSON or human-friendly text) |
 | `sesh projects`                                                                                           | List projects from the index             |
 | `sesh sessions [--project PATH] [--provider NAME] [--since DATE] [--until DATE] [--limit N] [--bookmarked]` | List sessions with optional filters      |
 | `sesh stats [--project PATH] [--provider NAME]`                                                           | Aggregate session statistics from the index |
