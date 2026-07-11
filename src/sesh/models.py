@@ -74,6 +74,9 @@ class SubagentMeta:
     first_timestamp: datetime | None = None
     message_count: int = 0
     output_tokens: int | None = None
+    # Set when the agent was spawned by the Workflow tool (its transcript lives
+    # under ``subagents/workflows/{workflow_id}/``); None for ordinary sub-agents.
+    workflow_id: str | None = None
 
 
 @dataclass
@@ -118,6 +121,15 @@ def filter_messages(
             continue
         out.append(m)
     return out
+
+
+def short_workflow_id(workflow_id: str) -> str:
+    """Shorten a Workflow id for display (``wf_a1be27ca-98b`` -> ``wf_a1be27ca``).
+
+    Workflow ids look like ``wf_{hex}-{suffix}``; the leading ``wf_{hex}`` part
+    is distinctive enough for a label, so drop the trailing ``-suffix``.
+    """
+    return workflow_id.split("-", 1)[0] if workflow_id else workflow_id
 
 
 def encode_project_path(path: str) -> str:

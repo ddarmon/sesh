@@ -249,21 +249,27 @@ Claude Code writes each sub-agent (Task/Agent tool) run to a separate
 `agent-{id}.jsonl` file. Only the Claude provider handles these.
 
 -   **Discovery API** (`providers/claude.py`): `discover_subagents(session)`
-    returns `SubagentMeta` list across three on-disk layouts — current
+    returns `SubagentMeta` list across four on-disk layouts — current
     per-session `{project}/{sessionId}/subagents/agent-*.jsonl` (with an
     optional `agent-{id}.meta.json` sidecar for type/fork/description/
-    toolUseId), legacy `{project}/subagents/agent-*.jsonl`, and oldest
-    `{project}/agent-*.jsonl` (the last two attribute a file to a session
+    toolUseId), Workflow-tool agents one level deeper
+    `{project}/{sessionId}/subagents/workflows/{workflowId}/agent-*.jsonl`
+    (same sidecar; the `SubagentMeta.workflow_id` field is set, labels carry a
+    shortened `[wf_…]` marker), legacy `{project}/subagents/agent-*.jsonl`, and
+    oldest `{project}/agent-*.jsonl` (the last two attribute a file to a session
     by the internal parent `sessionId`, probed cheaply from the file head —
-    a non-matching legacy file is skipped without a full read). Agent-file
-    parsing is defensive (non-dict lines / string `message` / non-dict
-    `usage` are skipped) and never filters by `sessionId` (an agent file is
-    a single-thread transcript, so forks with no internal `sessionId` still
-    load). All id-derived filesystem paths are gated on a traversal-safe id.
-    `count_subagents` is a cheap directory glob (current layout only, no
-    file reads) used to populate
-    `SessionMeta.subagent_count` during `_parse_sessions` — discovery
-    stays lazy, so no agent files are read during index refresh.
+    a non-matching legacy file is skipped without a full read). Workflow agents
+    exist only under the current per-session layout (no legacy variants); they
+    are ordered after the top-level agents, grouped by workflow id, and each
+    workflow dir name is gated on the same traversal-safe allowlist as the
+    session/agent ids. Agent-file parsing is defensive (non-dict lines / string
+    `message` / non-dict `usage` are skipped) and never filters by `sessionId`
+    (an agent file is a single-thread transcript, so forks with no internal
+    `sessionId` still load). All id-derived filesystem paths are gated on a
+    traversal-safe id. `count_subagents` is a cheap directory glob (current
+    layout only — top-level plus `workflows/*/agent-*.jsonl`, no file reads)
+    used to populate `SessionMeta.subagent_count` during `_parse_sessions` —
+    discovery stays lazy, so no agent files are read during index refresh.
 -   **Rendering**: sub-agents are turns, not tool calls. `format_session_html`
     / `format_session_markdown` splice each thread in at its spawn timestamp
     (`export._compose_thread`); the TUI message pane does the same via the
@@ -279,15 +285,19 @@ Claude Code writes each sub-agent (Task/Agent tool) run to a separate
     block shows regardless of tool/thinking toggles; those toggles govern
     the interior. Tree labels get a `⑂N` badge.
 -   **Search attribution**: `SearchResult.agent_id` is set for hits inside
-    an `agent-*.jsonl`; the hit is attributed to the parent session, marked
+    an `agent-*.jsonl` (including the deeper `subagents/workflows/{wf}/`
+    layout, whose parent session is recovered from the directory tree); the
+    hit is attributed to the parent session, marked
     `⑂` in TUI search rows, and carried in `sesh search` JSON. `sesh sessions`
     JSON carries `subagent_count`. Opening a `⑂` search hit while sub-agents
     are hidden sets a session-scoped auto-show override (`_agents_override`,
     not persisted; status bar `Agents:AUTO`) so the matched interior renders;
     the override clears when another session is selected.
 -   **Delete/move hygiene**: `delete_session` removes the per-session sidecar
-    dir plus legacy agent files matching the session's parent id;
-    `move_project` rewrites `cwd` inside agent files across all three layouts.
+    dir (which contains `subagents/`, including `subagents/workflows/`) plus
+    legacy agent files matching the session's parent id; `move_project`
+    rewrites `cwd` inside agent files across all layouts, including the deeper
+    `subagents/workflows/{wf}/agent-*.jsonl`.
 -   **Cache caveat**: the sessions-cache directory fingerprint only globs
     top-level `*.jsonl`, so agent files added under `{sessionId}/subagents/`
     without touching a top-level file would not invalidate the cached

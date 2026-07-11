@@ -127,6 +127,35 @@ def test_build_rows_agent_expanded_reveals_indented_interior() -> None:
     assert interior_rows[0].body == "deep"
 
 
+def test_build_rows_agent_header_no_workflow_marker() -> None:
+    """An ordinary sub-agent header carries no [wf] marker."""
+    main = [make_message(role="user", content="hi", timestamp=None)]
+    meta = SubagentMeta(agent_id="ag", file_path="/x", message_count=1, agent_type="Explore")
+    interior = [make_message(role="assistant", content="deep", timestamp=None)]
+    items = compose_transcript(main, [(meta, interior)])
+    rows = build_rows(items, set())
+    header = next(r.header for r in rows if r.agent)
+    assert header == "⑂ Explore — ag · 1 msgs"
+
+
+def test_build_rows_agent_header_carries_workflow_marker() -> None:
+    """A workflow sub-agent header is prefixed with the shortened workflow id."""
+    main = [make_message(role="user", content="hi", timestamp=None)]
+    meta = SubagentMeta(
+        agent_id="ag",
+        file_path="/x",
+        message_count=1,
+        agent_type="Worker",
+        description="Step one",
+        workflow_id="wf_a1be27ca-98b",
+    )
+    interior = [make_message(role="assistant", content="deep", timestamp=None)]
+    items = compose_transcript(main, [(meta, interior)])
+    rows = build_rows(items, set())
+    header = next(r.header for r in rows if r.agent)
+    assert header == "⑂ [wf_a1be27ca] Worker — Step one · 1 msgs"
+
+
 def test_card_entry_defaults() -> None:
     entry = CardEntry(key="k", role="user", header="User", body="hi")
     assert entry.depth == 0

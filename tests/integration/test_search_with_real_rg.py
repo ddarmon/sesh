@@ -164,6 +164,34 @@ def test_ripgrep_search_agent_file_parent_from_directory(tmp_search_dirs) -> Non
     assert hits[0].agent_id == "nodir"
 
 
+def test_ripgrep_search_workflow_agent_file(tmp_search_dirs) -> None:
+    """A hit inside a Workflow-tool agent file
+    ({sessionId}/subagents/workflows/{wf}/agent-*.jsonl) is attributed to the
+    parent session (four dirs up) and tagged with the agent_id."""
+    _require_rg()
+    parent = "parent-wf"
+    agent_file = (
+        tmp_search_dirs["claude_projects"]
+        / "-Users-me-repo"
+        / parent
+        / "subagents"
+        / "workflows"
+        / "wf_a1be27ca-98b"
+        / "agent-wf7.jsonl"
+    )
+    write_jsonl(
+        agent_file,
+        [_agent_record(session_id=parent, agent_id="wf7", text="Needle token in workflow")],
+    )
+
+    results = search.ripgrep_search("needle token")
+    hits = [r for r in results if r.provider is Provider.CLAUDE and r.agent_id]
+    assert len(hits) == 1
+    assert hits[0].session_id == parent
+    assert hits[0].agent_id == "wf7"
+    assert hits[0].project_path == "/Users/me/repo"
+
+
 def test_ripgrep_search_main_session_has_no_agent_id(tmp_search_dirs) -> None:
     """A normal main-session Claude match leaves agent_id None."""
     _require_rg()

@@ -284,12 +284,14 @@ toggles as the main thread (in the TUI press `a` to toggle them — the
 agent transcripts are read lazily the first time you reveal them, so
 selecting a session never blocks on parsing agent files while they are
 hidden; on the CLI `sesh view`/`sesh export` show them by default,
-`--no-agents` suppresses). Three on-disk layouts are supported with graceful
+`--no-agents` suppresses). Four on-disk layouts are supported with graceful
 fallback: current per-session `{project}/{sessionId}/subagents/agent-*.jsonl`
 (with an optional `agent-{id}.meta.json` sidecar carrying agent type,
-fork flag, description, and spawning tool id), legacy project-level
-`{project}/subagents/agent-*.jsonl`, and the oldest
-`{project}/agent-*.jsonl` — the latter two have no sidecar, so a file is
+fork flag, description, and spawning tool id), Workflow-tool agents one
+level deeper `{project}/{sessionId}/subagents/workflows/{workflowId}/agent-*.jsonl`
+(same sidecar; their thread header is prefixed with a shortened `[wf_…]`
+marker), legacy project-level `{project}/subagents/agent-*.jsonl`, and the
+oldest `{project}/agent-*.jsonl` — the latter two have no sidecar, so a file is
 attributed to a session by the parent `sessionId` inside its records.
 Session tree labels gain a `⑂N` badge (a cheap directory count, no file
 reads during discovery); `sesh sessions` output includes `subagent_count`

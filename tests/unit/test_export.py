@@ -265,6 +265,43 @@ def test_format_session_html_embeds_agent_entry_with_nested_messages() -> None:
     assert "agent-thread" in out
 
 
+def test_format_session_html_workflow_agent_label_and_id() -> None:
+    """A workflow sub-agent's HTML payload carries workflow_id and a [wf] label."""
+    session = make_session(id="s-wf", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="go", timestamp=None)]
+    meta, interior = _subagent(
+        workflow_id="wf_a1be27ca-98b",
+        agent_type="Worker",
+        description="Do the step",
+    )
+    out = format_session_html(session, messages, [(meta, interior)])
+
+    payload = _extract_payload(out)
+    agent = next(e for e in payload["messages"] if e.get("kind") == "agent")
+    assert agent["workflow_id"] == "wf_a1be27ca-98b"
+    assert "[wf_a1be27ca]" in agent["label"]
+    assert "Do the step" in agent["label"]
+
+
+def test_format_session_markdown_workflow_agent_header() -> None:
+    """Markdown export prefixes a workflow sub-agent and lists the workflow id."""
+    session = make_session(id="s-wf-md", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="go", timestamp=None)]
+    meta, interior = _subagent(workflow_id="wf_a1be27ca-98b", description="Do the step")
+    out = format_session_markdown(session, messages, [(meta, interior)])
+    assert "## Sub-agent: [wf_a1be27ca] Do the step" in out
+    assert "**Workflow:** wf_a1be27ca-98b" in out
+
+
+def test_short_workflow_id_shortens_suffix() -> None:
+    """short_workflow_id drops the trailing -suffix; plain/empty ids pass through."""
+    from sesh.models import short_workflow_id
+
+    assert short_workflow_id("wf_a1be27ca-98b") == "wf_a1be27ca"
+    assert short_workflow_id("plainid") == "plainid"
+    assert short_workflow_id("") == ""
+
+
 def test_format_session_html_unanchorable_agent_trails() -> None:
     """A sub-agent with no timestamp is appended after the main thread."""
     session = make_session(id="s-trail", provider=Provider.CLAUDE)
