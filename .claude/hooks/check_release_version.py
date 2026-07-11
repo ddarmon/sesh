@@ -51,6 +51,18 @@ def _is_release_command(cmd: str) -> bool:
     return any(p.search(cmd) for p in _RELEASE_PATTERNS)
 
 
+# Publishing (`gh release create`) happens *after* the vX.Y.Z tag is created, so
+# by then a tag equal to the source version legitimately exists. Only the
+# publish step excludes that equal tag when finding the previous release;
+# `git tag` / `git push` keep the strict "greater than every existing tag"
+# check (git itself refuses to recreate an existing tag).
+_PUBLISH_PATTERN = re.compile(r"\bgh\s+release\s+create\b")
+
+
+def _is_publish_command(cmd: str) -> bool:
+    return bool(_PUBLISH_PATTERN.search(cmd))
+
+
 def _repo_root() -> str | None:
     try:
         out = subprocess.run(
@@ -82,7 +94,7 @@ def _version_tuple(v: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
-def _last_tag_version(root: str) -> str | None:
+def _last_tag_version(root: str, exclude: str | None = None) -> str | None:
     try:
         out = subprocess.run(
             ["git", "tag", "--sort=-v:refname"],
@@ -91,7 +103,10 @@ def _last_tag_version(root: str) -> str | None:
         for line in out.stdout.splitlines():
             line = line.strip()
             if re.fullmatch(r"v?\d+\.\d+\.\d+", line):
-                return line.lstrip("v")
+                version = line.lstrip("v")
+                if exclude is not None and version == exclude:
+                    continue
+                return version
     except Exception:
         return None
     return None
@@ -131,7 +146,8 @@ def main() -> None:
             f"{pyproj} but src/sesh/__init__.py is {init}. Sync them, then retry."
         )
 
-    last = _last_tag_version(root)
+    exclude = pyproj if _is_publish_command(cmd) else None
+    last = _last_tag_version(root, exclude=exclude)
     if last is not None and _version_tuple(pyproj) <= _version_tuple(last):
         _deny(
             f"Release blocked: version {pyproj} is not greater than the last "
