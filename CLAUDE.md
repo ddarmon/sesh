@@ -15,8 +15,9 @@ uv tool install . && sesh
 
 ## Versioning
 
-The package version lives in both `pyproject.toml` and
-`src/sesh/__init__.py`. Keep them in sync.
+The package version lives in `pyproject.toml` and `src/sesh/__init__.py`,
+and is mirrored in the generated editable-package entry in `uv.lock`. Keep
+all three in sync by running `uv lock` after a release version bump.
 
 Version bumps happen **once per release, not per PR**. Individual
 feature/fix PRs should NOT bump the version on their own — the

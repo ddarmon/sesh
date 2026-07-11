@@ -46,11 +46,18 @@ Show: last tag, the new version, the bump type + why (e.g. "minor — range
 contains [FEATURE]"), and the commit list grouped by prefix. **Wait for the
 user to confirm** before changing anything.
 
-## 4. Bump both version files (keep in sync)
+## 4. Bump version files and refresh the lock (keep in sync)
 
 Edit the `version = "X.Y.Z"` line in `pyproject.toml` and the
-`__version__ = "X.Y.Z"` line in `src/sesh/__init__.py` to the new version.
-They must match exactly.
+`__version__ = "X.Y.Z"` line in `src/sesh/__init__.py` to the new version,
+then run:
+
+```bash
+uv lock
+```
+
+Verify the editable `sesh` package entry in `uv.lock` has the same version.
+All three files must agree; do not hand-edit the generated lockfile.
 
 ## 5. Test
 
@@ -63,7 +70,7 @@ Abort the release (revert the version edits) if anything fails.
 ## 6. Commit, push, tag
 
 ```bash
-git add pyproject.toml src/sesh/__init__.py
+git add pyproject.toml src/sesh/__init__.py uv.lock
 git commit -m "[CHORE] Release vX.Y.Z"
 git push origin main
 git tag vX.Y.Z
@@ -71,9 +78,10 @@ git push origin vX.Y.Z
 ```
 
 The `check_release_version` PreToolUse hook runs on the `git tag` /
-`gh release create` step and will block if the two version files disagree
+`gh release create` step and will block if the source version files disagree
 or the version wasn't bumped past the last tag — that's the safety net, not
-a problem to work around.
+a problem to work around. Before tagging, also verify `uv.lock` contains the
+same editable-package version.
 
 ## 7. Draft the GitHub release
 
