@@ -170,6 +170,9 @@ multi-host aggregation tree instead of the local `$HOME` --- see
 
 ```
 sesh refresh                              # discover sessions, build index
+sesh doctor                               # diagnose providers (JSON)
+sesh doctor --human                       # human-friendly diagnostic report
+sesh doctor --provider claude --strict    # CI-friendly focused diagnostics
 sesh projects                             # list all projects
 sesh sessions                             # list all sessions
 sesh sessions --project /path/to/project  # filter by project

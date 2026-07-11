@@ -35,86 +35,50 @@ def discover_all(
     return _run_discovery(providers_list, cache)
 
 
+PROVIDER_NAMES = ("claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode")
+
+
+def construct_provider(name: str, *, cache=None, base_dir: Path | None = None,
+                       host: str | None = None):
+    """Construct one provider independently (shared by discovery and doctor)."""
+    import importlib
+
+    class_names = {
+        "claude": "ClaudeProvider", "codex": "CodexProvider",
+        "cursor": "CursorProvider", "copilot": "CopilotProvider",
+        "pi": "PiProvider", "gemini": "GeminiProvider",
+        "opencode": "OpencodeProvider",
+    }
+    module = importlib.import_module(f"sesh.providers.{name}")
+    cls = getattr(module, class_names[name])
+    kwargs = {}
+    if base_dir is not None:
+        kwargs["base_dir"] = base_dir
+    if host is not None:
+        kwargs["host"] = host
+    if name in {"codex", "pi", "gemini", "opencode"}:
+        kwargs["cache"] = cache
+    return cls(**kwargs)
+
+
+def _build_providers(cache, *, base_dir=None, host=None) -> list:
+    providers = []
+    for name in PROVIDER_NAMES:
+        try:
+            providers.append(construct_provider(
+                name, cache=cache, base_dir=base_dir, host=host,
+            ))
+        except Exception:
+            pass
+    return providers
+
+
 def _local_providers(cache) -> list:
-    """Build the default local provider list (one instance each)."""
-    from sesh.providers.claude import ClaudeProvider
-
-    providers_list = [ClaudeProvider()]
-
-    try:
-        from sesh.providers.codex import CodexProvider
-        providers_list.append(CodexProvider(cache=cache))
-    except Exception:
-        pass
-
-    try:
-        from sesh.providers.cursor import CursorProvider
-        providers_list.append(CursorProvider())
-    except Exception:
-        pass
-
-    try:
-        from sesh.providers.copilot import CopilotProvider
-        providers_list.append(CopilotProvider())
-    except Exception:
-        pass
-
-    try:
-        from sesh.providers.pi import PiProvider
-        providers_list.append(PiProvider(cache=cache))
-    except Exception:
-        pass
-
-    try:
-        from sesh.providers.gemini import GeminiProvider
-        providers_list.append(GeminiProvider(cache=cache))
-        from sesh.providers.opencode import OpencodeProvider
-        providers_list.append(OpencodeProvider(cache=cache))
-    except Exception:
-        pass
-
-    return providers_list
+    return _build_providers(cache)
 
 
 def _aggregated_providers(host_dir: Path, host: str, cache) -> list:
-    """Build a provider list rooted at one per-host subtree."""
-    from sesh.providers.claude import ClaudeProvider
-
-    providers_list = [ClaudeProvider(base_dir=host_dir, host=host)]
-
-    try:
-        from sesh.providers.codex import CodexProvider
-        providers_list.append(CodexProvider(cache=cache, base_dir=host_dir, host=host))
-    except Exception:
-        pass
-
-    try:
-        from sesh.providers.cursor import CursorProvider
-        providers_list.append(CursorProvider(base_dir=host_dir, host=host))
-    except Exception:
-        pass
-
-    try:
-        from sesh.providers.copilot import CopilotProvider
-        providers_list.append(CopilotProvider(base_dir=host_dir, host=host))
-    except Exception:
-        pass
-
-    try:
-        from sesh.providers.pi import PiProvider
-        providers_list.append(PiProvider(cache=cache, base_dir=host_dir, host=host))
-    except Exception:
-        pass
-
-    try:
-        from sesh.providers.gemini import GeminiProvider
-        providers_list.append(GeminiProvider(cache=cache, base_dir=host_dir, host=host))
-        from sesh.providers.opencode import OpencodeProvider
-        providers_list.append(OpencodeProvider(cache=cache, base_dir=host_dir, host=host))
-    except Exception:
-        pass
-
-    return providers_list
+    return _build_providers(cache, base_dir=host_dir, host=host)
 
 
 def _run_discovery(

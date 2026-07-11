@@ -245,6 +245,21 @@ def cmd_refresh(args: argparse.Namespace) -> None:
     _json_out(summary)
 
 
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Emit a read-only provider diagnostics report."""
+    from sesh.diagnostics import format_diagnostics_text, run_diagnostics
+
+    report = run_diagnostics(
+        aggregation_root=_aggregation_root(args), provider=args.provider,
+    )
+    if args.human:
+        print(format_diagnostics_text(report))
+    else:
+        _json_out(report)
+    if args.strict and report["status"] != "ok":
+        raise SystemExit(1)
+
+
 def cmd_projects(args: argparse.Namespace) -> None:
     """List projects from the index."""
     index = _require_index(args)
@@ -1324,6 +1339,25 @@ def main() -> None:
         ),
     )
 
+    # doctor
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Diagnose provider roots, discovery, dependencies, and app paths",
+        description="Run fresh read-only provider diagnostics and print JSON.",
+    )
+    p_doctor.add_argument(
+        "--provider", choices=PROVIDER_CHOICES, metavar="NAME",
+        help="Diagnose only one provider",
+    )
+    p_doctor.add_argument(
+        "--strict", action="store_true",
+        help="Exit 1 when the report contains warnings or errors",
+    )
+    p_doctor.add_argument(
+        "--human", action="store_true",
+        help="Print a concise human-friendly report instead of JSON",
+    )
+
     # projects
     sub.add_parser(
         "projects",
@@ -1828,6 +1862,8 @@ def main() -> None:
         tui_main(aggregation_root=_aggregation_root(args))
     elif args.command == "refresh":
         cmd_refresh(args)
+    elif args.command == "doctor":
+        cmd_doctor(args)
     elif args.command == "projects":
         cmd_projects(args)
     elif args.command == "sessions":
