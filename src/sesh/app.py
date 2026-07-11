@@ -1320,7 +1320,9 @@ class SeshApp(App):
         if not result.session_id:
             return None
 
-        source_path = result.file_path
+        # Child-search hits retain the actual matched file for provenance, but
+        # providers must load the root rollout to render the complete session.
+        source_path = result.root_file_path or result.file_path
 
         # For Claude, source_path must be the project directory (not a file).
         # ClaudeProvider.get_messages expects a directory to glob *.jsonl from.

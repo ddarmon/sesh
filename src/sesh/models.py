@@ -100,7 +100,11 @@ class SearchResult:
     matched_line: str
     file_path: str
     host: str | None = None  # Set in aggregation mode
-    agent_id: str | None = None  # Set when the hit is inside a Claude sub-agent file
+    agent_id: str | None = None  # Set when the hit is inside a sub-agent transcript
+    # Root transcript to load/delete when file_path is a child transcript.  This
+    # is internal provenance; the search CLI intentionally keeps its existing
+    # JSON shape and reports file_path as the file that actually matched.
+    root_file_path: str | None = None
 
 
 def filter_messages(

@@ -206,11 +206,21 @@ class CodexProvider(SessionProvider):
     def _get_messages_from_file(
         self, file_path: Path, *, child_agent_path: str | None = None
     ) -> list[Message]:
+        """Return messages parsed from one rollout."""
+        messages, _ = self._parse_rollout_file(
+            file_path, child_agent_path=child_agent_path
+        )
+        return messages
+
+    def _parse_rollout_file(
+        self, file_path: Path, *, child_agent_path: str | None = None
+    ) -> tuple[list[Message], int | None]:
         """Parse one rollout, optionally suppressing a child's forked history."""
         if not file_path.is_file():
-            return []
+            return [], None
 
         messages: list[Message] = []
+        output_tokens: int | None = None
         # A subagent rollout begins with a physical copy of the parent's context.
         # Its plaintext NEW_TASK handoff is the first child-owned record.
         child_started = child_agent_path is None
@@ -245,6 +255,19 @@ class CodexProvider(SessionProvider):
                         ):
                             child_started = True
                         continue
+
+                    # Token totals are metadata rather than transcript messages.
+                    # Track them during this same lazy pass so loading a selected
+                    # child does not need to scan its rollout a second time.
+                    if entry_type == "event_msg" and payload.get("type") == "token_count":
+                        info = payload.get("info") or {}
+                        total_usage = info.get("total_token_usage") or {}
+                        last_usage = info.get("last_token_usage") or {}
+                        value = total_usage.get("output_tokens")
+                        if value is None:
+                            value = last_usage.get("output_tokens")
+                        if isinstance(value, int):
+                            output_tokens = value
 
                     # User messages
                     if entry_type == "event_msg" and payload.get("type") == "user_message":
@@ -322,7 +345,7 @@ class CodexProvider(SessionProvider):
         except OSError:
             pass
 
-        return messages
+        return messages, output_tokens
 
     def load_subagents(
         self, session: SessionMeta
@@ -332,7 +355,7 @@ class CodexProvider(SessionProvider):
         loaded: list[tuple[SubagentMeta, list[Message]]] = []
         for child in self._subagents_by_root.get(session.id, []):
             file_path = Path(child["file_path"])
-            messages = self._get_messages_from_file(
+            messages, output_tokens = self._parse_rollout_file(
                 file_path, child_agent_path=child.get("agent_path")
             )
             meta = SubagentMeta(
@@ -343,7 +366,7 @@ class CodexProvider(SessionProvider):
                 is_fork=True,
                 first_timestamp=child.get("start_timestamp"),
                 message_count=len([m for m in messages if m.role in ("user", "assistant")]),
-                output_tokens=child.get("output_tokens"),
+                output_tokens=output_tokens,
             )
             loaded.append((meta, messages))
         loaded.sort(

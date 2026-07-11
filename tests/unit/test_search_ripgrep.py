@@ -169,7 +169,7 @@ def test_ripgrep_search_parses_jsonl_and_merges_cursor_results(
 
     assert {r.session_id for r in by_provider[Provider.CLAUDE]} == {"claude-1"}
     codex_result = by_provider[Provider.CODEX][0]
-    assert codex_result.session_id == "123e4567-e89b-12d3-a456-426614174000"
+    assert codex_result.session_id == "codex-1"
     assert codex_result.project_path == "/Users/me/codex-repo"
     assert {r.session_id for r in by_provider[Provider.CURSOR]} == {
         "cursor-txt",
@@ -254,8 +254,10 @@ def test_early_dedup_skips_cwd_lookup_for_duplicates(
     assert results[0].session_id == "s1"
 
 
-def test_cwd_lookup_skips_file_io(tmp_search_dirs, monkeypatch) -> None:
-    """When cwd_lookup provides the project path, no file I/O is needed."""
+def test_cwd_lookup_uses_header_id_after_single_header_read(
+    tmp_search_dirs, monkeypatch,
+) -> None:
+    """Codex always reads its header, then uses the index for cwd resolution."""
     codex_file = (
         tmp_search_dirs["codex_sessions"]
         / "123e4567-e89b-12d3-a456-426614174000.jsonl"
@@ -281,12 +283,13 @@ def test_cwd_lookup_skips_file_io(tmp_search_dirs, monkeypatch) -> None:
     monkeypatch.setattr(search, "_search_cursor_transcripts", lambda *a, **k: [])
     monkeypatch.setattr(search, "_search_cursor_stores", lambda *a, **k: [])
 
-    lookup = {("123e4567-e89b-12d3-a456-426614174000", "codex"): "/from/index"}
+    lookup = {("codex-1", "codex"): "/from/index"}
     results = search.ripgrep_search("needle", cwd_lookup=lookup)
 
     assert len(results) == 1
+    assert results[0].session_id == "codex-1"
     assert results[0].project_path == "/from/index"
-    assert str(codex_file) not in open_calls
+    assert open_calls == [str(codex_file)]
 
 
 def test_cursor_store_like_filters_non_matching_blobs(tmp_search_dirs) -> None:

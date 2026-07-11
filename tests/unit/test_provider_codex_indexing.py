@@ -526,27 +526,54 @@ def test_get_messages_parses_current_custom_tool_records(tmp_path: Path) -> None
     assert "/repo" in (messages[1].tool_output or "")
 
 
-def test_index_reads_only_child_header(tmp_codex_dir, monkeypatch) -> None:
+def test_index_reads_only_child_header_and_loads_tokens_lazily(
+    tmp_codex_dir, monkeypatch,
+) -> None:
     root_file = tmp_codex_dir / "root.jsonl"
     child_file = tmp_codex_dir / "child.jsonl"
     write_jsonl(root_file, [{
         "type": "session_meta", "timestamp": "2026-07-11T18:00:00Z",
         "payload": {"id": "root-id", "cwd": "/repo"},
     }])
-    write_jsonl(child_file, _codex_subagent_entries(
+    child_entries = _codex_subagent_entries(
         child_id="child-id", root_id="root-id", agent_path="/root/child",
         timestamp="2026-07-11T18:00:01Z",
-    ))
+    )
+    child_entries.append({
+        "type": "event_msg",
+        "timestamp": "2026-07-11T18:00:02Z",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {"output_tokens": 21},
+                "total_token_usage": {"output_tokens": 321},
+            },
+        },
+    })
+    write_jsonl(child_file, child_entries)
     provider = codex.CodexProvider()
     original = provider._parse_session_file
+    original_rollout = provider._parse_rollout_file
     parsed: list[Path] = []
+    parsed_rollouts: list[Path] = []
 
     def tracking_parse(path: Path):
         parsed.append(path)
         return original(path)
 
+    def tracking_rollout(path: Path, **kwargs):
+        parsed_rollouts.append(path)
+        return original_rollout(path, **kwargs)
+
     monkeypatch.setattr(provider, "_parse_session_file", tracking_parse)
+    monkeypatch.setattr(provider, "_parse_rollout_file", tracking_rollout)
     sessions = provider.get_sessions("/repo")
 
     assert [s.id for s in sessions] == ["root-id"]
     assert parsed == [root_file]
+    assert parsed_rollouts == []
+
+    loaded = provider.load_subagents(sessions[0])
+
+    assert parsed_rollouts == [child_file]
+    assert loaded[0][0].output_tokens == 321

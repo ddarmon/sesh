@@ -682,10 +682,14 @@ def cmd_clean(args: argparse.Namespace) -> None:
     seen_targets: set[tuple[str, str, str]] = set()
 
     for r in results:
+        # Search provenance points to the file containing the match.  A native
+        # child hit may separately identify the root transcript that owns the
+        # session and must be passed to the provider for deletion.
+        root_or_matched_path = r.root_file_path or r.file_path
         if r.provider == Provider.CLAUDE:
             source_path = str(Path(r.file_path).parent)
         elif r.provider == Provider.CODEX:
-            source_path = r.file_path
+            source_path = root_or_matched_path
         elif r.provider == Provider.CURSOR:
             source_path = r.file_path
         elif r.provider == Provider.COPILOT:

@@ -132,6 +132,7 @@ def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
                 project_path="/repo",
                 matched_line="needle",
                 file_path="/tmp/x.jsonl",
+                root_file_path="/tmp/root.jsonl",
             )
         ],
     )
@@ -246,6 +247,43 @@ def test_cmd_clean_dry_run(monkeypatch, capsys) -> None:
     assert out["dry_run"] is True
     assert out["total"] == 1
     assert out["deleted"][0]["provider"] == "claude"
+
+
+def test_cmd_clean_codex_child_uses_root_path(monkeypatch, capsys) -> None:
+    """Codex child provenance is reported while deletion targets its root."""
+    import sesh.providers.codex as codex_mod
+    import sesh.search as search_mod
+    import sesh.viewcache as viewcache_mod
+
+    deleted_sources: list[str] = []
+
+    class FakeCodexProvider:
+        def delete_session(self, session):
+            deleted_sources.append(session.source_path or "")
+
+    monkeypatch.setattr(
+        search_mod,
+        "ripgrep_search",
+        lambda q, **_kw: [
+            SearchResult(
+                session_id="root-1",
+                provider=Provider.CODEX,
+                project_path="/repo",
+                matched_line="needle",
+                file_path="/tmp/codex/child.jsonl",
+                agent_id="child-1",
+                root_file_path="/tmp/codex/root.jsonl",
+            )
+        ],
+    )
+    monkeypatch.setattr(codex_mod, "CodexProvider", FakeCodexProvider)
+    monkeypatch.setattr(viewcache_mod, "remove_view", lambda _session_id: None)
+
+    cli.cmd_clean(_ns(query="needle", dry_run=False, force=True))
+
+    out = json.loads(capsys.readouterr().out)
+    assert deleted_sources == ["/tmp/codex/root.jsonl"]
+    assert out["deleted"][0]["file_path"] == "/tmp/codex/child.jsonl"
 
 
 def test_cmd_clean_dedup_regression(monkeypatch, capsys) -> None:
