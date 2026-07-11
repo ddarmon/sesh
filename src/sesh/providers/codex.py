@@ -403,7 +403,9 @@ class CodexProvider(SessionProvider):
                     payload = first_entry.get("payload", {})
                     session_id = payload.get("id", file_path.stem)
                     cwd = payload.get("cwd", "")
-                    model = payload.get("model") or payload.get("model_provider", "")
+                    # Current Codex files put the provider (for example,
+                    # "openai") here and the actual model in turn_context.
+                    model = payload.get("model", "")
                     first_ts = first_entry.get("timestamp")
 
                     # Scan rest for last timestamp and user messages
@@ -425,6 +427,9 @@ class CodexProvider(SessionProvider):
 
                             etype = entry.get("type", "")
                             epayload = entry.get("payload") or {}
+
+                            if etype == "turn_context" and epayload.get("model"):
+                                model = epayload["model"]
 
                             if etype == "event_msg" and epayload.get("type") == "user_message":
                                 msg_count += 1

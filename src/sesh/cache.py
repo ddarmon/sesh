@@ -12,6 +12,7 @@ from sesh.paths import CACHE_DIR
 
 CACHE_FILE = CACHE_DIR / "sessions.json"
 INDEX_FILE = CACHE_DIR / "index.json"
+CACHE_VERSION = 2
 
 
 def _session_to_dict(s: SessionMeta) -> dict:
@@ -94,7 +95,7 @@ class SessionCache:
     def get_sessions(self, file_path: str) -> list[SessionMeta] | None:
         """Return cached sessions if the file hasn't changed, else None."""
         entry = self._cache.get(file_path)
-        if not entry:
+        if not entry or entry.get("cache_version") != CACHE_VERSION:
             return None
 
         try:
@@ -118,6 +119,7 @@ class SessionCache:
             return
 
         self._cache[file_path] = {
+            "cache_version": CACHE_VERSION,
             "mtime": stat.st_mtime,
             "size": stat.st_size,
             "sessions": [_session_to_dict(s) for s in sessions],

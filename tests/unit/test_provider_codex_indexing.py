@@ -72,6 +72,35 @@ def test_parse_session_file_new_format(tmp_path: Path) -> None:
     assert data["file_path"] == str(file_path)
 
 
+def test_parse_session_file_gets_model_from_turn_context(tmp_path: Path) -> None:
+    """Current Codex stores the provider in session_meta and model in turn_context."""
+    file_path = tmp_path / "current.jsonl"
+    write_jsonl(
+        file_path,
+        [
+            {
+                "type": "session_meta",
+                "timestamp": "2026-07-10T00:00:00Z",
+                "payload": {
+                    "id": "sess-current",
+                    "cwd": "/repo",
+                    "model_provider": "openai",
+                },
+            },
+            {
+                "type": "turn_context",
+                "timestamp": "2026-07-10T00:00:01Z",
+                "payload": {"model": "gpt-5.6-sol"},
+            },
+        ],
+    )
+
+    data = codex.CodexProvider()._parse_session_file(file_path)
+
+    assert data is not None
+    assert data["model"] == "gpt-5.6-sol"
+
+
 def test_parse_session_file_legacy_format(tmp_path: Path) -> None:
     """Legacy Codex JSONL (with <cwd> tags) extracts the project path from the tag."""
     file_path = tmp_path / "legacy.jsonl"

@@ -134,6 +134,21 @@ def test_cache_miss_no_entry(tmp_cache_dir, tmp_path: Path) -> None:
     assert sc.get_sessions(str(file_path)) is None
 
 
+def test_cache_miss_for_unversioned_entry(tmp_cache_dir, tmp_path: Path) -> None:
+    """Parser changes invalidate metadata written by older Sesh versions."""
+    file_path = tmp_path / "session.jsonl"
+    _write(file_path, "{}\n")
+    stat = file_path.stat()
+    sc = cache.SessionCache()
+    sc._cache[str(file_path)] = {
+        "mtime": stat.st_mtime,
+        "size": stat.st_size,
+        "sessions": [],
+    }
+
+    assert sc.get_sessions(str(file_path)) is None
+
+
 def test_cache_invalidation_mtime(tmp_cache_dir, tmp_path: Path) -> None:
     """Per-file cache: changing the file's mtime invalidates the entry."""
     file_path = tmp_path / "session.jsonl"
