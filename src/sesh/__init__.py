@@ -1,3 +1,3 @@
 """sesh — Browse and search LLM coding sessions in the terminal."""
 
-__version__ = "0.19.0"
+__version__ = "0.20.0"
