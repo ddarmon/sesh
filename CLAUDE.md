@@ -173,7 +173,7 @@ If the CLI binary isn't on PATH, the status bar shows an error.
 Press `t` to toggle tool call/result messages in the message viewer.
 Press `T` (shift-t) to toggle thinking/reasoning blocks. Both are hidden
 by default. The status bar shows `Tools:ON` / `Think:ON` when active.
-Press `a` to toggle Claude sub-agent threads (see below); the status bar
+Press `a` to toggle provider-native sub-agent threads (see below); the status bar
 shows `Agents:ON` when active. Press `F` (shift-f) to toggle fullscreen
 mode for the message pane; the status bar shows `Full:ON` when active.
 Press `?` to open the keyboard shortcuts help modal (press `?` or Escape
@@ -244,7 +244,28 @@ clipboard helper); `export.format_duration` and the two `export`
 token/time helpers are shared so both readers agree. `app._format_duration`
 is an alias of `export.format_duration`.
 
-## Claude sub-agent transcripts
+## Native sub-agent transcripts
+
+Sesh uses the provider-neutral `SubagentMeta` + `load_subagents(session)` API to
+render child-agent threads in the TUI and exports. Claude and Codex currently
+implement this API.
+
+### Codex native subagents
+
+Current Codex releases persist each native subagent as a normal rollout JSONL.
+The child `session_meta` has `thread_source: "subagent"`, a root `session_id`,
+a direct `parent_thread_id`, and agent path/nickname data under
+`source.subagent.thread_spawn`. The Codex provider excludes these child files
+from the ordinary session list, counts them on the root session, and loads them
+lazily when agents are visible. Because Codex physically forks parent context
+into each child rollout, sesh starts the displayed child transcript after its
+plaintext `NEW_TASK` handoff. Nested descendants are attached to the root via
+`session_id` and displayed as a flat chronological collection in v1. Search
+reads the matched Codex file's first-line header so child hits carry the root
+session id plus child `agent_id`; current `custom_tool_call` /
+`custom_tool_call_output` records render under the normal tool toggle.
+
+### Claude Code subagents
 
 Claude Code writes each sub-agent (Task/Agent tool) run to a separate
 `agent-{id}.jsonl` file. Only the Claude provider handles these.
@@ -397,7 +418,7 @@ port and uses an unguessable path token; it has no permissive CORS, sends
 `no-store`/security headers, and stops when the TUI exits. The browser polls its
 same-origin JSON endpoint (default 1.5 seconds). Each request reloads via the
 normal provider `get_messages` API, so live main-thread updates work for all
-providers; Claude sub-agents are reloaded when agent display is enabled. A
+providers; provider-native sub-agents are reloaded when agent display is enabled. A
 failed loader refresh retains the last good payload and the page shows a
 retrying/disconnected status. The live toolbar adds a status indicator (live /
 paused / retrying / disconnected), the last-update time, a browser-side

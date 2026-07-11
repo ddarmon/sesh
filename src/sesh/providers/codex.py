@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sesh.models import Message, MoveReport, Provider, SessionMeta
+from sesh.models import Message, MoveReport, Provider, SessionMeta, SubagentMeta
 from sesh.providers import SessionProvider
 
 CODEX_DIR = Path.home() / ".codex" / "sessions"
@@ -148,6 +148,7 @@ class CodexProvider(SessionProvider):
         host: str | None = None,
     ) -> None:
         self._index: dict[str, list[dict]] | None = None
+        self._subagents_by_root: dict[str, list[dict]] = {}
         self._cache = cache
         self._base_dir = base_dir
         self.host = host
@@ -190,6 +191,7 @@ class CodexProvider(SessionProvider):
                 output_tokens=s.get("output_tokens"),
                 cumulative_input_tokens=s.get("cumulative_input_tokens"),
                 host=self.host,
+                subagent_count=s.get("subagent_count", 0),
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)
@@ -199,12 +201,19 @@ class CodexProvider(SessionProvider):
         """Load messages from a Codex session file."""
         if not session.source_path:
             return []
+        return self._get_messages_from_file(Path(session.source_path))
 
-        file_path = Path(session.source_path)
+    def _get_messages_from_file(
+        self, file_path: Path, *, child_agent_path: str | None = None
+    ) -> list[Message]:
+        """Parse one rollout, optionally suppressing a child's forked history."""
         if not file_path.is_file():
             return []
 
-        messages = []
+        messages: list[Message] = []
+        # A subagent rollout begins with a physical copy of the parent's context.
+        # Its plaintext NEW_TASK handoff is the first child-owned record.
+        child_started = child_agent_path is None
         call_id_map: dict[str, str] = {}  # call_id -> function name
         try:
             with open(file_path) as f:
@@ -220,6 +229,22 @@ class CodexProvider(SessionProvider):
                     entry_type = entry.get("type", "")
                     payload = entry.get("payload", {})
                     ts = _parse_timestamp(entry.get("timestamp", ""))
+
+                    if not child_started:
+                        content = payload.get("content")
+                        if (
+                            entry_type == "response_item"
+                            and payload.get("type") == "agent_message"
+                            and payload.get("recipient") == child_agent_path
+                            and isinstance(content, list)
+                            and any(
+                                isinstance(item, dict)
+                                and str(item.get("text", "")).startswith("Message Type: NEW_TASK")
+                                for item in content
+                            )
+                        ):
+                            child_started = True
+                        continue
 
                     # User messages
                     if entry_type == "event_msg" and payload.get("type") == "user_message":
@@ -243,13 +268,17 @@ class CodexProvider(SessionProvider):
                                 content_type="thinking",
                             ))
 
-                    # Function calls
-                    elif entry_type == "response_item" and payload.get("type") == "function_call":
+                    # Function calls (standard and current custom-tool schema)
+                    elif entry_type == "response_item" and payload.get("type") in (
+                        "function_call", "custom_tool_call"
+                    ):
                         name = payload.get("name", "")
                         call_id = payload.get("call_id", "")
                         if call_id and name:
                             call_id_map[call_id] = name
-                        args = _stringify_tool_value(payload.get("arguments", ""))
+                        args = _stringify_tool_value(
+                            payload.get("arguments", payload.get("input", ""))
+                        )
                         messages.append(Message(
                             role="assistant",
                             content="",
@@ -259,8 +288,10 @@ class CodexProvider(SessionProvider):
                             content_type="tool_use",
                         ))
 
-                    # Function call output
-                    elif entry_type == "response_item" and payload.get("type") == "function_call_output":
+                    # Function call output (standard and current custom-tool schema)
+                    elif entry_type == "response_item" and payload.get("type") in (
+                        "function_call_output", "custom_tool_call_output"
+                    ):
                         call_id = payload.get("call_id", "")
                         resolved_name = call_id_map.get(call_id, "")
                         output = _stringify_tool_value(payload.get("output", ""))
@@ -293,10 +324,46 @@ class CodexProvider(SessionProvider):
 
         return messages
 
+    def load_subagents(
+        self, session: SessionMeta
+    ) -> list[tuple[SubagentMeta, list[Message]]]:
+        """Load native Codex child rollouts attached to a root thread."""
+        self._build_index()
+        loaded: list[tuple[SubagentMeta, list[Message]]] = []
+        for child in self._subagents_by_root.get(session.id, []):
+            file_path = Path(child["file_path"])
+            messages = self._get_messages_from_file(
+                file_path, child_agent_path=child.get("agent_path")
+            )
+            meta = SubagentMeta(
+                agent_id=child["id"],
+                file_path=str(file_path),
+                description=child.get("agent_path"),
+                agent_type=child.get("agent_role") or child.get("agent_nickname"),
+                is_fork=True,
+                first_timestamp=child.get("start_timestamp"),
+                message_count=len([m for m in messages if m.role in ("user", "assistant")]),
+                output_tokens=child.get("output_tokens"),
+            )
+            loaded.append((meta, messages))
+        loaded.sort(
+            key=lambda pair: pair[0].first_timestamp
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        return loaded
+
+    def discover_subagents(self, session: SessionMeta) -> list[SubagentMeta]:
+        return [meta for meta, _ in self.load_subagents(session)]
+
     def delete_session(self, session: SessionMeta) -> None:
-        """Delete a Codex session by removing its JSONL file."""
+        """Delete a Codex root rollout and its native child rollouts."""
+        self._build_index()
+        for child in self._subagents_by_root.get(session.id, []):
+            Path(child["file_path"]).unlink(missing_ok=True)
         if session.source_path:
             Path(session.source_path).unlink(missing_ok=True)
+        self._index = None
+        self._subagents_by_root = {}
 
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Update Codex metadata when a project path changes."""
@@ -318,6 +385,7 @@ class CodexProvider(SessionProvider):
             )
 
         self._index = None
+        self._subagents_by_root = {}
         return MoveReport(
             provider=Provider.CODEX,
             success=True,
@@ -325,68 +393,113 @@ class CodexProvider(SessionProvider):
         )
 
     def _build_index(self) -> dict[str, list[dict]]:
-        """Build index of project_path -> [{session data}]."""
+        """Build the root-session index and native Codex child-thread map."""
         if self._index is not None:
             return self._index
 
         self._index = {}
+        self._subagents_by_root = {}
         codex_dir = self._codex_dir
         if not codex_dir.is_dir():
             return self._index
 
-        cache = self._cache
-
+        roots: list[Path] = []
         for jsonl_file in codex_dir.rglob("*.jsonl"):
+            header = self._read_session_header(jsonl_file)
+            if header and self._is_subagent_header(header):
+                root_id = header.get("session_id") or header.get("parent_thread_id")
+                child_id = header.get("id")
+                if child_id and root_id:
+                    source = header.get("source")
+                    subagent_source = source.get("subagent") if isinstance(source, dict) else {}
+                    spawn = (subagent_source or {}).get("thread_spawn") or {}
+                    child = {
+                        "id": child_id,
+                        "file_path": str(jsonl_file),
+                        "start_timestamp": (
+                            _parse_timestamp(header["_timestamp"])
+                            if header.get("_timestamp") else None
+                        ),
+                        "parent_thread_id": header.get("parent_thread_id")
+                        or spawn.get("parent_thread_id"),
+                        "agent_path": header.get("agent_path") or spawn.get("agent_path"),
+                        "agent_nickname": header.get("agent_nickname")
+                        or spawn.get("agent_nickname"),
+                        "agent_role": spawn.get("agent_role"),
+                    }
+                    self._subagents_by_root.setdefault(str(root_id), []).append(child)
+                continue
+            roots.append(jsonl_file)
+
+        cache = self._cache
+        for jsonl_file in roots:
             file_str = str(jsonl_file)
-
-            # Check per-file cache first
+            data = None
+            cached_count: int | None = None
             if cache:
-                cached_sessions = cache.get_sessions(file_str)
-                if cached_sessions:
-                    for s in cached_sessions:
-                        cwd = s.project_path
-                        if cwd not in self._index:
-                            self._index[cwd] = []
-                        self._index[cwd].append({
-                            "id": s.id,
-                            "cwd": s.project_path,
-                            "model": s.model,
-                            "timestamp": s.timestamp,
-                            "start_timestamp": s.start_timestamp,
-                            "summary": s.summary,
-                            "message_count": s.message_count,
-                            "file_path": s.source_path or file_str,
-                            "input_tokens": s.input_tokens,
-                            "output_tokens": s.output_tokens,
-                            "cumulative_input_tokens": s.cumulative_input_tokens,
-                        })
-                    continue
+                cached = cache.get_sessions(file_str)
+                if cached:
+                    s = cached[0]
+                    cached_count = s.subagent_count
+                    data = {
+                        "id": s.id,
+                        "cwd": s.project_path,
+                        "model": s.model,
+                        "timestamp": s.timestamp,
+                        "start_timestamp": s.start_timestamp,
+                        "summary": s.summary,
+                        "message_count": s.message_count,
+                        "file_path": s.source_path or file_str,
+                        "input_tokens": s.input_tokens,
+                        "output_tokens": s.output_tokens,
+                        "cumulative_input_tokens": s.cumulative_input_tokens,
+                    }
+            if data is None:
+                data = self._parse_session_file(jsonl_file)
+            if not data or not data.get("cwd"):
+                continue
 
-            data = self._parse_session_file(jsonl_file)
-            if data and data.get("cwd"):
-                cwd = data["cwd"]
-                if cwd not in self._index:
-                    self._index[cwd] = []
-                self._index[cwd].append(data)
-
-                # Store in cache for next time
-                if cache:
-                    cache.put_sessions(file_str, [SessionMeta(
-                        id=data["id"],
-                        project_path=data["cwd"],
-                        provider=Provider.CODEX,
-                        summary=data.get("summary", ""),
-                        timestamp=data["timestamp"],
-                        start_timestamp=data.get("start_timestamp"),
-                        message_count=data.get("message_count", 0),
-                        model=data.get("model"),
-                        source_path=data.get("file_path"),
-                        input_tokens=data.get("input_tokens"),
-                        output_tokens=data.get("output_tokens"),
-                        cumulative_input_tokens=data.get("cumulative_input_tokens"),
-                    )])
+            data["subagent_count"] = len(self._subagents_by_root.get(data["id"], []))
+            self._index.setdefault(data["cwd"], []).append(data)
+            if cache and cached_count != data["subagent_count"]:
+                cache.put_sessions(file_str, [SessionMeta(
+                    id=data["id"],
+                    project_path=data["cwd"],
+                    provider=Provider.CODEX,
+                    summary=data.get("summary", ""),
+                    timestamp=data["timestamp"],
+                    start_timestamp=data.get("start_timestamp"),
+                    message_count=data.get("message_count", 0),
+                    model=data.get("model"),
+                    source_path=data.get("file_path"),
+                    input_tokens=data.get("input_tokens"),
+                    output_tokens=data.get("output_tokens"),
+                    cumulative_input_tokens=data.get("cumulative_input_tokens"),
+                    subagent_count=data["subagent_count"],
+                )])
 
         return self._index
+
+    @staticmethod
+    def _read_session_header(file_path: Path) -> dict | None:
+        """Read only a rollout's first-line session metadata payload."""
+        try:
+            with open(file_path) as f:
+                entry = json.loads(f.readline())
+            if entry.get("type") == "session_meta" and isinstance(entry.get("payload"), dict):
+                payload = entry["payload"].copy()
+                payload["_timestamp"] = entry.get("timestamp")
+                return payload
+        except (OSError, json.JSONDecodeError):
+            pass
+        return None
+
+    @staticmethod
+    def _is_subagent_header(payload: dict) -> bool:
+        source = payload.get("source")
+        return payload.get("thread_source") == "subagent" or (
+            isinstance(source, dict) and isinstance(source.get("subagent"), dict)
+        )
 
     def _parse_session_file(self, file_path: Path) -> dict | None:
         """Parse a Codex JSONL file to extract session metadata."""

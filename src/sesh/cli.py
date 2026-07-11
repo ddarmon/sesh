@@ -472,19 +472,17 @@ def _resolve_export_source(args: argparse.Namespace):
 
 
 def _resolve_subagents(session, args, *, include_tools, include_thinking):
-    """Discover and load Claude sub-agent threads for view/export.
+    """Discover and load provider-native sub-agent threads for view/export.
 
     Returns a list of ``(SubagentMeta, filtered interior messages)`` pairs, or
-    an empty list for non-Claude providers, when ``--no-agents`` is passed, or
-    when the session has no sub-agents. The interior of each sub-agent gets the
+    an empty list for providers without a loader, when ``--no-agents`` is
+    passed, or when the session has no sub-agents. The interior of each sub-agent gets the
     same tool/thinking filtering applied to the main thread — the collapsed
     block itself is shown regardless (sub-agents are turns, not tool calls).
     """
-    from sesh.models import Provider, filter_messages
+    from sesh.models import filter_messages
 
     if getattr(args, "no_agents", False):
-        return []
-    if session.provider != Provider.CLAUDE:
         return []
 
     provider = _provider_for_session(session, _aggregation_root(args))
@@ -1698,7 +1696,7 @@ def main() -> None:
         "--no-agents",
         dest="no_agents",
         action="store_true",
-        help="Exclude Claude sub-agent (Task/Agent) transcripts from the export",
+        help="Exclude provider-native sub-agent transcripts from the export",
     )
 
     # view
@@ -1758,7 +1756,7 @@ def main() -> None:
         "--no-agents",
         dest="no_agents",
         action="store_true",
-        help="Exclude Claude sub-agent (Task/Agent) transcripts from the view",
+        help="Exclude provider-native sub-agent transcripts from the view",
     )
     p_view.add_argument(
         "--no-open",

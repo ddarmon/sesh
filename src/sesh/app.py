@@ -1427,7 +1427,7 @@ class SeshApp(App):
         self._refresh_status()
 
     def action_toggle_agents(self) -> None:
-        """Toggle splicing of Claude sub-agent threads into the message pane."""
+        """Toggle splicing of provider-native sub-agent threads into the message pane."""
         self._show_agents = not self._show_agents
         # Drop any session-scoped auto-show override (⑂ search hit): after an
         # explicit toggle, `a` alone must deterministically control visibility

@@ -54,12 +54,12 @@ class SessionMeta:
     output_tokens: int | None = None             # Total output across all turns
     cumulative_input_tokens: int | None = None   # Sum of all turns' inputs
     host: str | None = None  # Set in aggregation mode
-    subagent_count: int = 0  # Claude sub-agent transcripts (cheap directory count)
+    subagent_count: int = 0  # Provider-native child-agent transcripts
 
 
 @dataclass
 class SubagentMeta:
-    """Metadata for a Claude Code sub-agent (Task/Agent) transcript.
+    """Metadata for a provider-native sub-agent transcript.
 
     Pairs with ``list[Message]`` (loaded on demand by the provider) rather
     than carrying loaded messages itself.

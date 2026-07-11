@@ -119,7 +119,7 @@ and live updates.
 | `N`      | Jump to the previous transcript match                       |
 | `t`      | Toggle tool call/result visibility                         |
 | `T`      | Toggle thinking/reasoning visibility                       |
-| `a`      | Toggle Claude sub-agent thread visibility                  |
+| `a`      | Toggle provider-native sub-agent thread visibility         |
 | `F`      | Toggle fullscreen message pane                             |
 | `S`      | Open Terminal-tab snapshots (macOS only)                   |
 | `?`      | Show keyboard shortcuts help                               |
@@ -202,11 +202,11 @@ sesh resume last                          # resume the most recent session
 sesh export <session-id> --format json    # export session transcript
 sesh export <session-id> --format html -o out.html  # self-contained HTML (Markdown + LaTeX)
 sesh export <session-id> --full           # export with tools + thinking
-sesh export <session-id> --no-agents      # exclude Claude sub-agent transcripts
+sesh export <session-id> --no-agents      # exclude provider-native sub-agent transcripts
 sesh export last -o transcript.md         # export the most recent session to a file
 sesh view <session-id>                    # render as HTML + open in the browser
 sesh view last --full                     # view most recent, incl. tools + thinking
-sesh view <session-id> --no-agents        # hide Claude sub-agent transcripts
+sesh view <session-id> --no-agents        # hide provider-native sub-agent transcripts
 sesh view <session-id> --no-open          # write the HTML file, just print its path
 sesh view --file /path/archive/abc.jsonl  # render a loose/archived transcript (no index)
 sesh export --file /path/abc.jsonl --format html -o out.html  # archived transcript → HTML

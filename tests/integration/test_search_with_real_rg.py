@@ -516,3 +516,43 @@ def test_aggregated_search_includes_gemini_host(tmp_aggregation_search_dirs) -> 
     assert len(gemini_hits) == 1
     assert gemini_hits[0].host == "laptop"
     assert gemini_hits[0].session_id == "gemini-agg-1"
+
+
+def test_ripgrep_search_codex_subagent_attributes_root(tmp_search_dirs) -> None:
+    """Codex child hits carry the root id, child id, and root rollout path."""
+    _require_rg()
+    root_id = "019f-root"
+    child_id = "019f-child"
+    root_file = tmp_search_dirs["codex_sessions"] / "root.jsonl"
+    child_file = tmp_search_dirs["codex_sessions"] / "child.jsonl"
+    write_jsonl(root_file, [{
+        "type": "session_meta",
+        "timestamp": "2026-07-11T18:00:00Z",
+        "payload": {"id": root_id, "cwd": "/Users/me/codex"},
+    }])
+    write_jsonl(child_file, [
+        {
+            "type": "session_meta",
+            "timestamp": "2026-07-11T18:00:01Z",
+            "payload": {
+                "id": child_id,
+                "session_id": root_id,
+                "parent_thread_id": root_id,
+                "thread_source": "subagent",
+                "cwd": "/Users/me/codex",
+                "agent_path": "/root/reviewer",
+            },
+        },
+        {
+            "type": "event_msg",
+            "timestamp": "2026-07-11T18:00:02Z",
+            "payload": {"type": "agent_message", "message": "unique child needle"},
+        },
+    ])
+
+    hits = [r for r in search.ripgrep_search("unique child needle") if r.provider is Provider.CODEX]
+
+    assert len(hits) == 1
+    assert hits[0].session_id == root_id
+    assert hits[0].agent_id == child_id
+    assert hits[0].file_path == str(root_file)
