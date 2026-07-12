@@ -564,6 +564,7 @@ the index, then query it.
 | `sesh resume <id\|last> [--provider NAME]`                                                                | Resume a session in its provider's CLI   |
 | `sesh export <id\|last> [--provider NAME] [--format md/json/html] [-o FILE] [--include-tools] [--include-thinking] [--full] [--no-agents]` | Export a session to Markdown, JSON, or HTML |
 | `sesh view <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--no-agents] [--no-open]` | Render a session as HTML and open it in the browser |
+| `sesh follow <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--no-agents] [--no-open]` | Open a live-updating browser view until Ctrl-C |
 | `sesh move <old> <new> [--metadata-only] [--dry-run]`                                                     | Move project path and update metadata    |
 | `sesh snapshot save`                                                                                      | Capture Terminal.app tabs (macOS only)   |
 | `sesh snapshot list`                                                                                      | List stored snapshots                    |
