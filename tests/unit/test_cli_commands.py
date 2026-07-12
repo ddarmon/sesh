@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -1448,6 +1449,51 @@ def test_cmd_view_opens_browser_by_default(monkeypatch, capsys, tmp_cache_dir) -
     assert url.startswith("file://")
     assert url.endswith("ffff0000aa.html")
     assert new == 0  # new=0 asks the browser to reuse the existing tab
+
+
+def test_cmd_follow_opens_live_view_until_interrupted(monkeypatch, capsys) -> None:
+    """'sesh follow' opens the live URL and stops its server on Ctrl-C."""
+    session = make_session(id="live123", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="live message")]
+    provider = SimpleNamespace(get_messages=lambda _session: messages)
+    monkeypatch.setattr(cli, "_resolve_export_source", lambda args: (session, messages))
+    monkeypatch.setattr(cli, "_provider_for_session", lambda *a, **k: provider)
+    monkeypatch.setattr(cli, "_resolve_subagents", lambda *a, **k: [])
+
+    state = {"stopped": False, "snapshot": None}
+
+    class FakeServer:
+        def __init__(self, loader):
+            self.loader = loader
+
+        def start(self):
+            state["snapshot"] = self.loader()
+            return "http://127.0.0.1:4321/private/"
+
+        def stop(self):
+            state["stopped"] = True
+
+    monkeypatch.setattr("sesh.liveview.LiveViewServer", FakeServer)
+    monkeypatch.setattr("threading.Event.wait", lambda self: (_ for _ in ()).throw(KeyboardInterrupt))
+    opened: list[tuple[str, int]] = []
+    monkeypatch.setattr("webbrowser.open", lambda url, new=0: opened.append((url, new)))
+
+    cli.cmd_follow(
+        _ns(
+            session_id="live123",
+            provider=None,
+            include_tools=False,
+            include_thinking=False,
+            full=False,
+            no_agents=False,
+            no_open=False,
+        )
+    )
+
+    assert capsys.readouterr().out.strip() == "http://127.0.0.1:4321/private/"
+    assert opened == [("http://127.0.0.1:4321/private/", 0)]
+    assert state["snapshot"] == (session, messages, [])
+    assert state["stopped"] is True
 
 
 def test_cmd_view_full_includes_tools_and_thinking(monkeypatch, capsys, tmp_cache_dir) -> None:

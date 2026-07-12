@@ -1145,6 +1145,56 @@ def cmd_view(args: argparse.Namespace) -> None:
         webbrowser.open(out_path.as_uri(), new=0)
 
 
+def cmd_follow(args: argparse.Namespace) -> None:
+    """Open a live-updating HTML view and serve it until interrupted."""
+    import threading
+    import webbrowser
+
+    from sesh.liveview import LiveViewError, LiveViewServer
+    from sesh.models import filter_messages
+
+    session, _messages = _resolve_export_source(args)
+    provider = _provider_for_session(session, _aggregation_root(args))
+    if provider is None:
+        print(f"Follow failed: no provider for {session.provider.value}", file=sys.stderr)
+        raise SystemExit(1)
+
+    include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
+    include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
+
+    def load_snapshot():
+        messages = filter_messages(
+            provider.get_messages(session),
+            include_tools=include_tools,
+            include_thinking=include_thinking,
+        )
+        subagents = _resolve_subagents(
+            session,
+            args,
+            include_tools=include_tools,
+            include_thinking=include_thinking,
+        )
+        return session, messages, subagents
+
+    server = LiveViewServer(load_snapshot)
+    try:
+        url = server.start()
+    except LiveViewError as exc:
+        print(f"Follow failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    print(url, flush=True)
+    if not getattr(args, "no_open", False):
+        webbrowser.open(url, new=0)
+
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop()
+
+
 def cmd_snapshot_save(args: argparse.Namespace) -> None:
     """Capture the current Terminal state and save it to disk."""
     from sesh import snapshots
@@ -1308,6 +1358,7 @@ def main() -> None:
             "  sesh resume <id>        # resume a session in its provider's CLI\n"
             "  sesh export <id>        # export a session to Markdown or JSON\n"
             "  sesh view <id>          # render a session as HTML in the browser\n"
+            "  sesh follow <id>        # follow a session live in the browser\n"
             "  sesh move <old> <new>   # move project path + update metadata\n"
             "  sesh snapshot save      # capture Terminal.app tabs (macOS only)"
         ),
@@ -1768,6 +1819,54 @@ def main() -> None:
         help="Write the HTML file and print its path without opening a browser",
     )
 
+    # follow
+    p_follow = sub.add_parser(
+        "follow",
+        help="Open a live-updating session view in the browser",
+        description=(
+            "Serve a session as a live-updating HTML page and open it in the "
+            "default browser. The command remains running until interrupted "
+            "with Ctrl-C. This is the command-line equivalent of pressing L "
+            "in the TUI."
+        ),
+    )
+    p_follow.add_argument(
+        "session_id",
+        help="The session ID to follow, or 'last' for the most recent session",
+    )
+    p_follow.add_argument(
+        "--provider",
+        metavar="NAME",
+        choices=PROVIDER_CHOICES,
+        help="Disambiguate if the same ID exists in multiple providers",
+    )
+    p_follow.add_argument(
+        "--include-tools",
+        action="store_true",
+        help="Include tool call and result messages",
+    )
+    p_follow.add_argument(
+        "--include-thinking",
+        action="store_true",
+        help="Include thinking/reasoning messages",
+    )
+    p_follow.add_argument(
+        "--full",
+        action="store_true",
+        help="Include all message types (tools + thinking)",
+    )
+    p_follow.add_argument(
+        "--no-agents",
+        dest="no_agents",
+        action="store_true",
+        help="Exclude provider-native sub-agent transcripts from the view",
+    )
+    p_follow.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Print the live URL without opening a browser",
+    )
+
     # move
     p_move = sub.add_parser(
         "move",
@@ -1888,6 +1987,8 @@ def main() -> None:
         cmd_export(args)
     elif args.command == "view":
         cmd_view(args)
+    elif args.command == "follow":
+        cmd_follow(args)
     elif args.command == "move":
         cmd_move(args)
     elif args.command == "snapshot":

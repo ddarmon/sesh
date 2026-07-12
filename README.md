@@ -205,6 +205,7 @@ sesh export <session-id> --full           # export with tools + thinking
 sesh export <session-id> --no-agents      # exclude provider-native sub-agent transcripts
 sesh export last -o transcript.md         # export the most recent session to a file
 sesh view <session-id>                    # render as HTML + open in the browser
+sesh follow <session-id>                  # live-updating HTML; Ctrl-C to stop
 sesh view last --full                     # view most recent, incl. tools + thinking
 sesh view <session-id> --no-agents        # hide provider-native sub-agent transcripts
 sesh view <session-id> --no-open          # write the HTML file, just print its path
@@ -553,4 +554,3 @@ src/sesh/
     opencode.py      # opencode SQLite + legacy JSON parser
   snapshots/         # Terminal.app snapshot core and backend
 ```
-
