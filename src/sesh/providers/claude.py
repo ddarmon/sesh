@@ -21,6 +21,7 @@ from sesh.models import (
     encode_claude_path,
 )
 from sesh.providers import SessionProvider
+from sesh.providers.history import active_ancestor_ids
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
@@ -58,6 +59,94 @@ def _is_system_message(text: str) -> bool:
     if not text:
         return True
     return any(text.startswith(p) for p in SYSTEM_PREFIXES)
+
+
+def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
+    """Return the active UUID ancestry for a Claude session.
+
+    Current Claude writes an explicit ``last-prompt.leafUuid``. Older linear
+    files are projected only when they have one unambiguous leaf; otherwise
+    callers retain the legacy linear transcript.
+    """
+    parents: dict[str, str | None] = {}
+    explicit_leaf: str | None = None
+    unlinked_message = False
+    try:
+        for file_path in files:
+            with open(file_path) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if not isinstance(entry, dict) or entry.get("sessionId") != session_id:
+                        continue
+                    if entry.get("type") == "last-prompt" and isinstance(entry.get("leafUuid"), str):
+                        explicit_leaf = entry["leafUuid"]
+                    entry_id = entry.get("uuid")
+                    if isinstance(entry_id, str) and entry_id:
+                        parent = entry.get("parentUuid")
+                        parents[entry_id] = parent if isinstance(parent, str) else None
+                    elif isinstance(entry.get("message"), dict):
+                        unlinked_message = True
+    except OSError:
+        return None
+
+    if unlinked_message:
+        return None
+
+    leaf = explicit_leaf
+    if leaf is None and parents:
+        parent_ids = {parent for parent in parents.values() if parent is not None}
+        leaves = [entry_id for entry_id in parents if entry_id not in parent_ids]
+        if len(leaves) == 1:
+            leaf = leaves[0]
+    return active_ancestor_ids(parents, leaf)
+
+
+def _claude_active_metadata(
+    files: list[Path], session_id: str, active_ids: set[str] | None
+) -> dict | None:
+    """Collect branch-sensitive discovery fields in a streaming pass."""
+    if active_ids is None:
+        return None
+    result = {"message_count": 0, "last_user_message": None, "model": None, "input_tokens": None}
+    try:
+        for file_path in files:
+            with open(file_path) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if (
+                        not isinstance(entry, dict)
+                        or entry.get("sessionId") != session_id
+                        or entry.get("uuid") not in active_ids
+                    ):
+                        continue
+                    msg = entry.get("message")
+                    if not isinstance(msg, dict):
+                        continue
+                    role = msg.get("role")
+                    result["message_count"] += 1
+                    if role == "user":
+                        text = _extract_text(msg.get("content", ""))
+                        if text and not _is_system_message(text):
+                            result["last_user_message"] = text
+                    elif role == "assistant":
+                        if msg.get("model"):
+                            result["model"] = msg["model"]
+                        usage = msg.get("usage")
+                        if isinstance(usage, dict):
+                            result["input_tokens"] = (
+                                usage.get("input_tokens", 0)
+                                + usage.get("cache_creation_input_tokens", 0)
+                                + usage.get("cache_read_input_tokens", 0)
+                            )
+    except OSError:
+        return None
+    return result
 
 
 def _parse_timestamp(ts) -> datetime:
@@ -688,7 +777,7 @@ class ClaudeProvider(SessionProvider):
         return sessions
 
     def get_messages(self, session: SessionMeta) -> list[Message]:
-        """Load all messages for a session from its source JSONL file."""
+        """Load messages on the active Claude conversation branch."""
         if not session.source_path:
             return []
 
@@ -709,6 +798,7 @@ class ClaudeProvider(SessionProvider):
         else:
             jsonl_files = [source_dir]
 
+        active_ids = _claude_active_ids(jsonl_files, session.id)
         for jsonl_file in jsonl_files:
             try:
                 with open(jsonl_file) as f:
@@ -724,6 +814,8 @@ class ClaudeProvider(SessionProvider):
                             continue
 
                         if entry.get("sessionId") != session.id:
+                            continue
+                        if active_ids is not None and entry.get("uuid") not in active_ids:
                             continue
 
                         msg = entry.get("message")
@@ -1171,10 +1263,17 @@ class ClaudeProvider(SessionProvider):
             if sid not in grouped_ids:
                 result_ids.add(sid)
 
-        # Build SessionMeta list
+        # Build SessionMeta list. Branch-sensitive fields get one additional
+        # streaming pass; cumulative usage above intentionally includes paid
+        # work on abandoned branches.
         result = []
         for sid in result_ids:
             s = sessions[sid]
+            active = _claude_active_metadata(
+                jsonl_files, sid, _claude_active_ids(jsonl_files, sid)
+            )
+            if active is not None:
+                s.update(active)
             summary = s["summary"]
             if not summary:
                 if s["last_user_message"]:

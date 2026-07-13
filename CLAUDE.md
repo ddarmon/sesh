@@ -98,7 +98,10 @@ The pi encoded directory wraps the cwd with leading and trailing `--`
 (e.g. `/Users/me/proj` -\> `--Users-me-proj--`). Each session is one
 JSONL file named `{ISO-timestamp}_{uuid}.jsonl`; the first line is a
 `type:"session"` header carrying the cwd. The provider always recovers
-the real cwd from that header, never from the encoded folder name.
+the real cwd from that header, never from the encoded folder name. Pi
+rewinds preserve sibling branches through `id` / `parentId`; branch-only
+navigation is ephemeral, so the final appended node is Pi's persisted resume
+leaf and sesh projects its ancestry before loading messages.
 
 The Gemini CLI `{dir}` component is either SHA-256 of the project cwd or
 a friendly name assigned in `~/.gemini/projects.json` (a `{path: name}`
@@ -249,6 +252,18 @@ is an alias of `export.format_duration`.
 Sesh uses the provider-neutral `SubagentMeta` + `load_subagents(session)` API to
 render child-agent threads in the TUI and exports. Claude and Codex currently
 implement this API.
+
+### Rewind and rollback history
+
+Provider files can retain abandoned conversation records. Sesh reconstructs the
+active logical transcript before normalizing messages: Pi follows `id` /
+`parentId` from the final appended node, Claude follows `uuid` / `parentUuid`
+from `last-prompt.leafUuid` (with conservative legacy fallback), and Codex
+replays `thread_rolled_back.num_turns` over `task_started` / `task_complete`
+turns. Active history drives transcript message counts, summaries, and final
+context usage; cumulative token/output totals continue to include abandoned API
+work because that work was actually incurred. The metadata cache version must
+be bumped whenever these reconstruction semantics change.
 
 ### Codex native subagents
 

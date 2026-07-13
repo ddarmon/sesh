@@ -138,6 +138,66 @@ def _rewrite_codex_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> bool
     return True
 
 
+def _active_dialogue_metadata(file_path: Path) -> tuple[int, str | None]:
+    """Replay Codex turn boundaries and return active dialogue metadata."""
+    turns: list[tuple[int, str | None]] = []
+    current: tuple[int, str | None] | None = None
+    ungrouped_count = 0
+    ungrouped_first: str | None = None
+    saw_boundaries = False
+    try:
+        with open(file_path) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                payload = entry.get("payload") or {}
+                event_type = payload.get("type") if entry.get("type") == "event_msg" else None
+                if event_type == "task_started":
+                    saw_boundaries = True
+                    current = (0, None)
+                    continue
+                if event_type == "task_complete":
+                    if current is not None:
+                        turns.append(current)
+                        current = None
+                    continue
+                if event_type == "thread_rolled_back":
+                    count = payload.get("num_turns")
+                    if isinstance(count, int) and count > 0 and turns:
+                        remove = min(count, len(turns))
+                        del turns[-remove:]
+                    current = None
+                    continue
+
+                text: str | None = None
+                is_dialogue = False
+                if event_type == "user_message":
+                    is_dialogue = True
+                    text = payload.get("message") or None
+                elif entry.get("type") == "response_item" and payload.get("role") == "assistant":
+                    is_dialogue = True
+                if not is_dialogue:
+                    continue
+                if current is not None:
+                    count, first = current
+                    current = (count + 1, first or text)
+                else:
+                    ungrouped_count += 1
+                    ungrouped_first = ungrouped_first or text
+    except OSError:
+        return 0, None
+
+    if not saw_boundaries:
+        return ungrouped_count, ungrouped_first
+    if current is not None:
+        turns.append(current)
+    count = sum(turn[0] for turn in turns)
+    first = next((turn[1] for turn in turns if turn[1]), None)
+    return count, first
+
+
 class CodexProvider(SessionProvider):
     """Provider for OpenAI Codex CLI sessions."""
 
@@ -220,6 +280,8 @@ class CodexProvider(SessionProvider):
             return [], None
 
         messages: list[Message] = []
+        completed_turn_starts: list[int] = []
+        current_turn_start: int | None = None
         output_tokens: int | None = None
         # A subagent rollout begins with a physical copy of the parent's context.
         # Its plaintext NEW_TASK handoff is the first child-owned record.
@@ -239,6 +301,23 @@ class CodexProvider(SessionProvider):
                     entry_type = entry.get("type", "")
                     payload = entry.get("payload", {})
                     ts = _parse_timestamp(entry.get("timestamp", ""))
+                    event_type = payload.get("type") if entry_type == "event_msg" else None
+
+                    if child_started and event_type == "task_started":
+                        current_turn_start = len(messages)
+                    elif child_started and event_type == "task_complete":
+                        if current_turn_start is not None:
+                            completed_turn_starts.append(current_turn_start)
+                            current_turn_start = None
+                    elif child_started and event_type == "thread_rolled_back":
+                        count = payload.get("num_turns")
+                        if isinstance(count, int) and count > 0 and completed_turn_starts:
+                            remove = min(count, len(completed_turn_starts))
+                            cut = completed_turn_starts[-remove]
+                            del messages[cut:]
+                            del completed_turn_starts[-remove:]
+                            current_turn_start = None
+                        continue
 
                     if not child_started:
                         content = payload.get("content")
@@ -586,9 +665,13 @@ class CodexProvider(SessionProvider):
                         except json.JSONDecodeError:
                             continue
 
+                    # A cheap second streaming pass replays turn boundaries;
+                    # it does not invoke lazy transcript/sub-agent loading.
+                    msg_count, first_active_user = _active_dialogue_metadata(file_path)
+                    first_active_user = first_active_user or first_user_msg
                     summary = "Codex Session"
-                    if first_user_msg:
-                        summary = first_user_msg[:80] + ("..." if len(first_user_msg) > 80 else "")
+                    if first_active_user:
+                        summary = first_active_user[:80] + ("..." if len(first_active_user) > 80 else "")
 
                     return {
                         "id": session_id,
