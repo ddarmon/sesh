@@ -12,7 +12,8 @@ from sesh.paths import CACHE_DIR
 
 CACHE_FILE = CACHE_DIR / "sessions.json"
 INDEX_FILE = CACHE_DIR / "index.json"
-CACHE_VERSION = 2
+# v3 invalidates metadata computed before active rewind branches were replayed.
+CACHE_VERSION = 3
 
 
 def _session_to_dict(s: SessionMeta) -> dict:

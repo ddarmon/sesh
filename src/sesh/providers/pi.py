@@ -23,6 +23,7 @@ from pathlib import Path
 from sesh.models import Message, MoveReport, Provider, SessionMeta
 from sesh.providers import SessionProvider
 from sesh.providers.claude import SYSTEM_PREFIXES, _is_system_message
+from sesh.providers.history import active_ancestor_ids
 
 PI_DIR = Path.home() / ".pi" / "agent"
 SESSIONS_DIR = PI_DIR / "sessions"
@@ -84,6 +85,39 @@ def _extract_project_path(project_dir: Path) -> str | None:
 
 def _display_name_from_path(project_path: str) -> str:
     return Path(project_path).name or project_path
+
+
+def _pi_active_ids(file_path: Path) -> set[str] | None:
+    """Return ids on Pi's persisted branch (the final appended node)."""
+    parents: dict[str, str | None] = {}
+    leaf_id: str | None = None
+    try:
+        with open(file_path) as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                entry_id = entry.get("id")
+                if not isinstance(entry_id, str) or not entry_id:
+                    continue
+                # The session header is metadata, not part of the parent-linked
+                # history (model_change is Pi's first persisted branch node).
+                if entry.get("type") == "session":
+                    continue
+                parent = entry.get("parentId")
+                parents[entry_id] = parent if isinstance(parent, str) else None
+                leaf_id = entry_id
+    except OSError:
+        return None
+    # Older/synthetic files may give every message a null parent. There is no
+    # usable lineage in that shape, so preserve the legacy linear transcript.
+    roots = sum(parent is None for parent in parents.values())
+    if roots != 1:
+        return None
+    return active_ancestor_ids(parents, leaf_id)
 
 
 def _rewrite_cwd_in_pi_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> bool:
@@ -218,13 +252,14 @@ class PiProvider(SessionProvider):
         return result
 
     def get_messages(self, session: SessionMeta) -> list[Message]:
-        """Load messages from a pi session JSONL file."""
+        """Load messages on the persisted active branch of a pi session."""
         if not session.source_path:
             return []
         file_path = Path(session.source_path)
         if not file_path.is_file():
             return []
 
+        active_ids = _pi_active_ids(file_path)
         messages: list[Message] = []
         tool_id_map: dict[str, str] = {}
 
@@ -240,6 +275,8 @@ class PiProvider(SessionProvider):
                         continue
 
                     if entry.get("type") != "message":
+                        continue
+                    if active_ids is not None and entry.get("id") not in active_ids:
                         continue
 
                     msg = entry.get("message")
@@ -460,6 +497,7 @@ class PiProvider(SessionProvider):
         cumul_input_tokens = 0
         output_tokens = 0
         saw_usage = False
+        active_ids = _pi_active_ids(file_path)
 
         try:
             with open(file_path) as f:
@@ -490,6 +528,7 @@ class PiProvider(SessionProvider):
                     if not isinstance(msg, dict):
                         continue
 
+                    is_active = active_ids is None or entry.get("id") in active_ids
                     ts = entry.get("timestamp") or msg.get("timestamp")
                     if ts:
                         parsed = _parse_timestamp(ts)
@@ -499,17 +538,17 @@ class PiProvider(SessionProvider):
                             last_ts = parsed
 
                     role = msg.get("role")
-                    if role in ("user", "assistant"):
+                    if is_active and role in ("user", "assistant"):
                         message_count += 1
 
-                    if role == "user" and first_user_msg is None:
+                    if is_active and role == "user" and first_user_msg is None:
                         text = _first_text_block(msg.get("content"))
                         if text and not _is_system_message(text):
                             first_user_msg = text
 
                     if role == "assistant":
                         m = msg.get("model")
-                        if m:
+                        if is_active and m:
                             model = m
                         usage = msg.get("usage")
                         if isinstance(usage, dict):
@@ -519,7 +558,8 @@ class PiProvider(SessionProvider):
                                 + int(usage.get("cacheRead", 0) or 0)
                                 + int(usage.get("cacheWrite", 0) or 0)
                             )
-                            last_input_tokens = turn_input
+                            if is_active:
+                                last_input_tokens = turn_input
                             cumul_input_tokens += turn_input
                             output_tokens += int(usage.get("output", 0) or 0)
         except OSError:
