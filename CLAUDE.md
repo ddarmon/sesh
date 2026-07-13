@@ -260,10 +260,19 @@ active logical transcript before normalizing messages: Pi follows `id` /
 `parentId` from the final appended node, Claude follows `uuid` / `parentUuid`
 from `last-prompt.leafUuid` (with conservative legacy fallback), and Codex
 replays `thread_rolled_back.num_turns` over `task_started` / `task_complete`
-turns. Active history drives transcript message counts, summaries, and final
-context usage; cumulative token/output totals continue to include abandoned API
-work because that work was actually incurred. The metadata cache version must
-be bumped whenever these reconstruction semantics change.
+turns. Two Claude records are live despite sitting off the single leaf chain
+and are handled explicitly: a compaction boundary (`parentUuid: null`) is
+bridged via its `logicalParentUuid` so pre-compaction history is retained, and
+sibling `tool_result` records answering an active `tool_use` (parallel tool
+calls) are re-admitted. Codex turn replay treats a `task_started` arriving
+mid-turn as closing the open turn (aborted/nested turns keep their dialogue),
+and only records the transcript actually renders count as turn dialogue.
+During Claude discovery, lineage and branch-sensitive metadata are collected
+inline in `_parse_sessions`' single directory scan (never re-read per
+session). Active history drives transcript message counts, summaries, and
+final context usage; cumulative token/output totals continue to include
+abandoned API work because that work was actually incurred. The metadata cache
+version must be bumped whenever these reconstruction semantics change.
 
 ### Codex native subagents
 

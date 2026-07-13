@@ -61,16 +61,176 @@ def _is_system_message(text: str) -> bool:
     return any(text.startswith(p) for p in SYSTEM_PREFIXES)
 
 
+def _record_parent(entry: dict) -> str | None:
+    """Resolve the logical parent UUID of a record.
+
+    Normally ``parentUuid`` links a record to its predecessor. A compaction
+    boundary record, however, sets ``parentUuid: null`` and carries the real
+    pre-compaction chain in ``logicalParentUuid`` — following only
+    ``parentUuid`` there would sever (and abandon) all pre-compaction history.
+    So when ``parentUuid`` is null/absent and ``logicalParentUuid`` is a
+    string, we bridge across the boundary via the logical parent.
+    """
+    parent = entry.get("parentUuid")
+    if isinstance(parent, str):
+        return parent
+    logical = entry.get("logicalParentUuid")
+    if parent is None and isinstance(logical, str):
+        return logical
+    return None
+
+
+def _content_tool_ids(msg) -> tuple[set[str], set[str]]:
+    """Return (tool_use block ids, tool_result answered ids) from a message.
+
+    Claude writes each ``tool_use`` block as its own assistant record; with
+    parallel tool calls, each sibling ``tool_result`` attaches (via
+    ``parentUuid``) to its own ``tool_use`` record, so only one sits on the
+    single leaf-ancestry chain. The others are live conversation, recoverable
+    by matching their ``tool_use_id`` against ``tool_use`` ids found on active
+    records.
+    """
+    uses: set[str] = set()
+    results: set[str] = set()
+    if not isinstance(msg, dict):
+        return uses, results
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return uses, results
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "tool_use":
+            bid = block.get("id")
+            if isinstance(bid, str) and bid:
+                uses.add(bid)
+        elif btype == "tool_result":
+            tid = block.get("tool_use_id")
+            if isinstance(tid, str) and tid:
+                results.add(tid)
+    return uses, results
+
+
+def _resolve_leaf(parents: dict[str, str | None], explicit_leaf: str | None) -> str | None:
+    """Pick the ancestry leaf: an explicit ``last-prompt`` leaf, else the
+    single unambiguous leaf of the parents graph (None keeps legacy linear)."""
+    if explicit_leaf is not None:
+        return explicit_leaf
+    if not parents:
+        return None
+    parent_ids = {parent for parent in parents.values() if parent is not None}
+    leaves = [entry_id for entry_id in parents if entry_id not in parent_ids]
+    return leaves[0] if len(leaves) == 1 else None
+
+
+def _expand_active_tool_results(
+    active: set[str],
+    tool_use_by_uuid: dict[str, set[str]],
+    tool_result_by_uuid: dict[str, set[str]],
+) -> set[str]:
+    """Admit off-chain ``tool_result`` records answering active ``tool_use``s.
+
+    A single expansion pass: gather every ``tool_use`` id present on an active
+    record, then admit any record whose ``tool_result`` blocks answer one of
+    them. tool_result records carry no tool_use blocks, so no cascade is
+    possible — one pass is complete.
+    """
+    active_tool_uses: set[str] = set()
+    for uid in active:
+        active_tool_uses |= tool_use_by_uuid.get(uid, set())
+    if not active_tool_uses:
+        return active
+    expanded = set(active)
+    for uid, answered in tool_result_by_uuid.items():
+        if uid not in expanded and answered & active_tool_uses:
+            expanded.add(uid)
+    return expanded
+
+
+def _active_ids_from_maps(
+    parents: dict[str, str | None],
+    explicit_leaf: str | None,
+    unlinked_message: bool,
+    tool_use_by_uuid: dict[str, set[str]],
+    tool_result_by_uuid: dict[str, set[str]],
+) -> set[str] | None:
+    """Project the active id set from pre-collected lineage/tool maps (pure).
+
+    Shared by the ``get_messages`` streaming path and ``_parse_sessions``'
+    single-scan derivation so both agree on what is active. ``None`` means the
+    lineage is unusable and callers keep their legacy linear transcript.
+    """
+    if unlinked_message:
+        return None
+    leaf = _resolve_leaf(parents, explicit_leaf)
+    active = active_ancestor_ids(parents, leaf)
+    if active is None:
+        return None
+    return _expand_active_tool_results(active, tool_use_by_uuid, tool_result_by_uuid)
+
+
+def _collected_active_fields(s: dict) -> dict | None:
+    """Derive branch-sensitive discovery fields from a session's collected maps.
+
+    Pure: consumes the ``_parents`` / ``_leaf`` / ``_unlinked`` / ``_records``
+    maps gathered during :meth:`ClaudeProvider._parse_sessions`' single scan and
+    reproduces exactly what a second streaming pass over the active records
+    would compute (``message_count``, last non-system ``last_user_message``,
+    final ``model``, and last-turn context ``input_tokens``) — with no extra
+    file reads. Returns ``None`` when the lineage is unusable so callers keep
+    the legacy linear values. "Last" fields resolve by scan order.
+    """
+    records = s["_records"]
+    active = _active_ids_from_maps(
+        s["_parents"],
+        s["_leaf"],
+        s["_unlinked"],
+        {uid: rec["uses"] for uid, rec in records.items() if "uses" in rec},
+        {uid: rec["results"] for uid, rec in records.items() if "results" in rec},
+    )
+    if active is None:
+        return None
+
+    message_count = 0
+    last_user: tuple[int, str | None] = (-1, None)
+    model: tuple[int, str | None] = (-1, None)
+    input_tokens: tuple[int, int | None] = (-1, None)
+    for uid in active:
+        rec = records.get(uid)
+        if rec is None:
+            continue
+        if rec.get("msg"):
+            message_count += 1
+        order = rec["order"]
+        if "user_text" in rec and order > last_user[0]:
+            last_user = (order, rec["user_text"])
+        if "model" in rec and order > model[0]:
+            model = (order, rec["model"])
+        if "input" in rec and order > input_tokens[0]:
+            input_tokens = (order, rec["input"])
+    return {
+        "message_count": message_count,
+        "last_user_message": last_user[1],
+        "model": model[1],
+        "input_tokens": input_tokens[1],
+    }
+
+
 def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
-    """Return the active UUID ancestry for a Claude session.
+    """Return the active UUID set for a Claude session (streaming, on-demand).
 
     Current Claude writes an explicit ``last-prompt.leafUuid``. Older linear
     files are projected only when they have one unambiguous leaf; otherwise
-    callers retain the legacy linear transcript.
+    callers retain the legacy linear transcript. Compaction boundaries are
+    bridged via ``logicalParentUuid`` and off-chain parallel ``tool_result``
+    records answering active ``tool_use``s are re-admitted.
     """
     parents: dict[str, str | None] = {}
     explicit_leaf: str | None = None
     unlinked_message = False
+    tool_use_by_uuid: dict[str, set[str]] = {}
+    tool_result_by_uuid: dict[str, set[str]] = {}
     try:
         for file_path in files:
             with open(file_path) as f:
@@ -85,68 +245,20 @@ def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
                         explicit_leaf = entry["leafUuid"]
                     entry_id = entry.get("uuid")
                     if isinstance(entry_id, str) and entry_id:
-                        parent = entry.get("parentUuid")
-                        parents[entry_id] = parent if isinstance(parent, str) else None
+                        parents[entry_id] = _record_parent(entry)
+                        uses, results = _content_tool_ids(entry.get("message"))
+                        if uses:
+                            tool_use_by_uuid[entry_id] = uses
+                        if results:
+                            tool_result_by_uuid[entry_id] = results
                     elif isinstance(entry.get("message"), dict):
                         unlinked_message = True
     except OSError:
         return None
 
-    if unlinked_message:
-        return None
-
-    leaf = explicit_leaf
-    if leaf is None and parents:
-        parent_ids = {parent for parent in parents.values() if parent is not None}
-        leaves = [entry_id for entry_id in parents if entry_id not in parent_ids]
-        if len(leaves) == 1:
-            leaf = leaves[0]
-    return active_ancestor_ids(parents, leaf)
-
-
-def _claude_active_metadata(
-    files: list[Path], session_id: str, active_ids: set[str] | None
-) -> dict | None:
-    """Collect branch-sensitive discovery fields in a streaming pass."""
-    if active_ids is None:
-        return None
-    result = {"message_count": 0, "last_user_message": None, "model": None, "input_tokens": None}
-    try:
-        for file_path in files:
-            with open(file_path) as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line)
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-                    if (
-                        not isinstance(entry, dict)
-                        or entry.get("sessionId") != session_id
-                        or entry.get("uuid") not in active_ids
-                    ):
-                        continue
-                    msg = entry.get("message")
-                    if not isinstance(msg, dict):
-                        continue
-                    role = msg.get("role")
-                    result["message_count"] += 1
-                    if role == "user":
-                        text = _extract_text(msg.get("content", ""))
-                        if text and not _is_system_message(text):
-                            result["last_user_message"] = text
-                    elif role == "assistant":
-                        if msg.get("model"):
-                            result["model"] = msg["model"]
-                        usage = msg.get("usage")
-                        if isinstance(usage, dict):
-                            result["input_tokens"] = (
-                                usage.get("input_tokens", 0)
-                                + usage.get("cache_creation_input_tokens", 0)
-                                + usage.get("cache_read_input_tokens", 0)
-                            )
-    except OSError:
-        return None
-    return result
+    return _active_ids_from_maps(
+        parents, explicit_leaf, unlinked_message, tool_use_by_uuid, tool_result_by_uuid
+    )
 
 
 def _parse_timestamp(ts) -> datetime:
@@ -1186,9 +1298,55 @@ class ClaudeProvider(SessionProvider):
                                 "input_tokens": 0,
                                 "output_tokens": 0,
                                 "cumulative_input_tokens": 0,
+                                # Active-branch reconstruction inputs, collected
+                                # during THIS single scan so no per-session
+                                # re-read is needed (see _collected_active_fields):
+                                # uuid -> logical parent, the explicit last-prompt
+                                # leaf, whether any linked-message record lacked a
+                                # uuid, and per-uuid branch-sensitive metadata.
+                                "_parents": {},
+                                "_leaf": None,
+                                "_unlinked": False,
+                                "_records": {},
+                                "_order": 0,
                             }
 
                         s = sessions[session_id]
+
+                        # Collect lineage + branch-sensitive metadata inline.
+                        if entry_type == "last-prompt" and isinstance(entry.get("leafUuid"), str):
+                            s["_leaf"] = entry["leafUuid"]
+                        entry_id = entry.get("uuid")
+                        entry_msg = entry.get("message")
+                        if isinstance(entry_id, str) and entry_id:
+                            s["_parents"][entry_id] = _record_parent(entry)
+                            rec: dict = {"order": s["_order"]}
+                            s["_order"] += 1
+                            if isinstance(entry_msg, dict):
+                                rec["msg"] = True
+                                rec_role = entry_msg.get("role")
+                                if rec_role == "user":
+                                    rec_text = _extract_text(entry_msg.get("content", ""))
+                                    if rec_text and not _is_system_message(rec_text):
+                                        rec["user_text"] = rec_text
+                                elif rec_role == "assistant":
+                                    if entry_msg.get("model"):
+                                        rec["model"] = entry_msg["model"]
+                                    rec_usage = entry_msg.get("usage")
+                                    if isinstance(rec_usage, dict):
+                                        rec["input"] = (
+                                            rec_usage.get("input_tokens", 0)
+                                            + rec_usage.get("cache_creation_input_tokens", 0)
+                                            + rec_usage.get("cache_read_input_tokens", 0)
+                                        )
+                                uses, results = _content_tool_ids(entry_msg)
+                                if uses:
+                                    rec["uses"] = uses
+                                if results:
+                                    rec["results"] = results
+                            s["_records"][entry_id] = rec
+                        elif isinstance(entry_msg, dict):
+                            s["_unlinked"] = True
 
                         # Update timestamp
                         ts = entry.get("timestamp")
@@ -1263,15 +1421,14 @@ class ClaudeProvider(SessionProvider):
             if sid not in grouped_ids:
                 result_ids.add(sid)
 
-        # Build SessionMeta list. Branch-sensitive fields get one additional
-        # streaming pass; cumulative usage above intentionally includes paid
-        # work on abandoned branches.
+        # Build SessionMeta list. Branch-sensitive fields are derived from data
+        # collected during the single scan above (no per-session re-read);
+        # cumulative usage intentionally includes paid work on abandoned
+        # branches.
         result = []
         for sid in result_ids:
             s = sessions[sid]
-            active = _claude_active_metadata(
-                jsonl_files, sid, _claude_active_ids(jsonl_files, sid)
-            )
+            active = _collected_active_fields(s)
             if active is not None:
                 s.update(active)
             summary = s["summary"]

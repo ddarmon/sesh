@@ -139,12 +139,39 @@ def _rewrite_codex_jsonl(jsonl_file: Path, old_path: str, new_path: str) -> bool
 
 
 def _active_dialogue_metadata(file_path: Path) -> tuple[int, str | None]:
-    """Replay Codex turn boundaries and return active dialogue metadata."""
+    """Replay Codex turn boundaries and return active dialogue metadata.
+
+    Turn bookkeeping (kept identical to the cut logic in
+    ``_parse_rollout_file`` so the metadata count and the actual transcript
+    always agree):
+
+    * ``task_started`` closes any in-progress turn -- flushing it as a
+      completed turn rather than discarding its dialogue -- and opens a
+      fresh one. This preserves aborted turns and nested ``task_started``
+      sequences.
+    * ``task_complete`` closes the in-progress turn.
+    * Any dialogue record with no turn open starts an implicit turn, so
+      dialogue outside an explicit ``task_started``/``task_complete`` pair
+      (before the first turn, or between turns) counts as its own turn
+      instead of being thrown away.
+    * ``thread_rolled_back`` first closes any in-progress (aborted) turn --
+      so it counts as one of the removed turns -- then removes the last N
+      completed turns.
+
+    "Dialogue" means a record the transcript actually renders (non-empty
+    user_message text, non-blank assistant text) — the same conditions
+    ``_parse_rollout_file`` uses — so with no rollback the replayed count
+    equals the rendered transcript's dialogue count.
+    """
     turns: list[tuple[int, str | None]] = []
     current: tuple[int, str | None] | None = None
-    ungrouped_count = 0
-    ungrouped_first: str | None = None
-    saw_boundaries = False
+
+    def flush() -> None:
+        nonlocal current
+        if current is not None:
+            turns.append(current)
+            current = None
+
     try:
         with open(file_path) as f:
             for line in f:
@@ -152,47 +179,56 @@ def _active_dialogue_metadata(file_path: Path) -> tuple[int, str | None]:
                     entry = json.loads(line)
                 except (json.JSONDecodeError, TypeError):
                     continue
-                payload = entry.get("payload") or {}
+                if not isinstance(entry, dict):
+                    continue
+                payload = entry.get("payload")
+                if not isinstance(payload, dict):
+                    payload = {}
                 event_type = payload.get("type") if entry.get("type") == "event_msg" else None
                 if event_type == "task_started":
-                    saw_boundaries = True
+                    flush()
                     current = (0, None)
                     continue
                 if event_type == "task_complete":
-                    if current is not None:
-                        turns.append(current)
-                        current = None
+                    flush()
                     continue
                 if event_type == "thread_rolled_back":
+                    flush()
                     count = payload.get("num_turns")
                     if isinstance(count, int) and count > 0 and turns:
                         remove = min(count, len(turns))
                         del turns[-remove:]
-                    current = None
                     continue
 
+                # Dialogue detection mirrors _parse_rollout_file's render
+                # conditions exactly: a record that renders nothing (empty
+                # user_message, blank assistant text) must not open or extend
+                # a turn here either, or a later thread_rolled_back would cut
+                # different turns in the two replays and message_count/summary
+                # would disagree with the rendered transcript.
                 text: str | None = None
                 is_dialogue = False
                 if event_type == "user_message":
-                    is_dialogue = True
-                    text = payload.get("message") or None
+                    text = payload.get("message", "")
+                    is_dialogue = bool(text)
                 elif entry.get("type") == "response_item" and payload.get("role") == "assistant":
-                    is_dialogue = True
+                    content = payload.get("content", [])
+                    rendered = (
+                        _extract_text_from_content(content)
+                        if isinstance(content, list)
+                        else str(content)
+                    )
+                    is_dialogue = bool(rendered.strip())
                 if not is_dialogue:
                     continue
-                if current is not None:
-                    count, first = current
-                    current = (count + 1, first or text)
-                else:
-                    ungrouped_count += 1
-                    ungrouped_first = ungrouped_first or text
+                if current is None:
+                    current = (0, None)
+                count, first = current
+                current = (count + 1, first or text)
     except OSError:
         return 0, None
 
-    if not saw_boundaries:
-        return ungrouped_count, ungrouped_first
-    if current is not None:
-        turns.append(current)
+    flush()
     count = sum(turn[0] for turn in turns)
     first = next((turn[1] for turn in turns if turn[1]), None)
     return count, first
@@ -297,26 +333,43 @@ class CodexProvider(SessionProvider):
                         entry = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(entry, dict):
+                        continue
 
                     entry_type = entry.get("type", "")
                     payload = entry.get("payload", {})
+                    if not isinstance(payload, dict):
+                        payload = {}
                     ts = _parse_timestamp(entry.get("timestamp", ""))
                     event_type = payload.get("type") if entry_type == "event_msg" else None
 
                     if child_started and event_type == "task_started":
+                        # A task_started arriving while a turn is still open
+                        # closes it (flushed as a completed turn) instead of
+                        # abandoning the in-progress records, then opens a fresh
+                        # turn. Mirrors _active_dialogue_metadata so the cut
+                        # points and the metadata count stay in agreement.
+                        if current_turn_start is not None:
+                            completed_turn_starts.append(current_turn_start)
                         current_turn_start = len(messages)
                     elif child_started and event_type == "task_complete":
                         if current_turn_start is not None:
                             completed_turn_starts.append(current_turn_start)
                             current_turn_start = None
                     elif child_started and event_type == "thread_rolled_back":
+                        # Flush any in-progress (aborted) turn so it counts as
+                        # one of the removed turns, then drop the last N turns.
+                        # Reset current_turn_start unconditionally so a rollback
+                        # with no completed turns still clears in-progress state.
+                        if current_turn_start is not None:
+                            completed_turn_starts.append(current_turn_start)
                         count = payload.get("num_turns")
                         if isinstance(count, int) and count > 0 and completed_turn_starts:
                             remove = min(count, len(completed_turn_starts))
                             cut = completed_turn_starts[-remove]
                             del messages[cut:]
                             del completed_turn_starts[-remove:]
-                            current_turn_start = None
+                        current_turn_start = None
                         continue
 
                     if not child_started:
@@ -352,6 +405,11 @@ class CodexProvider(SessionProvider):
                     if entry_type == "event_msg" and payload.get("type") == "user_message":
                         text = payload.get("message", "")
                         if text:
+                            # Dialogue outside an explicit turn opens an implicit
+                            # one (see _active_dialogue_metadata) so out-of-turn
+                            # records are attributed to a removable turn.
+                            if current_turn_start is None:
+                                current_turn_start = len(messages)
                             messages.append(Message(
                                 role="user",
                                 content=text,
@@ -411,6 +469,8 @@ class CodexProvider(SessionProvider):
                         content = payload.get("content", [])
                         text = _extract_text_from_content(content) if isinstance(content, list) else str(content)
                         if text.strip():
+                            if current_turn_start is None:
+                                current_turn_start = len(messages)
                             messages.append(Message(
                                 role="assistant",
                                 content=text,
@@ -637,11 +697,15 @@ class CodexProvider(SessionProvider):
                             continue
                         try:
                             entry = json.loads(line)
+                            if not isinstance(entry, dict):
+                                continue
                             if entry.get("timestamp"):
                                 last_ts = entry["timestamp"]
 
                             etype = entry.get("type", "")
-                            epayload = entry.get("payload") or {}
+                            epayload = entry.get("payload")
+                            if not isinstance(epayload, dict):
+                                epayload = {}
 
                             if etype == "turn_context" and epayload.get("model"):
                                 model = epayload["model"]
