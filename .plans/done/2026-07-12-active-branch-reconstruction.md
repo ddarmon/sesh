@@ -4,7 +4,7 @@ Type: bugfix
 Owner: pi
 Branch: bugfix/branches
 Created: 2026-07-12
-Updated: 2026-07-12
+Updated: 2026-07-13
 ---
 
 # Active conversation reconstruction after rewind/rollback
@@ -158,7 +158,16 @@ Implemented active-history reconstruction for all three verified formats:
 - Claude projects `last-prompt.leafUuid` through `uuid` / `parentUuid`, with linear fallback for incomplete or ambiguous legacy lineage.
 - Codex replays `thread_rolled_back.num_turns` over completed task boundaries, removing whole turns including reasoning and tools.
 
-Discovery counts, summaries, models, and final context usage now follow active history while cumulative incurred usage remains physical-history based. Cache version 3 invalidates stale metadata. Added malformed-lineage and provider regression tests; the full suite passes (763 tests).
+Discovery counts, summaries, models, and final context usage now follow active history while cumulative incurred usage remains physical-history based. Cache version 3 invalidates stale metadata. Added malformed-lineage and provider regression tests.
+
+Review against real local data found four regressions in the initial implementation, fixed in a follow-up commit on this branch:
+
+- **Discovery performance**: the initial `_parse_sessions` re-read every JSONL in the project directory twice per session (~60x slower on a 120 MB dir: 0.10s → 6.2s). Lineage and branch-sensitive metadata are now collected inline during the existing single directory scan and derived by pure helpers with no per-session re-reads (0.14s measured); a bounded-opens regression test pins this.
+- **Compaction**: a `compact_boundary` record has `parentUuid: null` and carries the real chain in `logicalParentUuid`; following only `parentUuid` dropped all pre-compaction history (a real session fell from 72 to 18 messages). The boundary is now bridged via the logical parent.
+- **Parallel tool calls**: sibling `tool_result` records attach to their own `tool_use` record, so only one sat on the single leaf chain; live tool results were dropped (114 across 47 real sessions). Off-chain tool_results answering an active `tool_use` are now re-admitted.
+- **Codex turn bookkeeping**: a `task_started` arriving mid-turn (user interrupt / nested starts) discarded the open turn's dialogue, and out-of-turn dialogue was thrown away (8 of 377 real rollback-free rollouts miscounted, one 3 → 0). Turns are now flushed rather than discarded, out-of-turn dialogue opens an implicit turn, and only records the transcript renders count as dialogue — so the metadata replay and transcript replay segment turns identically (verified equal on all 377 real root rollouts). Codex `message_count` therefore now counts rendered dialogue, excluding empty `user_message` events and blank assistant items.
+
+The full suite passes (773 tests).
 
 Raw ripgrep search filtering was deliberately deferred: current search uses one raw match per file, and correcting abandoned hits requires changing it to collect and replay candidate lines per source file without regressing search latency or sub-agent attribution. Transcript search in the TUI/HTML is corrected because it consumes normalized active messages. This remaining CLI/global-search inconsistency should be handled as a focused follow-up.
 
@@ -168,3 +177,5 @@ Raw ripgrep search filtering was deliberately deferred: current search uses one 
 - 2026-07-12: Normalize only the active conversation into `Message`; branch browsing is deferred.
 - 2026-07-12: Preserve actual cumulative usage from abandoned turns while making transcript-derived metadata active-branch-aware.
 - 2026-07-12: Pi 0.80.6 experiment `019f58ce-47ab-742a-b035-d0901e6d0306` confirmed that branch navigation alone writes no selection record; after exiting from an older branch, resume opened the final appended branch. Use the final valid appended node as Pi's persisted active leaf, while allowing a future explicit marker to take precedence.
+- 2026-07-13: Real-data review of the initial implementation surfaced the compaction (`logicalParentUuid`), parallel tool-result, discovery-performance, and Codex turn-bookkeeping regressions above; fixes were verified against all local Claude sessions (431) and Codex root rollouts (377) before landing.
+- 2026-07-13: Real rollback traces confirmed Codex's `num_turns` counts the aborted in-flight turn — rollback must flush the open turn before removing N turns, otherwise a completed turn is over-removed.
