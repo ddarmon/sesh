@@ -214,6 +214,7 @@ def write_opencode_storage_session(
     title: str = "Fix the bug",
     created: int = 1750000000000,
     updated: int = 1750000600000,
+    revert: dict | None = None,
     messages: list[dict] | None = None,
     parts: dict[str, list[dict]] | None = None,
 ) -> Path:
@@ -225,14 +226,17 @@ def write_opencode_storage_session(
     """
     storage = data_dir / "storage"
     info_file = storage / "session" / project_id / f"{session_id}.json"
-    write_opencode_json(info_file, {
+    info = {
         "id": session_id,
         "projectID": project_id,
         "directory": directory,
         "title": title,
         "version": "1.0.0",
         "time": {"created": created, "updated": updated},
-    })
+    }
+    if revert is not None:
+        info["revert"] = revert
+    write_opencode_json(info_file, info)
     for msg in messages or []:
         mid = msg["id"]
         write_opencode_json(storage / "message" / session_id / f"{mid}.json", msg)

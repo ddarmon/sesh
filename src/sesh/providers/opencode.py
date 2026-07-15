@@ -16,7 +16,10 @@ formats exist in the wild:
 
 Both formats are read; sessions found in SQLite take precedence when
 the same session ID appears in both (the SQLite migration imported the
-JSON data).
+JSON data). While ``/undo`` is staged for possible ``/redo``, opencode
+retains the physical tail and records the logical cutoff in
+``session.revert`` (message ID plus optional part ID); sesh projects that
+cutoff in transcripts, discovery metadata, and search.
 
 The project path is resolved from the session's ``directory`` field
 (both formats), never from encoded folder or project IDs.
@@ -100,6 +103,58 @@ def _tokens_from_message(info: dict) -> tuple[int, int] | None:
     except (TypeError, ValueError):
         return None
     return turn_input, output
+
+
+def _parse_revert(value: object) -> tuple[str, str | None] | None:
+    """Return ``(message_id, part_id)`` from an opencode staged undo.
+
+    SQLite stores ``session.revert`` as JSON text while legacy storage keeps
+    the same object directly in the session-info file. Malformed state falls
+    back to the physical transcript rather than speculatively hiding content.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    message_id = value.get("messageID")
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    part_id = value.get("partID")
+    if part_id is not None and (not isinstance(part_id, str) or not part_id):
+        return None
+    return message_id, part_id
+
+
+def _message_is_active(
+    message_id: object, revert: tuple[str, str | None] | None
+) -> bool:
+    """Whether a physical message survives the currently staged undo."""
+    if revert is None or not isinstance(message_id, str) or not message_id:
+        return True
+    target_message, target_part = revert
+    return message_id < target_message or (
+        message_id == target_message and target_part is not None
+    )
+
+
+def _part_is_active(
+    message_id: object,
+    part_id: object,
+    revert: tuple[str, str | None] | None,
+) -> bool:
+    """Whether a physical part survives the currently staged undo."""
+    if revert is None or not isinstance(message_id, str) or not message_id:
+        return True
+    target_message, target_part = revert
+    if message_id < target_message:
+        return True
+    if message_id > target_message or target_part is None:
+        return False
+    # Unknown part ids cannot be ordered safely, so preserve visibility.
+    return not isinstance(part_id, str) or not part_id or part_id < target_part
 
 
 def _part_to_messages(role: str, ts: datetime, part: dict) -> list[Message]:
@@ -363,12 +418,14 @@ class OpencodeProvider(SessionProvider):
                 except sqlite3.Error:
                     return sessions
 
+            reverts = self._db_reverts(cur)
             counts: dict[str, int] = {}
             try:
-                for sid, n in cur.execute(
-                    "SELECT session_id, COUNT(*) FROM message GROUP BY session_id"
+                for row_sid, message_id in cur.execute(
+                    "SELECT session_id, id FROM message"
                 ).fetchall():
-                    counts[sid] = n
+                    if _message_is_active(message_id, reverts.get(row_sid)):
+                        counts[row_sid] = counts.get(row_sid, 0) + 1
             except sqlite3.Error:
                 pass
 
@@ -389,8 +446,10 @@ class OpencodeProvider(SessionProvider):
                     except (json.JSONDecodeError, TypeError):
                         pass
 
-                last_input, last_model = self._last_assistant_tokens_db(cur, sid)
-                if model is None:
+                last_input, last_model = self._last_assistant_tokens_db(
+                    cur, sid, reverts.get(sid)
+                )
+                if last_model is not None:
                     model = last_model
 
                 output_tokens = int(tok_out) if tok_out else None
@@ -423,18 +482,41 @@ class OpencodeProvider(SessionProvider):
         return sessions
 
     @staticmethod
-    def _last_assistant_tokens_db(
-        cur: sqlite3.Cursor, session_id: str
-    ) -> tuple[int | None, str | None]:
-        """Return (last turn input+cache tokens, modelID) for a session."""
+    def _db_reverts(
+        cur: sqlite3.Cursor,
+    ) -> dict[str, tuple[str, str | None]]:
+        """Load valid staged-undo cutoffs when the DB schema supports them."""
+        result: dict[str, tuple[str, str | None]] = {}
         try:
-            cur2 = cur.connection.execute(
-                "SELECT data FROM message WHERE session_id = ? ORDER BY id DESC",
+            rows = cur.connection.execute(
+                "SELECT id, revert FROM session WHERE revert IS NOT NULL"
+            )
+        except sqlite3.Error:
+            return result
+        for session_id, value in rows:
+            revert = _parse_revert(value)
+            if isinstance(session_id, str) and revert is not None:
+                result[session_id] = revert
+        return result
+
+    @staticmethod
+    def _last_assistant_tokens_db(
+        cur: sqlite3.Cursor,
+        session_id: str,
+        revert: tuple[str, str | None] | None = None,
+    ) -> tuple[int | None, str | None]:
+        """Return active last-turn input+cache tokens and model ID."""
+        try:
+            rows = cur.connection.execute(
+                "SELECT id, data FROM message"
+                " WHERE session_id = ? ORDER BY id DESC",
                 (session_id,),
             )
         except sqlite3.Error:
             return None, None
-        for (data,) in cur2:
+        for message_id, data in rows:
+            if not _message_is_active(message_id, revert):
+                continue
             try:
                 info = json.loads(data)
             except (json.JSONDecodeError, TypeError):
@@ -496,6 +578,7 @@ class OpencodeProvider(SessionProvider):
 
         storage = info_file.parent.parent.parent  # .../storage
         msg_dir = storage / "message" / session_id
+        revert = _parse_revert(info.get("revert"))
 
         message_count = 0
         model: str | None = None
@@ -509,15 +592,21 @@ class OpencodeProvider(SessionProvider):
                 minfo = _load_json(msg_file)
                 if not minfo:
                     continue
+                message_id = minfo.get("id") or msg_file.stem
+                is_active = _message_is_active(message_id, revert)
                 role = minfo.get("role")
-                if role in ("user", "assistant"):
+                if is_active and role in ("user", "assistant"):
                     message_count += 1
                 if role == "assistant":
-                    model = minfo.get("modelID") or model
+                    if is_active:
+                        model = minfo.get("modelID") or model
                     tokens = _tokens_from_message(minfo)
                     if tokens is not None and any(tokens):
                         saw_tokens = True
-                        last_input = tokens[0]
+                        if is_active:
+                            last_input = tokens[0]
+                        # Cumulative usage describes incurred work, including
+                        # turns hidden by a staged undo.
                         cumulative += tokens[0]
                         output_total += tokens[1]
 
@@ -549,6 +638,7 @@ class OpencodeProvider(SessionProvider):
             return messages
 
         try:
+            revert = self._db_reverts(conn.cursor()).get(session_id)
             rows = conn.execute(
                 "SELECT m.id, m.data, p.id, p.data"
                 " FROM message m LEFT JOIN part p ON p.message_id = m.id"
@@ -556,7 +646,9 @@ class OpencodeProvider(SessionProvider):
                 " ORDER BY m.id, p.id",
                 (session_id,),
             )
-            for _mid, mdata, _pid, pdata in rows:
+            for message_id, mdata, part_id, pdata in rows:
+                if not _part_is_active(message_id, part_id, revert):
+                    continue
                 try:
                     minfo = json.loads(mdata)
                 except (json.JSONDecodeError, TypeError):
@@ -588,6 +680,8 @@ class OpencodeProvider(SessionProvider):
         if not msg_dir.is_dir():
             return []
 
+        info = _load_json(info_file)
+        revert = _parse_revert(info.get("revert")) if info else None
         messages: list[Message] = []
         for msg_file in sorted(msg_dir.glob("*.json")):
             minfo = _load_json(msg_file)
@@ -602,6 +696,9 @@ class OpencodeProvider(SessionProvider):
             for part_file in self._part_files(storage, session_id, message_id):
                 part = _load_json(part_file)
                 if not part:
+                    continue
+                part_id = part.get("id") or part_file.stem
+                if not _part_is_active(message_id, part_id, revert):
                     continue
                 messages.extend(_part_to_messages(role, ts, part))
 

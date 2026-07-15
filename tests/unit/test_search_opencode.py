@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -84,6 +85,43 @@ def test_search_opencode_db_dedups_per_session(tmp_search_dirs) -> None:
     assert len(results) == 1
 
 
+def test_search_opencode_db_ignores_parts_hidden_by_staged_revert(
+    tmp_search_dirs,
+) -> None:
+    data_dir = tmp_search_dirs["opencode_data"]
+    db = data_dir / "opencode.db"
+    create_opencode_db(
+        db,
+        sessions=[{
+            "id": "ses_revert",
+            "directory": "/Users/me/repo",
+            "title": "t",
+            "time_created": 1,
+            "time_updated": 2,
+        }],
+        messages=[
+            {"id": "msg_1", "session_id": "ses_revert", "data": {"role": "user"}},
+            {"id": "msg_3", "session_id": "ses_revert", "data": {"role": "user"}},
+        ],
+        parts=[
+            {"id": "prt_1", "message_id": "msg_1", "session_id": "ses_revert",
+             "data": {"type": "text", "text": "active needle"}},
+            {"id": "prt_3", "message_id": "msg_3", "session_id": "ses_revert",
+             "data": {"type": "text", "text": "reverted needle"}},
+        ],
+    )
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE session ADD COLUMN revert TEXT")
+        conn.execute(
+            "UPDATE session SET revert = ? WHERE id = ?",
+            (json.dumps({"messageID": "msg_3"}), "ses_revert"),
+        )
+
+    results = search._search_opencode_db("needle", data_dir, None)
+    assert len(results) == 1
+    assert results[0].matched_line == "active needle"
+
+
 def test_search_opencode_storage_resolves_session_from_part_file(
     tmp_search_dirs, monkeypatch
 ) -> None:
@@ -120,6 +158,44 @@ def test_search_opencode_storage_resolves_session_from_part_file(
     assert "needle" in r.matched_line
     # file_path points at the session info file so delete/clean can use it
     assert r.file_path.endswith("ses_st.json")
+
+
+def test_search_opencode_storage_skips_reverted_match_then_finds_active_one(
+    tmp_search_dirs, monkeypatch
+) -> None:
+    data_dir = tmp_search_dirs["opencode_data"]
+    write_opencode_storage_session(
+        data_dir,
+        session_id="ses_revert",
+        project_id="proj_1",
+        directory="/Users/me/storage-repo",
+        revert={"messageID": "msg_3"},
+        messages=[
+            {"id": "msg_1", "role": "user", "time": {"created": 1}},
+            {"id": "msg_3", "role": "user", "time": {"created": 3}},
+        ],
+        parts={
+            "msg_1": [{"id": "prt_1", "type": "text", "text": "active needle",
+                       "sessionID": "ses_revert", "messageID": "msg_1"}],
+            "msg_3": [{"id": "prt_3", "type": "text", "text": "reverted needle",
+                       "sessionID": "ses_revert", "messageID": "msg_3"}],
+        },
+    )
+
+    storage = data_dir / "storage" / "part"
+    reverted = storage / "msg_3" / "prt_3.json"
+    active = storage / "msg_1" / "prt_1.json"
+    stdout = "\n".join([
+        _rg_match(str(reverted), '"text": "reverted needle",'),
+        _rg_match(str(active), '"text": "active needle",'),
+    ])
+    monkeypatch.setattr(
+        search.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=stdout)
+    )
+
+    results = search._search_opencode_storage("rg", "needle", data_dir, None)
+    assert len(results) == 1
+    assert results[0].matched_line == "active needle"
 
 
 def test_search_opencode_storage_missing_dir_returns_empty(tmp_search_dirs) -> None:
