@@ -258,9 +258,10 @@ implement this API.
 Provider files can retain abandoned conversation records. Sesh reconstructs the
 active logical transcript before normalizing messages: Pi follows `id` /
 `parentId` from the final appended node, Claude follows `uuid` / `parentUuid`
-from `last-prompt.leafUuid` (with conservative legacy fallback), and Codex
-replays `thread_rolled_back.num_turns` over `task_started` / `task_complete`
-turns. Two Claude records are live despite sitting off the single leaf chain
+from `last-prompt.leafUuid` (or the final main-chain node appended after that
+checkpoint, with conservative legacy fallback), and Codex replays
+`thread_rolled_back.num_turns` over `task_started` / `task_complete` turns. Two
+Claude records are live despite sitting off the single leaf chain
 and are handled explicitly: a compaction boundary (`parentUuid: null`) is
 bridged via its `logicalParentUuid` so pre-compaction history is retained, and
 sibling `tool_result` records answering an active `tool_use` (parallel tool
