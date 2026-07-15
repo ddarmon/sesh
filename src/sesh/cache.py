@@ -12,8 +12,8 @@ from sesh.paths import CACHE_DIR
 
 CACHE_FILE = CACHE_DIR / "sessions.json"
 INDEX_FILE = CACHE_DIR / "index.json"
-# v4 invalidates Claude metadata frozen at stale last-prompt checkpoints.
-CACHE_VERSION = 4
+# v5 invalidates metadata computed before staged opencode undos were projected.
+CACHE_VERSION = 5
 
 
 def _session_to_dict(s: SessionMeta) -> dict:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -111,6 +113,89 @@ def test_storage_session_metadata_and_tokens(tmp_opencode_dir: Path) -> None:
     # Cumulative input: (100+50+10) + (200+80)
     assert s.cumulative_input_tokens == 440
     assert s.source_path is not None and s.source_path.endswith("ses_one.json")
+
+
+def test_storage_staged_revert_hides_tail_but_keeps_incurred_usage(
+    tmp_opencode_dir: Path,
+) -> None:
+    info_file = write_opencode_storage_session(
+        tmp_opencode_dir,
+        session_id="ses_revert",
+        directory="/Users/me/repo",
+        messages=[
+            _user_info("msg_001", created=1),
+            _assistant_info(
+                "msg_002", created=2, model="old-model",
+                tokens=_tokens(100, 20, read=10),
+            ),
+            _user_info("msg_003", created=3),
+            _assistant_info(
+                "msg_004", created=4, model="undone-model",
+                tokens=_tokens(200, 30, read=20),
+            ),
+        ],
+        parts={
+            "msg_001": [{"id": "prt_001", "type": "text", "text": "keep user"}],
+            "msg_002": [{"id": "prt_002", "type": "text", "text": "keep answer"}],
+            "msg_003": [{"id": "prt_003", "type": "text", "text": "undo user"}],
+            "msg_004": [{"id": "prt_004", "type": "text", "text": "undo answer"}],
+        },
+    )
+
+    live_provider = OpencodeProvider()
+    live_session = live_provider.get_sessions("/Users/me/repo")[0]
+    assert [m.content for m in live_provider.get_messages(live_session)] == [
+        "keep user", "keep answer", "undo user", "undo answer"
+    ]
+
+    info = opencode._load_json(info_file)
+    assert info is not None
+    info["revert"] = {"messageID": "msg_003", "snapshot": "snap"}
+    write_opencode_json(info_file, info)
+
+    # The already-selected session object sees the newly staged undo on reload.
+    assert [m.content for m in live_provider.get_messages(live_session)] == [
+        "keep user", "keep answer"
+    ]
+
+    session = OpencodeProvider().get_sessions("/Users/me/repo")[0]
+    assert session.message_count == 2
+    assert session.model == "old-model"
+    assert session.input_tokens == 110
+    # Undo keeps physical records for redo, so incurred totals still include them.
+    assert session.output_tokens == 50
+    assert session.cumulative_input_tokens == 330
+
+
+def test_storage_part_revert_keeps_only_earlier_target_parts(
+    tmp_opencode_dir: Path,
+) -> None:
+    write_opencode_storage_session(
+        tmp_opencode_dir,
+        session_id="ses_part_revert",
+        directory="/Users/me/repo",
+        revert={"messageID": "msg_002", "partID": "prt_003"},
+        messages=[
+            _user_info("msg_001", created=1),
+            _assistant_info("msg_002", created=2),
+            _user_info("msg_003", created=3),
+        ],
+        parts={
+            "msg_001": [{"id": "prt_001", "type": "text", "text": "prompt"}],
+            "msg_002": [
+                {"id": "prt_002", "type": "text", "text": "kept prefix"},
+                {"id": "prt_003", "type": "text", "text": "removed suffix"},
+            ],
+            "msg_003": [{"id": "prt_004", "type": "text", "text": "removed turn"}],
+        },
+    )
+
+    provider = OpencodeProvider()
+    session = provider.get_sessions("/Users/me/repo")[0]
+    assert session.message_count == 2
+    assert [m.content for m in provider.get_messages(session)] == [
+        "prompt", "kept prefix"
+    ]
 
 
 def test_storage_session_without_tokens_omits_token_fields(
@@ -304,6 +389,118 @@ def test_db_discovers_sessions_and_tokens(tmp_opencode_dir: Path) -> None:
     # Session columns are cumulative sums
     assert s.output_tokens == 55
     assert s.cumulative_input_tokens == 300 + 120 + 30
+
+
+def test_db_staged_revert_filters_messages_and_active_metadata(
+    tmp_opencode_dir: Path,
+) -> None:
+    db = tmp_opencode_dir / "opencode.db"
+    create_opencode_db(
+        db,
+        sessions=[{
+            "id": "ses_db_revert",
+            "directory": "/Users/me/dbrepo",
+            "title": "undo",
+            "time_created": 1,
+            "time_updated": 4,
+            "tokens_input": 300,
+            "tokens_output": 50,
+            "tokens_cache_read": 30,
+        }],
+        messages=[
+            {"id": "msg_001", "session_id": "ses_db_revert",
+             "data": _user_info("msg_001", created=1)},
+            {"id": "msg_002", "session_id": "ses_db_revert",
+             "data": _assistant_info("msg_002", created=2, model="old-model",
+                                     tokens=_tokens(100, 20, read=10))},
+            {"id": "msg_003", "session_id": "ses_db_revert",
+             "data": _user_info("msg_003", created=3)},
+            {"id": "msg_004", "session_id": "ses_db_revert",
+             "data": _assistant_info("msg_004", created=4, model="undone-model",
+                                     tokens=_tokens(200, 30, read=20))},
+        ],
+        parts=[
+            {"id": f"prt_{i:03}", "message_id": f"msg_{i:03}",
+             "session_id": "ses_db_revert",
+             "data": {"type": "text", "text": text}}
+            for i, text in enumerate(
+                ("keep user", "keep answer", "undo user", "undo answer"), start=1
+            )
+        ],
+    )
+    live_provider = OpencodeProvider()
+    live_session = live_provider.get_sessions("/Users/me/dbrepo")[0]
+    assert [m.content for m in live_provider.get_messages(live_session)] == [
+        "keep user", "keep answer", "undo user", "undo answer"
+    ]
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE session ADD COLUMN revert TEXT")
+        conn.execute(
+            "UPDATE session SET revert = ? WHERE id = ?",
+            (json.dumps({"messageID": "msg_003", "snapshot": "snap"}),
+             "ses_db_revert"),
+        )
+
+    # Follow reloads through the selected session and observes the new cutoff.
+    assert [m.content for m in live_provider.get_messages(live_session)] == [
+        "keep user", "keep answer"
+    ]
+
+    session = OpencodeProvider().get_sessions("/Users/me/dbrepo")[0]
+    assert session.message_count == 2
+    assert session.model == "old-model"
+    assert session.input_tokens == 110
+    assert session.output_tokens == 50
+    assert session.cumulative_input_tokens == 330
+
+
+def test_db_part_revert_keeps_only_parts_before_cutoff(
+    tmp_opencode_dir: Path,
+) -> None:
+    db = tmp_opencode_dir / "opencode.db"
+    create_opencode_db(
+        db,
+        sessions=[{
+            "id": "ses_db_part",
+            "directory": "/Users/me/dbrepo",
+            "title": "partial undo",
+            "time_created": 1,
+            "time_updated": 3,
+        }],
+        messages=[
+            {"id": "msg_001", "session_id": "ses_db_part",
+             "data": _user_info("msg_001", created=1)},
+            {"id": "msg_002", "session_id": "ses_db_part",
+             "data": _assistant_info("msg_002", created=2)},
+            {"id": "msg_003", "session_id": "ses_db_part",
+             "data": _user_info("msg_003", created=3)},
+        ],
+        parts=[
+            {"id": "prt_001", "message_id": "msg_001", "session_id": "ses_db_part",
+             "data": {"type": "text", "text": "prompt"}},
+            {"id": "prt_002", "message_id": "msg_002", "session_id": "ses_db_part",
+             "data": {"type": "text", "text": "kept prefix"}},
+            {"id": "prt_003", "message_id": "msg_002", "session_id": "ses_db_part",
+             "data": {"type": "text", "text": "removed suffix"}},
+            {"id": "prt_004", "message_id": "msg_003", "session_id": "ses_db_part",
+             "data": {"type": "text", "text": "removed turn"}},
+        ],
+    )
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE session ADD COLUMN revert TEXT")
+        conn.execute(
+            "UPDATE session SET revert = ? WHERE id = ?",
+            (json.dumps({"messageID": "msg_002", "partID": "prt_003"}),
+             "ses_db_part"),
+        )
+
+    provider = OpencodeProvider()
+    session = provider.get_sessions("/Users/me/dbrepo")[0]
+    assert session.message_count == 2
+    assert [m.content for m in provider.get_messages(session)] == [
+        "prompt", "kept prefix"
+    ]
 
 
 def test_db_get_messages_joins_parts(tmp_opencode_dir: Path) -> None:

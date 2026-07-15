@@ -130,7 +130,10 @@ opencode has two on-disk formats, both supported by the provider
     read).
 
 The opencode project path comes from the session's `directory` field,
-never from project IDs or folder names.
+never from project IDs or folder names. A staged `/undo` keeps physical
+messages/parts available for `/redo` and stores its logical cutoff in the
+session's `revert.messageID` plus optional `revert.partID`; sesh applies that
+cutoff to transcripts, discovery metadata, and global search in both formats.
 
 App-managed files follow XDG base directories (absolute `XDG_*` env vars
 are honored; empty/relative values fall back to defaults):
@@ -259,8 +262,9 @@ Provider files can retain abandoned conversation records. Sesh reconstructs the
 active logical transcript before normalizing messages: Pi follows `id` /
 `parentId` from the final appended node, Claude follows `uuid` / `parentUuid`
 from `last-prompt.leafUuid` (or the final main-chain node appended after that
-checkpoint, with conservative legacy fallback), and Codex replays
-`thread_rolled_back.num_turns` over `task_started` / `task_complete` turns. Two
+checkpoint, with conservative legacy fallback), Codex replays
+`thread_rolled_back.num_turns` over `task_started` / `task_complete` turns, and
+opencode projects the message/part cutoff in a staged session `revert`. Two
 Claude records are live despite sitting off the single leaf chain
 and are handled explicitly: a compaction boundary (`parentUuid: null`) is
 bridged via its `logicalParentUuid` so pre-compaction history is retained, and

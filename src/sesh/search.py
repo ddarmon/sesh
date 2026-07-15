@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sesh.models import Provider, SearchResult
+from sesh.providers.opencode import _parse_revert, _part_is_active
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
@@ -723,14 +724,14 @@ def _search_opencode_storage(
                 session_id = rel.parts[1]
         if not session_id or session_id in seen:
             continue
-        seen.add(session_id)
 
-        # Resolve the project path from the session info file.
+        # Resolve the project path and staged-undo cutoff from session info.
         project_path = ""
         info_path = (
             fp if kind == "session"
             else _opencode_session_info_path(storage, session_id)
         )
+        info: object = None
         if info_path is not None:
             info = obj if kind == "session" else None
             if info is None:
@@ -741,6 +742,23 @@ def _search_opencode_storage(
                     info = None
             if isinstance(info, dict):
                 project_path = info.get("directory", "") or ""
+
+        revert = _parse_revert(info.get("revert")) if isinstance(info, dict) else None
+        if kind == "message":
+            message_id = obj.get("id") or fp.stem
+            if not _part_is_active(message_id, None, revert):
+                continue
+        elif kind == "part":
+            message_id = obj.get("messageID")
+            if not message_id:
+                if len(rel.parts) == 3:  # part/{messageID}/{partID}.json
+                    message_id = rel.parts[1]
+                elif len(rel.parts) == 4:  # part/{sessionID}/{messageID}/{partID}.json
+                    message_id = rel.parts[2]
+            part_id = obj.get("id") or fp.stem
+            if not _part_is_active(message_id, part_id, revert):
+                continue
+        seen.add(session_id)
 
         candidates = _opencode_part_candidates(obj)
         content_text = ""
@@ -787,14 +805,31 @@ def _search_opencode_db(
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
             cur = conn.cursor()
+            columns = {
+                row[1] for row in cur.execute("PRAGMA table_info(session)").fetchall()
+            }
+            revert_column = "s.revert" if "revert" in columns else "NULL"
             cur.execute(
-                "SELECT p.session_id, p.data, s.directory FROM part p"
+                "SELECT p.session_id, p.message_id, p.id, p.data,"
+                f" s.directory, {revert_column} FROM part p"
                 " LEFT JOIN session s ON s.id = p.session_id"
-                " WHERE p.data LIKE ? ESCAPE '!'",
+                " WHERE p.data LIKE ? ESCAPE '!'"
+                " ORDER BY p.session_id, p.message_id, p.id",
                 (like_pattern,),
             )
-            for session_id, part_data, directory in cur:
+            for (
+                session_id,
+                message_id,
+                part_id,
+                part_data,
+                directory,
+                raw_revert,
+            ) in cur:
                 if not session_id or session_id in seen:
+                    continue
+                if not _part_is_active(
+                    message_id, part_id, _parse_revert(raw_revert)
+                ):
                     continue
                 try:
                     obj = json.loads(part_data)
