@@ -112,9 +112,21 @@ def _content_tool_ids(msg) -> tuple[set[str], set[str]]:
     return uses, results
 
 
-def _resolve_leaf(parents: dict[str, str | None], explicit_leaf: str | None) -> str | None:
-    """Pick the ancestry leaf: an explicit ``last-prompt`` leaf, else the
-    single unambiguous leaf of the parents graph (None keeps legacy linear)."""
+def _resolve_leaf(
+    parents: dict[str, str | None],
+    explicit_leaf: str | None,
+    post_checkpoint_leaf: str | None,
+) -> str | None:
+    """Pick the active ancestry leaf.
+
+    ``last-prompt`` is a checkpoint, not necessarily the final record: current
+    Claude versions can append several completed turns without writing another
+    marker. The final main-chain UUID after the latest checkpoint therefore
+    takes precedence. Without such a continuation, use the explicit leaf; old
+    files without either are projected only when their graph has one leaf.
+    """
+    if post_checkpoint_leaf is not None:
+        return post_checkpoint_leaf
     if explicit_leaf is not None:
         return explicit_leaf
     if not parents:
@@ -151,6 +163,7 @@ def _expand_active_tool_results(
 def _active_ids_from_maps(
     parents: dict[str, str | None],
     explicit_leaf: str | None,
+    post_checkpoint_leaf: str | None,
     unlinked_message: bool,
     tool_use_by_uuid: dict[str, set[str]],
     tool_result_by_uuid: dict[str, set[str]],
@@ -163,7 +176,7 @@ def _active_ids_from_maps(
     """
     if unlinked_message:
         return None
-    leaf = _resolve_leaf(parents, explicit_leaf)
+    leaf = _resolve_leaf(parents, explicit_leaf, post_checkpoint_leaf)
     active = active_ancestor_ids(parents, leaf)
     if active is None:
         return None
@@ -173,8 +186,8 @@ def _active_ids_from_maps(
 def _collected_active_fields(s: dict) -> dict | None:
     """Derive branch-sensitive discovery fields from a session's collected maps.
 
-    Pure: consumes the ``_parents`` / ``_leaf`` / ``_unlinked`` / ``_records``
-    maps gathered during :meth:`ClaudeProvider._parse_sessions`' single scan and
+    Pure: consumes the lineage/checkpoint maps and ``_records`` gathered during
+    :meth:`ClaudeProvider._parse_sessions`' single scan and
     reproduces exactly what a second streaming pass over the active records
     would compute (``message_count``, last non-system ``last_user_message``,
     final ``model``, and last-turn context ``input_tokens``) — with no extra
@@ -185,6 +198,7 @@ def _collected_active_fields(s: dict) -> dict | None:
     active = _active_ids_from_maps(
         s["_parents"],
         s["_leaf"],
+        s["_post_checkpoint_leaf"],
         s["_unlinked"],
         {uid: rec["uses"] for uid, rec in records.items() if "uses" in rec},
         {uid: rec["results"] for uid, rec in records.items() if "results" in rec},
@@ -220,14 +234,17 @@ def _collected_active_fields(s: dict) -> dict | None:
 def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
     """Return the active UUID set for a Claude session (streaming, on-demand).
 
-    Current Claude writes an explicit ``last-prompt.leafUuid``. Older linear
-    files are projected only when they have one unambiguous leaf; otherwise
-    callers retain the legacy linear transcript. Compaction boundaries are
-    bridged via ``logicalParentUuid`` and off-chain parallel ``tool_result``
-    records answering active ``tool_use``s are re-admitted.
+    Claude writes ``last-prompt.leafUuid`` checkpoints; records appended after
+    the latest checkpoint extend or replace that active branch immediately,
+    before Claude necessarily writes another marker. Older linear files are
+    projected only when they have one unambiguous leaf; otherwise callers retain
+    the legacy linear transcript. Compaction boundaries are bridged via
+    ``logicalParentUuid`` and off-chain parallel ``tool_result`` records
+    answering active ``tool_use``s are re-admitted.
     """
     parents: dict[str, str | None] = {}
     explicit_leaf: str | None = None
+    post_checkpoint_leaf: str | None = None
     unlinked_message = False
     tool_use_by_uuid: dict[str, set[str]] = {}
     tool_result_by_uuid: dict[str, set[str]] = {}
@@ -241,11 +258,19 @@ def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
                         continue
                     if not isinstance(entry, dict) or entry.get("sessionId") != session_id:
                         continue
-                    if entry.get("type") == "last-prompt" and isinstance(entry.get("leafUuid"), str):
+                    entry_type = entry.get("type")
+                    if entry_type == "last-prompt" and isinstance(entry.get("leafUuid"), str):
                         explicit_leaf = entry["leafUuid"]
+                        post_checkpoint_leaf = None
                     entry_id = entry.get("uuid")
                     if isinstance(entry_id, str) and entry_id:
                         parents[entry_id] = _record_parent(entry)
+                        if (
+                            explicit_leaf is not None
+                            and entry_type != "last-prompt"
+                            and entry.get("isSidechain") is not True
+                        ):
+                            post_checkpoint_leaf = entry_id
                         uses, results = _content_tool_ids(entry.get("message"))
                         if uses:
                             tool_use_by_uuid[entry_id] = uses
@@ -257,7 +282,12 @@ def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
         return None
 
     return _active_ids_from_maps(
-        parents, explicit_leaf, unlinked_message, tool_use_by_uuid, tool_result_by_uuid
+        parents,
+        explicit_leaf,
+        post_checkpoint_leaf,
+        unlinked_message,
+        tool_use_by_uuid,
+        tool_result_by_uuid,
     )
 
 
@@ -1302,10 +1332,12 @@ class ClaudeProvider(SessionProvider):
                                 # during THIS single scan so no per-session
                                 # re-read is needed (see _collected_active_fields):
                                 # uuid -> logical parent, the explicit last-prompt
-                                # leaf, whether any linked-message record lacked a
-                                # uuid, and per-uuid branch-sensitive metadata.
+                                # checkpoint, its latest appended continuation,
+                                # whether any linked-message record lacked a uuid,
+                                # and per-uuid branch-sensitive metadata.
                                 "_parents": {},
                                 "_leaf": None,
+                                "_post_checkpoint_leaf": None,
                                 "_unlinked": False,
                                 "_records": {},
                                 "_order": 0,
@@ -1316,10 +1348,17 @@ class ClaudeProvider(SessionProvider):
                         # Collect lineage + branch-sensitive metadata inline.
                         if entry_type == "last-prompt" and isinstance(entry.get("leafUuid"), str):
                             s["_leaf"] = entry["leafUuid"]
+                            s["_post_checkpoint_leaf"] = None
                         entry_id = entry.get("uuid")
                         entry_msg = entry.get("message")
                         if isinstance(entry_id, str) and entry_id:
                             s["_parents"][entry_id] = _record_parent(entry)
+                            if (
+                                s["_leaf"] is not None
+                                and entry_type != "last-prompt"
+                                and entry.get("isSidechain") is not True
+                            ):
+                                s["_post_checkpoint_leaf"] = entry_id
                             rec: dict = {"order": s["_order"]}
                             s["_order"] += 1
                             if isinstance(entry_msg, dict):

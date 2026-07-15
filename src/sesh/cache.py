@@ -12,8 +12,8 @@ from sesh.paths import CACHE_DIR
 
 CACHE_FILE = CACHE_DIR / "sessions.json"
 INDEX_FILE = CACHE_DIR / "index.json"
-# v3 invalidates metadata computed before active rewind branches were replayed.
-CACHE_VERSION = 3
+# v4 invalidates Claude metadata frozen at stale last-prompt checkpoints.
+CACHE_VERSION = 4
 
 
 def _session_to_dict(s: SessionMeta) -> dict:

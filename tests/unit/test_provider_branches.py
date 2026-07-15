@@ -57,6 +57,77 @@ def test_claude_uses_last_prompt_leaf(tmp_path: Path) -> None:
     ]
 
 
+def test_claude_follows_turns_appended_after_last_prompt_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """A stale last-prompt marker must not freeze live views at that turn."""
+    path = tmp_path / "claude.jsonl"
+    sid = "session"
+    write_jsonl(path, [
+        {"type": "user", "uuid": "u1", "parentUuid": None, "sessionId": sid,
+         "timestamp": "2026-01-01T00:00:01Z",
+         "message": {"role": "user", "content": "first prompt"}},
+        {"type": "assistant", "uuid": "a1", "parentUuid": "u1", "sessionId": sid,
+         "timestamp": "2026-01-01T00:00:02Z",
+         "message": {"role": "assistant", "content": "first answer", "model": "old",
+                     "usage": {"input_tokens": 10, "output_tokens": 2}}},
+        {"type": "system", "uuid": "checkpoint", "parentUuid": "a1", "sessionId": sid,
+         "timestamp": "2026-01-01T00:00:03Z"},
+        {"type": "last-prompt", "sessionId": sid, "leafUuid": "checkpoint"},
+        # Current Claude can append complete turns without another last-prompt.
+        {"type": "user", "uuid": "u2", "parentUuid": "checkpoint", "sessionId": sid,
+         "timestamp": "2026-01-01T00:00:04Z",
+         "message": {"role": "user", "content": "second prompt"}},
+        {"type": "assistant", "uuid": "a2", "parentUuid": "u2", "sessionId": sid,
+         "timestamp": "2026-01-01T00:00:05Z",
+         "message": {"role": "assistant", "content": "second answer", "model": "new",
+                     "usage": {"input_tokens": 20, "cache_read_input_tokens": 4,
+                               "output_tokens": 3}}},
+        {"type": "system", "uuid": "latest", "parentUuid": "a2", "sessionId": sid,
+         "timestamp": "2026-01-01T00:00:06Z"},
+    ])
+
+    session = make_session(id=sid, provider=Provider.CLAUDE, source_path=str(path))
+    assert [m.content for m in claude.ClaudeProvider().get_messages(session)] == [
+        "first prompt", "first answer", "second prompt", "second answer"
+    ]
+
+    discovered = claude.ClaudeProvider()._parse_sessions(tmp_path, "/repo")
+    assert len(discovered) == 1
+    meta = discovered[0]
+    assert meta.message_count == 4
+    assert meta.summary == "second prompt"
+    assert meta.model == "new"
+    assert meta.input_tokens == 24
+    assert meta.output_tokens == 5
+    assert meta.cumulative_input_tokens == 34
+
+
+def test_claude_post_checkpoint_rewind_selects_appended_branch(tmp_path: Path) -> None:
+    """A replacement branch started after a checkpoint becomes active at once."""
+    path = tmp_path / "claude.jsonl"
+    sid = "session"
+
+    def record(uuid: str, parent: str | None, role: str, text: str, second: int) -> dict:
+        return {"type": role, "uuid": uuid, "parentUuid": parent, "sessionId": sid,
+                "timestamp": f"2026-01-01T00:00:0{second}Z",
+                "message": {"role": role, "content": text}}
+
+    write_jsonl(path, [
+        record("root", None, "user", "root", 1),
+        record("old", "root", "user", "old", 2),
+        record("old-a", "old", "assistant", "old answer", 3),
+        {"type": "last-prompt", "sessionId": sid, "leafUuid": "old-a"},
+        record("new", "root", "user", "new", 4),
+        record("new-a", "new", "assistant", "new answer", 5),
+    ])
+
+    session = make_session(id=sid, provider=Provider.CLAUDE, source_path=str(path))
+    assert [m.content for m in claude.ClaudeProvider().get_messages(session)] == [
+        "root", "new", "new answer"
+    ]
+
+
 def test_claude_bridges_compaction_boundary(tmp_path: Path) -> None:
     """A compact_boundary record (parentUuid null, logicalParentUuid set) must
     not sever pre-compaction history: it is live and must be retained."""
