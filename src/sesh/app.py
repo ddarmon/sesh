@@ -383,7 +383,6 @@ class HelpScreen(ModalScreen[None]):
                     ("T", "Toggle thinking messages"),
                     ("a", "Toggle sub-agent threads"),
                     ("F", "Toggle fullscreen message pane"),
-                    ("S", "Open Terminal-tab snapshots (macOS)"),
                 ],
             ),
             (
@@ -418,6 +417,12 @@ class HelpScreen(ModalScreen[None]):
                     ("d", "Delete session"),
                     ("m", "Move project"),
                     ("r", "Refresh discovery"),
+                ],
+            ),
+            (
+                "Terminal snapshots (macOS)",
+                [
+                    ("S", "Open saved snapshots / capture current tabs"),
                 ],
             ),
             (
