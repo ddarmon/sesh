@@ -665,16 +665,18 @@ async def test_bookmark_toggle_on_session_node(app):
     assert tree.cursor_node.data.id == "bm1"
 
     await pilot.press("b")
-    assert ("claude", "bm1") in sesh_app._bookmarks
-
-    # Re-select a session node after tree repopulation, then toggle bookmark off.
-    sesh_app._reselect_node(tree, ("claude", "bm1"))
     await pilot.pause()
+    assert ("claude", "bm1") in sesh_app._bookmarks
     assert tree.cursor_node is not None
     assert getattr(tree.cursor_node.data, "id", None) == "bm1"
 
+    # Tree repopulation must preserve the logical selection so a second press
+    # toggles the same session back off without manual navigation.
     await pilot.press("b")
+    await pilot.pause()
     assert ("claude", "bm1") not in sesh_app._bookmarks
+    assert tree.cursor_node is not None
+    assert getattr(tree.cursor_node.data, "id", None) == "bm1"
 
 
 @pytest.mark.integration

@@ -2212,14 +2212,21 @@ class SeshApp(App):
         key = (session.provider.value, session.id)
         if key in self._bookmarks:
             self._bookmarks.discard(key)
-            self._set_status("Bookmark removed")
+            status = "Bookmark removed"
         else:
             self._bookmarks.add(key)
-            self._set_status("Bookmark added")
+            status = "Bookmark added"
         save_bookmarks(self._bookmarks)
 
         search_text = self.query_one("#search-input", Input).value
         self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
+        # Repopulation invalidates the old TreeNode and Tree applies its own
+        # cursor reset on refresh. Restore the logical selection afterwards so
+        # pressing `b` again toggles the same session back off.
+        self.call_after_refresh(self._reselect_node, tree, key)
+        # _populate_tree writes its own summary status, so report the action
+        # afterwards rather than immediately overwriting this feedback.
+        self._set_status(status)
 
     def action_cycle_sort(self) -> None:
         """Cycle session sort order."""
