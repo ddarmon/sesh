@@ -40,6 +40,7 @@ PROVIDER_CHOICES = (
     "pi",
     "gemini",
     "opencode",
+    "cline",
 )
 
 
@@ -93,6 +94,7 @@ def _provider_for_session(session, agg_root: Path | None):
     """
     from sesh.models import Provider
     from sesh.providers.claude import ClaudeProvider
+    from sesh.providers.cline import ClineProvider
     from sesh.providers.codex import CodexProvider
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
@@ -114,6 +116,7 @@ def _provider_for_session(session, agg_root: Path | None):
         Provider.PI: PiProvider,
         Provider.GEMINI: GeminiProvider,
         Provider.OPENCODE: OpencodeProvider,
+        Provider.CLINE: ClineProvider,
     }
     cls = cls_map.get(session.provider)
     if cls is None:
@@ -700,6 +703,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
             source_path = r.file_path
         elif r.provider == Provider.OPENCODE:
             source_path = r.file_path
+        elif r.provider == Provider.CLINE:
+            source_path = r.file_path
         else:
             continue
 
@@ -726,6 +731,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
         )
 
     from sesh.providers.claude import ClaudeProvider
+    from sesh.providers.cline import ClineProvider
     from sesh.providers.codex import CodexProvider
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
@@ -742,6 +748,7 @@ def cmd_clean(args: argparse.Namespace) -> None:
         Provider.PI: PiProvider(),
         Provider.GEMINI: GeminiProvider(),
         Provider.OPENCODE: OpencodeProvider(),
+        Provider.CLINE: ClineProvider(),
     }
 
     deleted = []
@@ -915,6 +922,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
     from sesh.cache import _dict_to_session
     from sesh.models import Provider
     from sesh.providers.claude import ClaudeProvider
+    from sesh.providers.cline import ClineProvider
     from sesh.providers.codex import CodexProvider
     from sesh.providers.copilot import CopilotProvider
     from sesh.providers.cursor import CursorProvider
@@ -930,6 +938,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
         Provider.PI: PiProvider(),
         Provider.GEMINI: GeminiProvider(),
         Provider.OPENCODE: OpencodeProvider(),
+        Provider.CLINE: ClineProvider(),
     }
 
     session = _dict_to_session(session_data)
@@ -1342,7 +1351,7 @@ def main() -> None:
         prog="sesh",
         description=(
             "Browse and search LLM coding sessions (Claude Code, Codex, Cursor, "
-            "Copilot, pi, Gemini, opencode).\n\n"
+            "Copilot, pi, Gemini, opencode, Cline).\n\n"
             "With no subcommand, launches the interactive TUI.\n"
             "Use subcommands for JSON output suitable for scripts and LLM agents.\n\n"
             "Typical workflow:\n"
@@ -1384,7 +1393,7 @@ def main() -> None:
         "refresh",
         help="Run full discovery across all providers and rebuild the index",
         description=(
-            "Scan Claude Code, Codex, Cursor, Copilot, pi, Gemini, and opencode "
+            "Scan Claude Code, Codex, Cursor, Copilot, pi, Gemini, opencode, and Cline "
             "session directories, "
             "then write the index (default: ~/.cache/sesh/index.json, "
             "or $XDG_CACHE_HOME/sesh/index.json) for fast querying. "
@@ -1439,7 +1448,7 @@ def main() -> None:
         choices=PROVIDER_CHOICES,
         help=(
             "Filter to sessions from this provider "
-            "(claude, codex, cursor, copilot, pi, gemini, opencode)"
+            "(claude, codex, cursor, copilot, pi, gemini, opencode, cline)"
         ),
     )
     p_sessions.add_argument(
@@ -1498,7 +1507,7 @@ def main() -> None:
         choices=PROVIDER_CHOICES,
         help=(
             "Only aggregate sessions from this provider "
-            "(claude, codex, cursor, copilot, pi, gemini, opencode)"
+            "(claude, codex, cursor, copilot, pi, gemini, opencode, cline)"
         ),
     )
 
@@ -1601,7 +1610,7 @@ def main() -> None:
         description=(
             "Search for sessions using ripgrep and delete all matches. "
             "Use --dry-run to preview what would be deleted without making changes. "
-            "Supports Claude, Codex, Cursor, Copilot, pi, Gemini, and opencode "
+            "Supports Claude, Codex, Cursor, Copilot, pi, Gemini, opencode, and Cline "
             "sessions."
         ),
     )

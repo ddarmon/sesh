@@ -568,3 +568,74 @@ def test_ripgrep_search_codex_subagent_attributes_root(tmp_search_dirs) -> None:
     assert hits[0].project_path == "/Users/me/codex"
     assert hits[0].file_path == str(child_file)
     assert hits[0].root_file_path == str(root_file)
+
+
+def test_ripgrep_search_finds_cline_transcript(tmp_search_dirs) -> None:
+    """Real rg binary finds a query term inside a Cline transcript."""
+    _require_rg()
+    from tests.helpers import write_cline_session
+
+    data_dir = tmp_search_dirs["cline_sessions"].parent
+    write_cline_session(
+        data_dir,
+        session_id="1788435477952_eibi9",
+        workspace_root="/Users/me/cline-repo",
+        messages=[{
+            "id": "m1", "role": "user", "ts": 1788435478090,
+            "content": [{
+                "type": "text",
+                "text": '<user_input mode="act">Cline needle token</user_input>',
+            }],
+        }],
+    )
+
+    results = search.ripgrep_search("cline needle")
+    hits = [r for r in results if r.provider is Provider.CLINE]
+    assert len(hits) == 1
+    assert hits[0].session_id == "1788435477952_eibi9"
+    assert hits[0].project_path == "/Users/me/cline-repo"
+    assert hits[0].file_path.endswith("1788435477952_eibi9.messages.json")
+    assert hits[0].host is None
+
+
+def test_ripgrep_search_skips_cline_session_without_record(tmp_search_dirs) -> None:
+    """A transcript with no sibling record has no recoverable project path."""
+    _require_rg()
+    from tests.helpers import write_cline_session
+
+    data_dir = tmp_search_dirs["cline_sessions"].parent
+    write_cline_session(
+        data_dir, session_id="1_a", workspace_root="/Users/me/cline-repo",
+        messages=[{"id": "m1", "role": "user", "ts": 1, "content": "orphan needle"}],
+    )
+    (data_dir / "sessions" / "1_a" / "1_a.json").unlink()
+
+    results = search.ripgrep_search("orphan needle")
+    assert [r for r in results if r.provider is Provider.CLINE] == []
+
+
+def test_aggregated_search_includes_cline_host(tmp_aggregation_search_dirs) -> None:
+    """Aggregation mode scans each host's ~/.cline/data and tags the host."""
+    _require_rg()
+    from tests.helpers import write_cline_session
+
+    for host in ("laptop", "desktop"):
+        write_cline_session(
+            tmp_aggregation_search_dirs[host]["cline_sessions"].parent,
+            session_id="1_a",
+            workspace_root=f"/Users/me/{host}",
+            messages=[{
+                "id": "m1", "role": "user", "ts": 1,
+                "content": "aggregated cline needle",
+            }],
+        )
+
+    results = search.ripgrep_search(
+        "aggregated cline needle",
+        aggregation_root=tmp_aggregation_search_dirs["root"],
+    )
+    hits = [r for r in results if r.provider is Provider.CLINE]
+    assert {r.host for r in hits} == {"laptop", "desktop"}
+    assert {r.project_path for r in hits} == {
+        "/Users/me/laptop", "/Users/me/desktop",
+    }

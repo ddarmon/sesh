@@ -242,6 +242,21 @@ def tmp_opencode_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
+def tmp_cline_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from sesh.providers import cline
+
+    cline_dir = tmp_path / ".cline"
+    data_dir = cline_dir / "data"
+    # resolve_data_dir() consults the environment first, so clear both keys
+    # to keep the fixture authoritative.
+    monkeypatch.delenv("CLINE_DATA_DIR", raising=False)
+    monkeypatch.delenv("CLINE_DIR", raising=False)
+    monkeypatch.setattr(cline, "CLINE_DIR", cline_dir)
+    monkeypatch.setattr(cline, "CLINE_DATA_DIR", data_dir)
+    return data_dir
+
+
+@pytest.fixture()
 def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     from sesh import search
 
@@ -262,6 +277,8 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     monkeypatch.setattr(search, "GEMINI_TMP", gemini_tmp)
     opencode_data = tmp_path / ".local" / "share" / "opencode"
     monkeypatch.setattr(search, "OPENCODE_DATA", opencode_data)
+    cline_sessions = tmp_path / ".cline" / "data" / "sessions"
+    monkeypatch.setattr(search, "CLINE_SESSIONS", cline_sessions)
     return {
         "claude_projects": claude_projects,
         "codex_sessions": codex_sessions,
@@ -271,6 +288,7 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         "pi_sessions": pi_sessions,
         "gemini_tmp": gemini_tmp,
         "opencode_data": opencode_data,
+        "cline_sessions": cline_sessions,
     }
 
 
@@ -306,6 +324,7 @@ def tmp_aggregation_search_dirs(tmp_path: Path) -> dict[str, object]:
             "pi_sessions": base / ".pi" / "agent" / "sessions",
             "gemini_tmp": base / ".gemini" / "tmp",
             "opencode_data": base / ".local" / "share" / "opencode",
+            "cline_sessions": base / ".cline" / "data" / "sessions",
         }
         for p in paths.values():
             p.mkdir(parents=True, exist_ok=True)
@@ -401,6 +420,15 @@ def tmp_move_dirs(
     from sesh.providers import opencode as opencode_mod
     monkeypatch.setattr(opencode_mod, "OPENCODE_DATA_DIR", opencode_data)
 
+    # ClineProvider resolves its root through the env then the module
+    # constants, so clear the env and point both constants at tmp_path.
+    cline_data = tmp_path / ".cline" / "data"
+    monkeypatch.delenv("CLINE_DATA_DIR", raising=False)
+    monkeypatch.delenv("CLINE_DIR", raising=False)
+    from sesh.providers import cline as cline_mod
+    monkeypatch.setattr(cline_mod, "CLINE_DIR", cline_data.parent)
+    monkeypatch.setattr(cline_mod, "CLINE_DATA_DIR", cline_data)
+
     cache_dir = tmp_path / "cache" / "sesh"
     monkeypatch.setattr(move, "CACHE_FILE", cache_dir / "sessions.json")
     monkeypatch.setattr(move, "INDEX_FILE", cache_dir / "index.json")
@@ -415,5 +443,6 @@ def tmp_move_dirs(
         "workspace_storage": workspace_storage,
         "pi_sessions": pi_sessions,
         "opencode_data": opencode_data,
+        "cline_data": cline_data,
         "cache_dir": cache_dir,
     }

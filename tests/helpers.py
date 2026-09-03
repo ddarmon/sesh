@@ -326,3 +326,163 @@ def create_opencode_db(
         conn.commit()
     finally:
         conn.close()
+
+
+def write_cline_session(
+    data_dir: Path,
+    *,
+    session_id: str = "1788435477952_eibi9",
+    workspace_root: str = "/Users/me/repo",
+    cwd: str | None = None,
+    model: str = "qwen3.8:27b-mlx",
+    started_at: str = "2026-09-03T11:37:58.008Z",
+    ended_at: str | None = "2026-09-03T11:41:26.059Z",
+    updated_at: str | None = None,
+    prompt: str = "Hi!",
+    title: str | None = "Hi!",
+    usage: dict | None = None,
+    messages: list[dict] | None = None,
+    messages_updated_at: str = "2026-09-03T11:41:07.061Z",
+    system_prompt: str = "You are Cline, an AI coding agent.",
+    is_subagent: bool = False,
+    parent_session_id: str | None = None,
+    version: int = 1,
+    messages_version: int = 1,
+    with_db_row: bool = True,
+    extra_record: dict | None = None,
+) -> Path:
+    """Create one Cline ``next``-bundle session under *data_dir*.
+
+    Writes ``sessions/{id}/{id}.json`` plus ``sessions/{id}/{id}.messages.json``
+    and, unless *with_db_row* is False, a matching row in ``db/sessions.db``.
+    Returns the messages-file path (the provider's ``source_path``).
+    """
+    session_dir = data_dir / "sessions" / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    cwd = workspace_root if cwd is None else cwd
+    messages_path = session_dir / f"{session_id}.messages.json"
+
+    metadata: dict = {
+        "usage": usage
+        if usage is not None
+        else {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+        },
+        "isFavorited": False,
+        "size": 0,
+    }
+    if title is not None:
+        metadata["title"] = title
+
+    record: dict = {
+        "version": version,
+        "session_id": session_id,
+        "source": "vscode",
+        "pid": 1234,
+        "started_at": started_at,
+        "status": "completed",
+        "interactive": True,
+        "provider": "ollama",
+        "model": model,
+        "cwd": cwd,
+        "workspace_root": workspace_root,
+        "enable_tools": True,
+        "enable_spawn": False,
+        "enable_teams": False,
+        "prompt": prompt,
+        "metadata": metadata,
+        "messages_path": str(messages_path),
+    }
+    if ended_at is not None:
+        record["ended_at"] = ended_at
+    if updated_at is not None:
+        record["updated_at"] = updated_at
+    if is_subagent:
+        record["is_subagent"] = True
+    if parent_session_id is not None:
+        record["parent_session_id"] = parent_session_id
+    if extra_record:
+        record.update(extra_record)
+
+    with open(session_dir / f"{session_id}.json", "w") as f:
+        json.dump(record, f, indent=2)
+
+    with open(messages_path, "w") as f:
+        json.dump(
+            {
+                "version": messages_version,
+                "updated_at": messages_updated_at,
+                "agent": "lead",
+                "sessionId": session_id,
+                "origin": {"source": "vscode", "mode": "user", "version": "4.1.17"},
+                "messages": messages or [],
+                "system_prompt": system_prompt,
+            },
+            f,
+            indent=2,
+        )
+
+    if with_db_row:
+        create_cline_db(data_dir, [record])
+    return messages_path
+
+
+def create_cline_db(data_dir: Path, records: list[dict]) -> Path:
+    """Create (or extend) Cline's ``db/sessions.db`` index for *records*."""
+    db_path = data_dir / "db" / "sessions.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            " session_id TEXT PRIMARY KEY, source TEXT NOT NULL,"
+            " pid INTEGER NOT NULL, started_at TEXT NOT NULL, ended_at TEXT,"
+            " exit_code INTEGER, status TEXT NOT NULL,"
+            " status_lock INTEGER NOT NULL DEFAULT 0,"
+            " interactive INTEGER NOT NULL, provider TEXT NOT NULL,"
+            " model TEXT NOT NULL, cwd TEXT NOT NULL,"
+            " workspace_root TEXT NOT NULL, team_name TEXT,"
+            " enable_tools INTEGER NOT NULL, enable_spawn INTEGER NOT NULL,"
+            " enable_teams INTEGER NOT NULL, parent_session_id TEXT,"
+            " parent_agent_id TEXT, agent_id TEXT, conversation_id TEXT,"
+            " is_subagent INTEGER NOT NULL DEFAULT 0, prompt TEXT,"
+            " metadata_json TEXT, transcript_path TEXT NOT NULL DEFAULT '',"
+            " hook_path TEXT NOT NULL, messages_path TEXT,"
+            " updated_at TEXT NOT NULL)"
+        )
+        for record in records:
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (session_id, source, pid,"
+                " started_at, ended_at, status, interactive, provider, model,"
+                " cwd, workspace_root, enable_tools, enable_spawn,"
+                " enable_teams, parent_session_id, is_subagent, prompt,"
+                " metadata_json, hook_path, messages_path, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record["session_id"], record.get("source", "vscode"),
+                    record.get("pid", 1234), record["started_at"],
+                    record.get("ended_at"), record.get("status", "completed"),
+                    int(record.get("interactive", True)),
+                    record.get("provider", "ollama"), record.get("model", ""),
+                    record["cwd"], record["workspace_root"],
+                    int(record.get("enable_tools", True)),
+                    int(record.get("enable_spawn", False)),
+                    int(record.get("enable_teams", False)),
+                    record.get("parent_session_id"),
+                    int(bool(record.get("is_subagent"))),
+                    record.get("prompt"),
+                    json.dumps(record.get("metadata", {})),
+                    record.get("hook_path", ""),
+                    record.get("messages_path"),
+                    record.get("updated_at")
+                    or record.get("ended_at")
+                    or record["started_at"],
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path

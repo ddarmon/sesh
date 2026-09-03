@@ -88,7 +88,7 @@ async def test_message_header_updates_on_render(app):
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_provider_filter_cycles_on_f(app):
-    """Pressing 'f' cycles through provider filters: All -> Claude -> Codex -> Cursor -> Copilot -> pi -> Gemini -> opencode."""
+    """Pressing 'f' cycles provider filters: All -> Claude -> Codex -> Cursor -> Copilot -> pi -> Gemini -> opencode -> Cline."""
     sesh_app, pilot = app
 
     assert sesh_app.current_filter is None
@@ -113,6 +113,9 @@ async def test_provider_filter_cycles_on_f(app):
 
     await pilot.press("f")
     assert sesh_app.current_filter == Provider.OPENCODE
+
+    await pilot.press("f")
+    assert sesh_app.current_filter == Provider.CLINE
 
     await pilot.press("f")
     assert sesh_app.current_filter is None

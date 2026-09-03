@@ -15,6 +15,7 @@ class Provider(Enum):
     PI = "pi"
     GEMINI = "gemini"
     OPENCODE = "opencode"
+    CLINE = "cline"
 
 
 @dataclass

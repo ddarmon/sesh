@@ -933,7 +933,7 @@ class SeshApp(App):
         self.projects: dict[str, Project] = {}
         self.sessions: dict[str, list[SessionMeta]] = {}
         self.current_filter: Provider | None = None
-        self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT, Provider.PI, Provider.GEMINI, Provider.OPENCODE]
+        self.filter_cycle = [None, Provider.CLAUDE, Provider.CODEX, Provider.CURSOR, Provider.COPILOT, Provider.PI, Provider.GEMINI, Provider.OPENCODE, Provider.CLINE]
         self.filter_index = 0
         self.sort_options = ["date", "name", "messages", "tokens", "timeline"]
         self.sort_index = 0
@@ -1295,6 +1295,8 @@ class SeshApp(App):
                 badges.append("G")
             if Provider.OPENCODE in prov_set:
                 badges.append("O")
+            if Provider.CLINE in prov_set:
+                badges.append("L")
             badge_str = ",".join(badges)
 
             # Backslash-escape the opening bracket so Rich doesn't treat
@@ -1582,6 +1584,7 @@ class SeshApp(App):
     def _provider_for(self, session: SessionMeta):
         """Build a provider instance pointed at the right base_dir for a session."""
         from sesh.providers.claude import ClaudeProvider
+        from sesh.providers.cline import ClineProvider
         from sesh.providers.codex import CodexProvider
         from sesh.providers.copilot import CopilotProvider
         from sesh.providers.cursor import CursorProvider
@@ -1603,6 +1606,7 @@ class SeshApp(App):
             Provider.PI: PiProvider,
             Provider.GEMINI: GeminiProvider,
             Provider.OPENCODE: OpencodeProvider,
+            Provider.CLINE: ClineProvider,
         }
         cls = cls_map.get(session.provider)
         if cls is None:
@@ -1838,7 +1842,7 @@ class SeshApp(App):
         tree.clear()
 
         node = tree.root.add(f"Search: '{query}' ({len(results)} matches)", expand=True)
-        badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U", Provider.COPILOT: "P", Provider.PI: "π", Provider.GEMINI: "G", Provider.OPENCODE: "O"}
+        badge_map = {Provider.CLAUDE: "C", Provider.CODEX: "X", Provider.CURSOR: "U", Provider.COPILOT: "P", Provider.PI: "π", Provider.GEMINI: "G", Provider.OPENCODE: "O", Provider.CLINE: "L"}
         for r in results[:100]:
             badge = badge_map.get(r.provider, "?")
             proj = self.projects.get(self._proj_key(r.host, r.project_path))
@@ -2071,6 +2075,13 @@ class SeshApp(App):
                 data = json.load(stream)
             if not isinstance(data, dict):
                 raise ValueError("Gemini session is not a JSON object")
+        elif session.provider == Provider.CLINE and source.is_file():
+            import json
+
+            with open(source) as stream:
+                data = json.load(stream)
+            if not isinstance(data, dict) or not isinstance(data.get("messages"), list):
+                raise ValueError("Cline transcript is not a JSON object with messages")
         elif source.suffix == ".db" and source.is_file():
             import sqlite3
 
@@ -2454,6 +2465,7 @@ class SeshApp(App):
     def _delete_session(self, session: SessionMeta) -> None:
         """Delete a session via its provider and refresh the tree."""
         from sesh.providers.claude import ClaudeProvider
+        from sesh.providers.cline import ClineProvider
         from sesh.providers.codex import CodexProvider
         from sesh.providers.copilot import CopilotProvider
         from sesh.providers.cursor import CursorProvider
@@ -2469,6 +2481,7 @@ class SeshApp(App):
             Provider.PI: PiProvider,
             Provider.GEMINI: GeminiProvider,
             Provider.OPENCODE: OpencodeProvider,
+            Provider.CLINE: ClineProvider,
         }
 
         provider_cls = providers_map.get(session.provider)

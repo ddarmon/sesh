@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sesh.models import Provider, SearchResult
+from sesh.providers.cline import resolve_data_dir as _cline_data_dir
 from sesh.providers.opencode import _parse_revert, _part_is_active
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
@@ -22,6 +23,8 @@ COPILOT_SESSIONS = Path.home() / ".copilot" / "session-state"
 PI_SESSIONS = Path.home() / ".pi" / "agent" / "sessions"
 GEMINI_TMP = Path.home() / ".gemini" / "tmp"
 OPENCODE_DATA = Path.home() / ".local" / "share" / "opencode"
+# Honours CLINE_DATA_DIR / CLINE_DIR the same way the provider does.
+CLINE_SESSIONS = _cline_data_dir() / "sessions"
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _RG_REGEX_META = re.compile(r'[\\.*+?{}()\[\]|^$]')
@@ -50,6 +53,7 @@ class _SearchRoots:
     pi_sessions: Path
     gemini_tmp: Path
     opencode_data: Path
+    cline_sessions: Path
 
 
 def _local_roots() -> _SearchRoots:
@@ -68,6 +72,7 @@ def _local_roots() -> _SearchRoots:
         pi_sessions=PI_SESSIONS,
         gemini_tmp=GEMINI_TMP,
         opencode_data=OPENCODE_DATA,
+        cline_sessions=CLINE_SESSIONS,
     )
 
 
@@ -92,6 +97,7 @@ def _aggregated_roots(aggregation_root: Path):
             pi_sessions=host_dir / ".pi" / "agent" / "sessions",
             gemini_tmp=host_dir / ".gemini" / "tmp",
             opencode_data=host_dir / ".local" / "share" / "opencode",
+            cline_sessions=host_dir / ".cline" / "data" / "sessions",
         )
 
 
@@ -500,6 +506,98 @@ def _search_gemini(
         ))
 
     return results
+
+
+def _search_cline(
+    rg: str,
+    query: str,
+    cline_sessions: Path,
+    host: str | None,
+) -> list[SearchResult]:
+    """Search Cline transcripts under *cline_sessions* via ripgrep.
+
+    Each session is one ``sessions/{id}/{id}.messages.json`` document (not
+    JSONL), so the matched line is a fragment; the session id comes from the
+    parent directory name and the project path from the sibling record.
+    Mirrors `_search_gemini`.
+    """
+    if not cline_sessions.is_dir():
+        return []
+
+    from sesh.providers.cline import is_valid_session_id
+
+    cmd = [
+        rg, "--json", "-i", "-m", "1",
+        *(("-F",) if _is_literal(query) else ()),
+        "--glob", "*.messages.json",
+        query,
+        str(cline_sessions),
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+
+    for line in proc.stdout.splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") != "match":
+            continue
+
+        match_data = data.get("data", {})
+        file_path = match_data.get("path", {}).get("text", "")
+        matched_text = match_data.get("lines", {}).get("text", "").strip()
+        if not file_path or not matched_text or file_path in seen:
+            continue
+        seen.add(file_path)
+
+        fp = Path(file_path)
+        session_id = fp.parent.name
+        if not is_valid_session_id(session_id):
+            continue
+
+        project_path = _cline_project_path(fp.parent, session_id)
+        if not project_path:
+            continue
+
+        display_text = _extract_display_text(matched_text, query)
+        if not display_text:
+            display_text = matched_text[:200]
+
+        results.append(SearchResult(
+            session_id=session_id,
+            project_path=project_path,
+            provider=Provider.CLINE,
+            matched_line=display_text,
+            file_path=file_path,
+            host=host,
+        ))
+
+    return results
+
+
+def _cline_project_path(session_dir: Path, session_id: str) -> str:
+    """Read ``workspace_root`` (else ``cwd``) from a Cline session record."""
+    try:
+        with open(session_dir / f"{session_id}.json") as f:
+            record = json.load(f)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+    if not isinstance(record, dict):
+        return ""
+    for field in ("workspace_root", "cwd"):
+        value = record.get(field)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _escape_like(s: str) -> str:
@@ -1145,6 +1243,9 @@ def _search_one_host(
 
     # Gemini search: pretty-printed JSON session files (separate rg pass)
     results.extend(_search_gemini(rg, query, roots.gemini_tmp, roots.host))
+
+    # Cline search: one JSON transcript per session dir (separate rg pass)
+    results.extend(_search_cline(rg, query, roots.cline_sessions, roots.host))
 
     # opencode: SQLite databases first, then the legacy JSON storage tree
     opencode_seen: set[str] = set()

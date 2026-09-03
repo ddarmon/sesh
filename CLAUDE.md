@@ -93,6 +93,7 @@ The app has three layers:
 | pi       | `~/.pi/agent/sessions/{encoded}/`  | JSONL      |
 | Gemini   | `~/.gemini/tmp/{dir}/chats/`       | JSON       |
 | opencode | `~/.local/share/opencode/`         | SQLite+JSON |
+| Cline    | `~/.cline/data/sessions/`          | JSON+SQLite |
 
 The pi encoded directory wraps the cwd with leading and trailing `--`
 (e.g. `/Users/me/proj` -\> `--Users-me-proj--`). Each session is one
@@ -128,6 +129,31 @@ opencode has two on-disk formats, both supported by the provider
     `storage/part/{messageID}/{partID}.json` (content parts; the older
     nested `storage/part/{sessionID}/{messageID}/` layout is also
     read).
+
+Cline's data dir resolves as `CLINE_DATA_DIR` (if set and non-empty), else
+`${CLINE_DIR}/data`, else `~/.cline/data` — matching the extension's own
+precedence. In aggregation mode the env overrides are **not** consulted (they
+describe this machine, not the mirrored host); the root is
+`{base_dir}/.cline/data`. Only the **`next` (SDK) bundle's** store is read; the
+`legacy` bundle's VS Code `globalStorage/saoudrizwan.claude-dev/tasks/` tree is
+an explicit non-goal (the formats share nothing, and legacy discards reasoning
+traces before they reach disk), so a user on that bundle sees no Cline sessions.
+Each session is one directory `sessions/{sessionId}/` (ids are
+`{msEpoch}_{suffix}`) holding a `{sessionId}.json` record and a
+`{sessionId}.messages.json` transcript, both single JSON documents parsed with
+`json.load` on demand. Discovery reads only those files: the sibling
+`db/sessions.db` index is redundant with them and has a live writer (VS Code
+holds it open in WAL mode), so the DB is touched only by `delete_session` and
+`move_project`, which must keep Cline's own index in sync. The recorded
+absolute `messages_path` is never trusted — it is recomputed from the scanned
+directory, because in aggregation mode it points at the source host. Project
+paths come from `workspace_root` (falling back to `cwd`); chat-mode sessions
+sit in `{data_dir}/workspaces/chat` and are grouped under a `cline:chat`
+pseudo-project. Records whose directory name is not traversal-safe, or whose
+`version` is unrecognized, are skipped. Sub-agent records (`is_subagent`) are
+excluded from the session list and counted onto the parent via
+`parent_session_id`; `discover_subagents` / `load_subagents` are deferred until
+a real spawned session exists to verify against.
 
 The opencode project path comes from the session's `directory` field,
 never from project IDs or folder names. A staged `/undo` keeps physical
@@ -171,6 +197,9 @@ stable HTML browser viewer; `L` toggles a private live-updating browser view
     not be resolved (`gemini:{hash8}` fallback) are not resumable ---
     there is no real cwd to run the command in
 -   **opencode**: `opencode --session <session-id>`
+-   **Cline**: not resumable — Cline has no resume-by-id CLI, so it is
+    absent from `RESUME_COMMANDS` and falls into the ordinary "cannot be
+    resumed" path
 
 If the CLI binary isn't on PATH, the status bar shows an error.
 
@@ -380,6 +409,13 @@ discovery and cached alongside other metadata. Per-provider sources:
     the LAST turn's `input` (which already includes cached tokens);
     `output_tokens` sums `output + thoughts` across turns;
     `cumulative_input_tokens` sums per-turn `input` across the session
+-   **Cline**: `metadata.usage` on the session record plus the transcript's
+    per-message `metrics`. `cumulative_input_tokens` is
+    `usage.inputTokens + cacheReadTokens + cacheWriteTokens`; `output_tokens`
+    is `usage.outputTokens`; `input_tokens` is the LAST assistant message's
+    `metrics.inputTokens + cacheReadTokens + cacheWriteTokens`.
+    `metadata.tokensIn` / `tokensOut` are **not** used — they skip tool-call
+    turns (verified against a real session)
 -   **opencode**: per-assistant-message `tokens` blocks
     (`input`/`output`/`cache.read`/`cache.write`). `input_tokens` is the
     LAST turn's `input + cache.read + cache.write`; `output_tokens` sums
@@ -540,6 +576,10 @@ the session is deleted via the provider's `delete_session` method:
 -   **opencode**: deletes the session/message/part rows from the
     SQLite DB, or the session JSON plus its message/part files in the
     legacy storage tree
+-   **Cline**: removes `sessions/{id}/`, then deletes the matching row and
+    any `parent_session_id` children from `db/sessions.db` (opened
+    read-write with `timeout=5`). A missing DB is fine; an unopenable or
+    locked one raises after the files are gone rather than failing silently
 
 CLI equivalents:
 
@@ -567,6 +607,12 @@ CLI equivalent:
 -   `sesh move <old-path> <new-path>`
 -   `sesh move <old-path> <new-path> --metadata-only`
 -   `sesh move <old-path> <new-path> --dry-run`
+
+Cline's `move_project` rewrites `workspace_root` and `cwd` (prefix match) in
+each `{sessionId}.json` **and** in the matching `db/sessions.db` rows, which
+are the index Cline itself reads. The old path also appears inside
+`system_prompt` and inside tool output; those are left alone, as the Claude
+provider already tolerates embedded stale paths.
 
 Gemini sessions are not covered by project move: the format stores the
 cwd only as a SHA-256 `projectHash` inside every session file, so a move
@@ -696,6 +742,7 @@ rsync -a --delete laptop:.claude/  $SESH_AGGREGATION_ROOT/laptop/.claude/
 rsync -a --delete laptop:.codex/   $SESH_AGGREGATION_ROOT/laptop/.codex/
 rsync -a --delete laptop:.pi/      $SESH_AGGREGATION_ROOT/laptop/.pi/
 rsync -a --delete laptop:.local/share/opencode/  $SESH_AGGREGATION_ROOT/laptop/.local/share/opencode/
+rsync -a --delete laptop:.cline/   $SESH_AGGREGATION_ROOT/laptop/.cline/
 ```
 
 Activate aggregation mode with either:
@@ -750,6 +797,8 @@ field. The local-mode JSON output also includes `host` (always `null`).
 -   opencode lives under `.local/share/opencode` rather than a
     top-level dotdir, so the mirror needs that subpath
     (`{host}/.local/share/opencode/`).
+-   Cline is a plain top-level dotdir (`{host}/.cline/data/`), so it needs
+    no Cursor-style `Library/` caveat.
 
 ## Plans
 
