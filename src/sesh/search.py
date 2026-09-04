@@ -585,13 +585,20 @@ def _search_cline(
 
 
 def _cline_project_path(session_dir: Path, session_id: str) -> str:
-    """Read ``workspace_root`` (else ``cwd``) from a Cline session record."""
+    """Read ``workspace_root`` (else ``cwd``) from a Cline session record.
+
+    Returns "" for a sub-agent record, which discovery also excludes: a hit
+    attributed to a session the tree never lists could neither be opened nor
+    (via ``sesh clean``) safely deleted.  When Cline ships spawning, this is
+    where child hits should instead be attributed to their parent with an
+    ``agent_id``, the way the Claude provider does.
+    """
     try:
         with open(session_dir / f"{session_id}.json") as f:
             record = json.load(f)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return ""
-    if not isinstance(record, dict):
+    if not isinstance(record, dict) or record.get("is_subagent"):
         return ""
     for field in ("workspace_root", "cwd"):
         value = record.get(field)

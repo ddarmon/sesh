@@ -60,6 +60,19 @@ _TASK_RESUMPTION_PREFIX = "[TASK RESUMPTION]"
 # The chat-mode scratch workspace is not a real project; it is grouped under
 # its own pseudo-project so those sessions stay browsable.
 _CHAT_WORKSPACE_NAME = "cline:chat"
+_CHAT_WORKSPACE_SUFFIX = ("data", "workspaces", "chat")
+
+
+def is_chat_workspace(project_path: str) -> bool:
+    """True for Cline's chat-mode scratch workspace.
+
+    Matched on the trailing ``…/data/workspaces/chat`` segments rather than
+    against this machine's own data dir: in aggregation mode the recorded
+    ``workspace_root`` is the *source* host's absolute path, which never equals
+    the aggregator's ``_chat_workspace``.
+    """
+    parts = Path(project_path).parts
+    return parts[-3:] == _CHAT_WORKSPACE_SUFFIX
 
 
 def resolve_data_dir() -> Path:
@@ -77,9 +90,9 @@ def resolve_data_dir() -> Path:
     return CLINE_DATA_DIR
 
 
-def is_valid_session_id(session_id: str) -> bool:
+def is_valid_session_id(session_id) -> bool:
     """True when *session_id* is safe to interpolate into a filesystem path."""
-    return bool(_SESSION_ID_RE.match(session_id))
+    return isinstance(session_id, str) and bool(_SESSION_ID_RE.match(session_id))
 
 
 def _parse_timestamp(value) -> datetime | None:
@@ -159,8 +172,8 @@ def _blocks_to_messages(role: str, blocks, ts: datetime | None) -> list[Message]
                 continue
             is_system = False
             if role == "user":
-                is_system = _is_task_resumption(strip_user_input_wrapper(text))
                 text = strip_user_input_wrapper(text)
+                is_system = _is_task_resumption(text)
             if not text.strip():
                 continue
             out.append(Message(
@@ -205,7 +218,7 @@ def _blocks_to_messages(role: str, blocks, ts: datetime | None) -> list[Message]
         elif btype == "tool_result":
             # ``content`` is arbitrary JSON, not necessarily a string
             # (``run_commands`` stores a list of {query, result, success}).
-            output = _stringify(block.get("content", ""))
+            output = _stringify(block.get("content") or "")
             if block.get("is_error"):
                 output = f"[error] {output}"
             out.append(Message(
@@ -284,10 +297,6 @@ class ClineProvider(SessionProvider):
     def _db_path(self) -> Path:
         return self._data_dir / "db" / "sessions.db"
 
-    @property
-    def _chat_workspace(self) -> Path:
-        return self._data_dir / "workspaces" / "chat"
-
     # ------------------------------------------------------------------
     # SessionProvider interface
     # ------------------------------------------------------------------
@@ -352,12 +361,32 @@ class ClineProvider(SessionProvider):
         return messages
 
     def delete_session(self, session: SessionMeta) -> None:
-        """Remove the session directory and its row in Cline's own index."""
+        """Remove the session directory, its sub-agent directories, and its rows.
+
+        Cline's store keys child sessions by ``parent_session_id``, so deleting a
+        parent has to take the children's directories with it — otherwise their
+        records keep being parsed on every scan and keep inflating the (now
+        absent) parent's ``subagent_count``.
+        """
         if not is_valid_session_id(session.id):
             raise ValueError(f"Refusing to delete unsafe session id: {session.id}")
 
-        shutil.rmtree(self._sessions_dir / session.id, ignore_errors=True)
+        # Collect child directories before the scan cache is dropped.
+        child_ids = [
+            child_id
+            for child_id, record in self._session_records().items()
+            if record.get("is_subagent")
+            and record.get("parent_session_id") == session.id
+        ]
         self._records = None
+
+        # rmtree is deliberately allowed to raise: a removal that fails
+        # (permissions, an open handle) must abort before the index is edited,
+        # rather than leaving files sesh re-lists and Cline no longer knows about.
+        for target_id in (session.id, *child_ids):
+            target = self._sessions_dir / target_id
+            if target.is_dir():
+                shutil.rmtree(target)
 
         db_path = self._db_path
         if not db_path.is_file():
@@ -410,6 +439,7 @@ class ClineProvider(SessionProvider):
                     _atomic_rewrite_json(record_file, record)
                     files_modified += 1
             except OSError as exc:
+                self._records = None
                 return MoveReport(
                     provider=Provider.CLINE,
                     success=False,
@@ -422,27 +452,35 @@ class ClineProvider(SessionProvider):
             try:
                 conn = sqlite3.connect(str(db_path), timeout=5)
                 try:
-                    for field in ("workspace_root", "cwd"):
-                        # Descendants first: rewriting the exact matches first
-                        # would let a nested move (/a -> /a/b) re-match its own
-                        # output on the prefix pass.
-                        conn.execute(
-                            f"UPDATE sessions SET {field} = ? || substr({field}, ?)"
-                            f" WHERE {field} LIKE ? ESCAPE '!'",
-                            (
-                                new_path.rstrip("/"),
-                                len(old_path.rstrip("/")) + 1,
-                                _escape_like(old_path.rstrip("/")) + "/%",
-                            ),
-                        )
-                        conn.execute(
-                            f"UPDATE sessions SET {field} = ? WHERE {field} = ?",
-                            (new_path, old_path),
-                        )
+                    # Match in Python with the same helper the JSON pass uses.
+                    # SQL LIKE is case-insensitive for ASCII, so a LIKE prefix
+                    # pass would rewrite rows the JSON pass correctly skipped
+                    # (e.g. moving "/Users/me/repo" would hit a record stored as
+                    # "/Users/me/Repo") and report zero files changed while
+                    # corrupting Cline's index. Rewriting each row once also
+                    # keeps a nested move (/a -> /a/b) from re-matching its own
+                    # output.
+                    rows = conn.execute(
+                        "SELECT session_id, workspace_root, cwd FROM sessions"
+                    ).fetchall()
+                    for session_id, workspace_root, cwd in rows:
+                        updated = []
+                        for value in (workspace_root, cwd):
+                            if isinstance(value, str) and _path_matches(value, old_path):
+                                updated.append(_rewrite_path(value, old_path, new_path))
+                            else:
+                                updated.append(value)
+                        if updated != [workspace_root, cwd]:
+                            conn.execute(
+                                "UPDATE sessions SET workspace_root = ?, cwd = ?"
+                                " WHERE session_id = ?",
+                                (*updated, session_id),
+                            )
                     conn.commit()
                 finally:
                     conn.close()
             except sqlite3.Error as exc:
+                self._records = None
                 return MoveReport(
                     provider=Provider.CLINE,
                     success=False,
@@ -487,7 +525,10 @@ class ClineProvider(SessionProvider):
             # Never trust the recorded absolute messages_path: in aggregation
             # mode it points at the source host's filesystem.
             record["_messages_path"] = str(session_dir / f"{name}.messages.json")
-            records[record.get("session_id") or name] = record
+            # Identity is the (traversal-safe) directory name, not the record's
+            # own session_id, so discovery, search, and delete address the same
+            # session even if a record's internal id disagrees with its folder.
+            records[name] = record
 
         self._records = records
         return records
@@ -500,7 +541,7 @@ class ClineProvider(SessionProvider):
         return ""
 
     def _display_name(self, project_path: str) -> str:
-        if Path(project_path) == self._chat_workspace:
+        if is_chat_workspace(project_path):
             return _CHAT_WORKSPACE_NAME
         return Path(project_path).name or project_path
 
@@ -518,12 +559,24 @@ class ClineProvider(SessionProvider):
         if not isinstance(metadata, dict):
             metadata = {}
 
+        # The cache is keyed on the transcript, so it may only stand in for
+        # fields the transcript produces. Everything else comes from the record,
+        # which is re-read on every scan anyway — Cline rewrites the record alone
+        # when it backfills a generated title, and a cached summary would
+        # otherwise never catch up.
+        counts = None
         if cache:
             cached = cache.get_sessions(messages_path)
             if cached:
-                session = cached[0]
-                session.subagent_count = subagent_count
-                return session
+                counts = {
+                    "message_count": cached[0].message_count,
+                    "input_tokens": cached[0].input_tokens,
+                    "updated_at": cached[0].timestamp,
+                }
+
+        parsed_transcript = counts is None
+        if counts is None:
+            counts = self._messages_summary(messages_path)
 
         started = _parse_timestamp(record.get("started_at"))
         updated = (
@@ -531,7 +584,6 @@ class ClineProvider(SessionProvider):
             or _parse_timestamp(record.get("ended_at"))
         )
 
-        counts = self._messages_summary(messages_path)
         if updated is None:
             updated = counts["updated_at"] or started
         if updated is None:
@@ -570,7 +622,7 @@ class ClineProvider(SessionProvider):
             host=self.host,
             subagent_count=subagent_count,
         )
-        if cache:
+        if cache and parsed_transcript:
             cache.put_sessions(messages_path, [session])
         return session
 
@@ -602,7 +654,7 @@ class ClineProvider(SessionProvider):
             if entry.get("role") != "assistant":
                 continue
             metrics = entry.get("metrics")
-            if isinstance(metrics, dict):
+            if isinstance(metrics, dict) and metrics:
                 input_tokens = (
                     _int_or_zero(metrics.get("inputTokens"))
                     + _int_or_zero(metrics.get("cacheReadTokens"))
@@ -611,14 +663,9 @@ class ClineProvider(SessionProvider):
 
         return {
             "message_count": message_count,
-            "input_tokens": input_tokens,
+            "input_tokens": input_tokens or None,
             "updated_at": _parse_timestamp(data.get("updated_at")),
         }
-
-
-def _escape_like(value: str) -> str:
-    """Escape ``%``, ``_`` and ``!`` for a SQLite LIKE with ``ESCAPE '!'``."""
-    return value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
 
 
 def _path_matches(value: str, old_path: str) -> bool:
@@ -647,6 +694,7 @@ __all__ = [
     "CLINE_DIR",
     "CLINE_DATA_DIR",
     "ClineProvider",
+    "is_chat_workspace",
     "is_valid_session_id",
     "resolve_data_dir",
     "strip_user_input_wrapper",

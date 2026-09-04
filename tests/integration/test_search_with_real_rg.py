@@ -639,3 +639,28 @@ def test_aggregated_search_includes_cline_host(tmp_aggregation_search_dirs) -> N
     assert {r.project_path for r in hits} == {
         "/Users/me/laptop", "/Users/me/desktop",
     }
+
+
+def test_ripgrep_search_skips_cline_subagent_transcripts(tmp_search_dirs) -> None:
+    """Sub-agent sessions are hidden by discovery, so search must not surface them.
+
+    A hit attributed to a session the tree never lists could neither be opened
+    nor safely deleted by `sesh clean`.
+    """
+    _require_rg()
+    from tests.helpers import write_cline_session
+
+    data_dir = tmp_search_dirs["cline_sessions"].parent
+    write_cline_session(
+        data_dir, session_id="1_a", workspace_root="/Users/me/cline-repo",
+        messages=[{"id": "m1", "role": "user", "ts": 1, "content": "shared needle text"}],
+    )
+    write_cline_session(
+        data_dir, session_id="2_b", workspace_root="/Users/me/cline-repo",
+        is_subagent=True, parent_session_id="1_a",
+        messages=[{"id": "m1", "role": "user", "ts": 1, "content": "shared needle text"}],
+    )
+
+    results = search.ripgrep_search("shared needle text")
+    hits = [r for r in results if r.provider is Provider.CLINE]
+    assert [r.session_id for r in hits] == ["1_a"]

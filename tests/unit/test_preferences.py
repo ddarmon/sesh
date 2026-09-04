@@ -71,3 +71,19 @@ def test_load_preferences_ignores_unknown_keys(tmp_cache_dir) -> None:
         "show_agents": False,
         "fullscreen": False,
     }
+
+
+def test_every_provider_is_a_valid_filter() -> None:
+    """A new provider must not be silently dropped when preferences are saved."""
+    from sesh.models import Provider
+    from sesh.preferences import _normalize_preferences
+
+    for provider in Provider:
+        normalized = _normalize_preferences({"provider_filter": provider.value})
+        assert normalized["provider_filter"] == provider.value
+
+
+def test_unknown_provider_filter_falls_back_to_none() -> None:
+    from sesh.preferences import _normalize_preferences
+
+    assert _normalize_preferences({"provider_filter": "nope"})["provider_filter"] is None

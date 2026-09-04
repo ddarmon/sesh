@@ -145,3 +145,56 @@ def test_move_into_a_subdirectory_of_itself(tmp_cline_dir: Path) -> None:
     assert record["workspace_root"] == "/a/b"
     assert record["cwd"] == "/a/b/sub"
     assert _db_paths(tmp_cline_dir, "1_a") == ("/a/b", "/a/b/sub")
+
+
+def test_move_db_pass_is_case_sensitive(tmp_cline_dir: Path) -> None:
+    """SQL LIKE is case-insensitive for ASCII; the DB pass must not be.
+
+    Otherwise moving `/Users/me/repo` rewrites a record stored as
+    `/Users/me/Repo` in Cline's index while the JSON pass correctly skips it —
+    corrupting the index and reporting zero files changed.
+    """
+    write_cline_session(
+        tmp_cline_dir, session_id="1_a",
+        workspace_root="/Users/me/Repo", cwd="/Users/me/Repo/sub",
+    )
+
+    report = cline.ClineProvider().move_project("/Users/me/repo", "/Users/me/moved")
+
+    assert report.files_modified == 0
+    record = _record(tmp_cline_dir, "1_a")
+    assert record["workspace_root"] == "/Users/me/Repo"
+    assert record["cwd"] == "/Users/me/Repo/sub"
+    assert _db_paths(tmp_cline_dir, "1_a") == ("/Users/me/Repo", "/Users/me/Repo/sub")
+
+
+def test_move_db_and_json_passes_agree(tmp_cline_dir: Path) -> None:
+    """Every row the JSON pass rewrites is rewritten identically in the DB."""
+    write_cline_session(
+        tmp_cline_dir, session_id="1_a", workspace_root="/old", cwd="/old/deep/sub",
+    )
+    write_cline_session(tmp_cline_dir, session_id="2_b", workspace_root="/old-ish")
+    write_cline_session(tmp_cline_dir, session_id="3_c", workspace_root="/unrelated")
+
+    cline.ClineProvider().move_project("/old", "/new")
+
+    for session_id in ("1_a", "2_b", "3_c"):
+        record = _record(tmp_cline_dir, session_id)
+        assert _db_paths(tmp_cline_dir, session_id) == (
+            record["workspace_root"], record["cwd"],
+        )
+    assert _db_paths(tmp_cline_dir, "1_a") == ("/new", "/new/deep/sub")
+    assert _db_paths(tmp_cline_dir, "2_b") == ("/old-ish", "/old-ish")
+
+
+def test_move_error_paths_drop_the_record_cache(tmp_cline_dir: Path) -> None:
+    write_cline_session(tmp_cline_dir, session_id="1_a", workspace_root="/old")
+    provider = cline.ClineProvider()
+    provider.get_sessions("/old")
+    (tmp_cline_dir / "db" / "sessions.db").write_bytes(b"not a database")
+
+    assert provider.move_project("/old", "/new").success is False
+    # The JSON records were rewritten, so a reused instance must not serve
+    # pre-move paths from its cache.
+    assert provider.get_sessions("/old") == []
+    assert [s.id for s in provider.get_sessions("/new")] == ["1_a"]

@@ -373,3 +373,42 @@ uv run sesh search "Cline" --provider cline
     `cumulative_input_tokens` 11360, exactly the arithmetic predicted above),
     `sesh search`, `sesh export --format html` (tool and thinking cards
     render), and the TUI tree showing `cline:chat [L:4]`.
+-   2026-09-03 — Post-implementation review round (fresh Opus 5 reviewer against
+    the branch diff). Six confirmed defects found and fixed on the same branch,
+    each with a regression test:
+    -   `move_project`'s DB pass matched descendants with SQL `LIKE`, which is
+        case-insensitive for ASCII while the JSON pass is not. Moving
+        `/Users/me/repo` against a record stored as `/Users/me/Repo` reported
+        `files_modified=0`, left the JSON right, and still rewrote Cline's index
+        row. Both passes now match with the same case-sensitive Python helper and
+        rewrite each row once.
+    -   `preferences._VALID_PROVIDER_FILTERS` was a hand-maintained set that
+        omitted `"cline"`, so the Cline filter never persisted and any save made
+        while it was active wrote `None`. Now derived from the `Provider` enum,
+        with a test that every provider round-trips.
+    -   `delete_session` deleted sub-agent DB rows but left their directories, so
+        the orphans kept being parsed. It now removes the child directories too.
+    -   `delete_session` resolved its path from the record's internal
+        `session_id` while search used the directory name; on divergence it
+        silently no-opped (`ignore_errors=True` swallowed the miss). Identity is
+        now the directory name everywhere, and a failed removal propagates
+        instead of letting the index be edited anyway.
+    -   The sessions cache was keyed on the transcript but served record-derived
+        fields, so a title Cline backfilled into the record alone never
+        appeared. The cache now stands in only for `message_count` /
+        `input_tokens`; everything else is rebuilt from the record each scan.
+        (This supersedes the composite-fingerprint design sketched above, and
+        was an undocumented deviation in the entry before this one.)
+    -   `_display_name` compared against the local `_chat_workspace`, so a
+        mirrored host's chat sessions were named `chat` rather than
+        `cline:chat`. Matching moved to the trailing path segments.
+
+    Also fixed while in the same code: `_search_cline` now skips `is_subagent`
+    transcripts (a hit on a session discovery never lists could not be opened
+    and `sesh clean` would delete it unseen); an empty `metrics` dict reads as
+    absent rather than `0`; the move error paths drop the stale record cache;
+    `is_valid_session_id` tolerates a non-string; a `tool_result` with explicit
+    `null` content renders empty rather than `"null"`. Two weak tests were
+    rewritten: the cache round-trip now fails if the cache is bypassed, and the
+    delete-failure test's docstring no longer claims the opposite of the
+    behavior it locks in. Suite: 853 passing.

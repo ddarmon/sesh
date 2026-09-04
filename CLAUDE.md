@@ -149,11 +149,21 @@ absolute `messages_path` is never trusted — it is recomputed from the scanned
 directory, because in aggregation mode it points at the source host. Project
 paths come from `workspace_root` (falling back to `cwd`); chat-mode sessions
 sit in `{data_dir}/workspaces/chat` and are grouped under a `cline:chat`
-pseudo-project. Records whose directory name is not traversal-safe, or whose
-`version` is unrecognized, are skipped. Sub-agent records (`is_subagent`) are
-excluded from the session list and counted onto the parent via
+pseudo-project (matched on the trailing `data/workspaces/chat` segments, so a
+mirrored host's absolute path is recognized too). Session identity is the
+directory name, not the record's internal `session_id`, so discovery, search,
+and delete all address the same session. Records whose directory name is not
+traversal-safe, or that carry a `version` other than `1`, are skipped; a
+missing `version` is accepted. Sub-agent records (`is_subagent`) are excluded
+from the session list and from search results, and counted onto the parent via
 `parent_session_id`; `discover_subagents` / `load_subagents` are deferred until
 a real spawned session exists to verify against.
+
+The sessions cache is keyed on the transcript file, so it may only stand in for
+the fields the transcript produces (`message_count`, `input_tokens`). Summary,
+model, timestamps, and token totals are rebuilt from the record on every scan —
+Cline rewrites the record alone when it backfills a generated title, which a
+transcript-keyed cache entry would otherwise never pick up.
 
 The opencode project path comes from the session's `directory` field,
 never from project IDs or folder names. A staged `/undo` keeps physical
@@ -576,10 +586,13 @@ the session is deleted via the provider's `delete_session` method:
 -   **opencode**: deletes the session/message/part rows from the
     SQLite DB, or the session JSON plus its message/part files in the
     legacy storage tree
--   **Cline**: removes `sessions/{id}/`, then deletes the matching row and
-    any `parent_session_id` children from `db/sessions.db` (opened
-    read-write with `timeout=5`). A missing DB is fine; an unopenable or
-    locked one raises after the files are gone rather than failing silently
+-   **Cline**: removes `sessions/{id}/` **and the directories of any
+    `is_subagent` children**, then deletes the matching row plus any
+    `parent_session_id` rows from `db/sessions.db` (opened read-write with
+    `timeout=5`). Files are removed first and a failed removal propagates, so
+    a partial delete never edits the index. A missing DB is fine; an
+    unopenable or locked one raises after the files are gone rather than
+    failing silently
 
 CLI equivalents:
 
@@ -610,7 +623,10 @@ CLI equivalent:
 
 Cline's `move_project` rewrites `workspace_root` and `cwd` (prefix match) in
 each `{sessionId}.json` **and** in the matching `db/sessions.db` rows, which
-are the index Cline itself reads. The old path also appears inside
+are the index Cline itself reads. Both passes match with the same
+case-sensitive Python helper and rewrite each row once: a SQL `LIKE` prefix
+pass would be case-insensitive for ASCII and could rewrite index rows the JSON
+pass correctly skipped. The old path also appears inside
 `system_prompt` and inside tool output; those are left alone, as the Claude
 provider already tolerates embedded stale paths.
 

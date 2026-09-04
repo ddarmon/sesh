@@ -535,9 +535,10 @@ from the transcript's per-message `metrics` --- `metadata.tokensIn` /
 traces and real `tool_use` / `tool_result` blocks are both preserved.
 
 Cline has no resume-by-id CLI, so **Cline sessions are not resumable**.
-Deleting a session removes its directory and its row in Cline's own
-`db/sessions.db` index; `sesh move` rewrites `workspace_root` / `cwd` in
-both the JSON records and that index. Discovery itself never reads the
+Deleting a session removes its directory, the directories of any sub-agent
+children, and the corresponding rows in Cline's own `db/sessions.db` index;
+`sesh move` rewrites `workspace_root` / `cwd` in both the JSON records and
+that index. Discovery itself never reads the
 database (it is redundant with the JSON and has a live writer).
 
 The **`legacy` bundle's** store (the VS Code

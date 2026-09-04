@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -310,20 +311,104 @@ def test_host_is_stamped_in_aggregation_mode(tmp_path: Path) -> None:
     assert session.source_path == str(data_dir / "sessions" / "1_a" / "1_a.messages.json")
 
 
-def test_cache_round_trip(tmp_cline_dir: Path, tmp_cache_dir: Path) -> None:
+def test_cache_serves_transcript_fields_without_reparsing(
+    tmp_cline_dir: Path, tmp_cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm cache answers the transcript-derived fields without a re-parse."""
     from sesh.cache import SessionCache
 
     write_cline_session(
         tmp_cline_dir, session_id="1_a", workspace_root="/p",
-        messages=[_user(), _assistant()],
+        messages=[_user(), _assistant(metrics={
+            "inputTokens": 100, "outputTokens": 5,
+            "cacheReadTokens": 0, "cacheWriteTokens": 0,
+        })],
     )
     cache = SessionCache()
-    first = cline.ClineProvider(cache=cache).get_sessions("/p")
-    second = cline.ClineProvider(cache=cache).get_sessions("/p")
+    (first,) = cline.ClineProvider(cache=cache).get_sessions("/p")
+    assert (first.message_count, first.input_tokens) == (2, 100)
 
-    assert [s.id for s in first] == [s.id for s in second]
-    assert second[0].message_count == 2
-    assert second[0].summary == first[0].summary
+    def fail(*args, **kwargs):
+        raise AssertionError("transcript should not be re-parsed on a cache hit")
+
+    monkeypatch.setattr(cline.ClineProvider, "_messages_summary", staticmethod(fail))
+    (second,) = cline.ClineProvider(cache=cache).get_sessions("/p")
+    assert (second.message_count, second.input_tokens) == (2, 100)
+
+
+def test_cache_does_not_stale_record_only_metadata(
+    tmp_cline_dir: Path, tmp_cache_dir: Path
+) -> None:
+    """The cache is keyed on the transcript, so record fields must stay live.
+
+    Cline backfills a generated `metadata.title` into the record alone; a
+    cached summary keyed on the untouched transcript would never catch up.
+    """
+    from sesh.cache import SessionCache
+
+    write_cline_session(
+        tmp_cline_dir, session_id="1_a", workspace_root="/p",
+        title="Old title", model="old-model", messages=[_user()],
+    )
+    cache = SessionCache()
+    (first,) = cline.ClineProvider(cache=cache).get_sessions("/p")
+    assert first.summary == "Old title"
+
+    record_file = tmp_cline_dir / "sessions" / "1_a" / "1_a.json"
+    record = json.loads(record_file.read_text())
+    record["metadata"]["title"] = "Generated title"
+    record["model"] = "new-model"
+    record_file.write_text(json.dumps(record))
+
+    (second,) = cline.ClineProvider(cache=cache).get_sessions("/p")
+    assert second.summary == "Generated title"
+    assert second.model == "new-model"
+    # ...while the transcript-derived count still comes from the cache.
+    assert second.message_count == 1
+
+
+def test_chat_workspace_is_named_in_aggregation_mode(tmp_path: Path) -> None:
+    """A mirrored record carries the source host's absolute chat path."""
+    data_dir = tmp_path / "laptop" / ".cline" / "data"
+    write_cline_session(
+        data_dir, session_id="1_a",
+        workspace_root="/Users/someone-else/.cline/data/workspaces/chat",
+    )
+
+    provider = cline.ClineProvider(base_dir=tmp_path / "laptop", host="laptop")
+    assert list(provider.discover_projects()) == [
+        ("/Users/someone-else/.cline/data/workspaces/chat", "cline:chat"),
+    ]
+
+
+def test_is_chat_workspace() -> None:
+    assert cline.is_chat_workspace("/Users/me/.cline/data/workspaces/chat")
+    assert cline.is_chat_workspace("/anywhere/data/workspaces/chat")
+    assert not cline.is_chat_workspace("/Users/me/data/workspaces/other")
+    assert not cline.is_chat_workspace("/Users/me/repo")
+
+
+def test_empty_metrics_reads_as_no_token_data(tmp_cline_dir: Path) -> None:
+    """An empty metrics dict is absent data, not a context size of zero."""
+    write_cline_session(
+        tmp_cline_dir, session_id="1_a", workspace_root="/p",
+        messages=[_assistant(metrics={})],
+    )
+    (session,) = cline.ClineProvider().get_sessions("/p")
+    assert session.input_tokens is None
+
+
+def test_record_id_is_the_directory_name(tmp_cline_dir: Path) -> None:
+    """Identity comes from the folder, which is what search and delete use."""
+    write_cline_session(tmp_cline_dir, session_id="1_a", workspace_root="/p")
+    record_file = tmp_cline_dir / "sessions" / "1_a" / "1_a.json"
+    record = json.loads(record_file.read_text())
+    record["session_id"] = "9_z"
+    record_file.write_text(json.dumps(record))
+
+    (session,) = cline.ClineProvider().get_sessions("/p")
+    assert session.id == "1_a"
+    assert session.source_path.endswith("1_a.messages.json")
 
 
 def test_diagnostic_paths_report_data_and_sessions_roots(tmp_cline_dir: Path) -> None:

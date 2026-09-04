@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+from sesh.models import Provider
 from sesh.paths import CONFIG_DIR
 
 PREFERENCES_FILE = CONFIG_DIR / "preferences.json"
@@ -17,9 +18,8 @@ DEFAULT_PREFERENCES = {
     "fullscreen": False,
 }
 
-_VALID_PROVIDER_FILTERS = {
-    None, "claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode",
-}
+# Derived from the enum so a new provider cannot be silently dropped on save.
+_VALID_PROVIDER_FILTERS = {None, *(p.value for p in Provider)}
 _VALID_SORT_MODES = {"date", "name", "messages", "tokens", "timeline"}
 
 
