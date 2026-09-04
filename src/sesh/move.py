@@ -11,6 +11,7 @@ from pathlib import Path
 from sesh.cache import CACHE_FILE, INDEX_FILE, PROJECT_PATHS_FILE
 from sesh.models import MoveReport, Provider, encode_claude_path, encode_cursor_path, workspace_uri
 from sesh.providers.claude import ClaudeProvider, PROJECTS_DIR
+from sesh.providers.cline import ClineProvider, is_valid_session_id
 from sesh.providers.codex import CODEX_DIR, CodexProvider
 from sesh.providers.copilot import COPILOT_DIR, CopilotProvider, _parse_workspace_yaml
 from sesh.providers.cursor import (
@@ -364,6 +365,40 @@ def _dry_run_opencode(old_path: str) -> MoveReport:
     )
 
 
+def _dry_run_cline(old_path: str) -> MoveReport:
+    sessions_root = ClineProvider()._sessions_dir
+    if not sessions_root.is_dir():
+        return MoveReport(provider=Provider.CLINE, success=True)
+
+    files_modified = 0
+    for session_dir in sorted(sessions_root.iterdir()):
+        if not session_dir.is_dir() or not is_valid_session_id(session_dir.name):
+            continue
+        record_file = session_dir / f"{session_dir.name}.json"
+        try:
+            with open(record_file) as f:
+                record = json.load(f)
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if any(
+            isinstance(record.get(field), str)
+            and (
+                record[field] == old_path
+                or record[field].startswith(old_path.rstrip("/") + "/")
+            )
+            for field in ("workspace_root", "cwd")
+        ):
+            files_modified += 1
+
+    return MoveReport(
+        provider=Provider.CLINE,
+        success=True,
+        files_modified=files_modified,
+    )
+
+
 def move_project(
     old_path: str,
     new_path: str,
@@ -381,6 +416,7 @@ def move_project(
             _dry_run_copilot(old_path),
             _dry_run_pi(old_path, new_path),
             _dry_run_opencode(old_path),
+            _dry_run_cline(old_path),
         ]
 
     if full_move:
@@ -398,6 +434,7 @@ def move_project(
         (Provider.COPILOT, CopilotProvider()),
         (Provider.PI, PiProvider()),
         (Provider.OPENCODE, OpencodeProvider()),
+        (Provider.CLINE, ClineProvider()),
     ]
 
     reports: list[MoveReport] = []

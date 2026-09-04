@@ -1,7 +1,7 @@
 # sesh
 
 Browse and search Claude Code, Codex, Cursor, Copilot, pi, Gemini CLI,
-and opencode sessions in the terminal.
+opencode, and Cline sessions in the terminal.
 
 `sesh` is a TUI that discovers session logs from multiple LLM coding
 assistants, lets you browse them by project, read message threads, and
@@ -49,15 +49,15 @@ Developed and tested on macOS. The codebase uses `pathlib.Path` and
 `shutil.which()` throughout, so most of it is platform-agnostic.
 
 **Linux** -- Should work out of the box. The Claude Code, Codex, Cursor,
-Copilot, pi, Gemini, and opencode data directories use the same paths
-as macOS (`~/.claude`, `~/.codex`, `~/.cursor`, `~/.copilot`, `~/.pi`,
-`~/.gemini`, `~/.local/share/opencode`). Textual and ripgrep both
-support Linux.
+Copilot, pi, Gemini, opencode, and Cline data directories use the same
+paths as macOS (`~/.claude`, `~/.codex`, `~/.cursor`, `~/.copilot`,
+`~/.pi`, `~/.gemini`, `~/.local/share/opencode`, `~/.cline/data`).
+Textual and ripgrep both support Linux.
 
 **Windows** -- Partially supported. The core TUI and CLI will run, but
 the Cursor provider's workspace storage path may not resolve correctly
 (it defaults to a Linux-style path instead of `AppData/Roaming/Cursor`
-on Windows). Claude Code, Codex, Copilot, pi, and Gemini path
+on Windows). Claude Code, Codex, Copilot, pi, Gemini, and Cline path
 resolution should work via `Path.home()`. Ripgrep is available on Windows via `winget` or
 `choco install ripgrep`.
 
@@ -104,7 +104,7 @@ and live updates.
 | -------- | ---------------------------------------------------------- |
 | `/`      | Focus the search bar                                       |
 | `Escape` | Clear search and return to full tree                       |
-| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi/Gemini/opencode) |
+| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi/Gemini/opencode/Cline) |
 | `o`      | Open/resume the selected session in its CLI                |
 | `v`      | Open the selected session in the browser viewer             |
 | `L`      | Toggle a live-updating browser view                         |
@@ -157,6 +157,7 @@ Each project in the tree shows which providers have sessions for it:
 -   `π` -- pi
 -   `G` -- Gemini CLI
 -   `O` -- opencode
+-   `L` -- Cline
 
 Example: `myproject [C,X:12]` means 12 sessions from Claude and Codex.
 
@@ -355,6 +356,7 @@ $SESH_AGGREGATION_ROOT/
     .codex/sessions/...
     .pi/agent/sessions/...
     .gemini/tmp/...
+    .cline/data/...
   desktop/
     .claude/projects/...
     ...
@@ -368,6 +370,7 @@ rsync -a --delete user@host2:.claude/  $SESH_AGGREGATION_ROOT/host2/.claude/
 rsync -a --delete user@host2:.codex/   $SESH_AGGREGATION_ROOT/host2/.codex/
 rsync -a --delete user@host2:.pi/      $SESH_AGGREGATION_ROOT/host2/.pi/
 rsync -a --delete user@host2:.gemini/  $SESH_AGGREGATION_ROOT/host2/.gemini/
+rsync -a --delete user@host2:.cline/   $SESH_AGGREGATION_ROOT/host2/.cline/
 rsync -a --delete user@host2:.local/share/opencode/  $SESH_AGGREGATION_ROOT/host2/.local/share/opencode/
 ```
 
@@ -514,6 +517,36 @@ Summaries come from the session `title`; tokens from per-assistant
 message `tokens` blocks (input + cache read/write for context size,
 summed `output` across turns). Resume uses `opencode --session <id>`.
 
+### Cline
+
+Reads the Cline VS Code extension's **`next` (SDK) bundle** store under
+`~/.cline/data/` (honouring `CLINE_DATA_DIR`, then `CLINE_DIR`, the same
+way Cline does). Each session is a directory
+`sessions/{sessionId}/` holding a `{sessionId}.json` record and a
+`{sessionId}.messages.json` transcript, both single JSON documents
+parsed on demand. Project paths come from the record's `workspace_root`
+(falling back to `cwd`); chat-mode sessions live in Cline's scratch
+workspace and are grouped under a `cline:chat` pseudo-project.
+
+Summaries come from `metadata.title` (falling back to the prompt);
+cumulative tokens from `metadata.usage` and the last turn's context size
+from the transcript's per-message `metrics` --- `metadata.tokensIn` /
+`tokensOut` are ignored because they skip tool-call turns. Thinking
+traces and real `tool_use` / `tool_result` blocks are both preserved.
+
+Cline has no resume-by-id CLI, so **Cline sessions are not resumable**.
+Deleting a session removes its directory, the directories of any sub-agent
+children, and the corresponding rows in Cline's own `db/sessions.db` index;
+`sesh move` rewrites `workspace_root` / `cwd` in both the JSON records and
+that index. Discovery itself never reads the
+database (it is redundant with the JSON and has a live writer).
+
+The **`legacy` bundle's** store (the VS Code
+`globalStorage/saoudrizwan.claude-dev/tasks/` tree) is deliberately not
+read: the formats share nothing, and legacy discards reasoning traces
+before they reach disk. A user still on that bundle sees no Cline
+sessions in sesh.
+
 ## Cache
 
 Parsed session metadata is cached at `~/.cache/sesh/sessions.json`,
@@ -552,5 +585,6 @@ src/sesh/
     pi.py            # pi JSONL parser
     gemini.py        # Gemini CLI JSON parser
     opencode.py      # opencode SQLite + legacy JSON parser
+    cline.py         # Cline (next bundle) JSON parser
   snapshots/         # Terminal.app snapshot core and backend
 ```

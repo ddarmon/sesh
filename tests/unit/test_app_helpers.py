@@ -38,6 +38,32 @@ def test_validate_live_source_accepts_complete_gemini_json(tmp_path) -> None:
     SeshApp._validate_live_source(session)
 
 
+def test_validate_live_source_rejects_partial_cline_json(tmp_path) -> None:
+    source = tmp_path / "s.messages.json"
+    source.write_text('{"version": 1, "messages": [')
+    session = make_session(provider=Provider.CLINE, source_path=str(source))
+
+    with pytest.raises(ValueError):
+        SeshApp._validate_live_source(session)
+
+
+def test_validate_live_source_rejects_cline_json_without_messages(tmp_path) -> None:
+    source = tmp_path / "s.messages.json"
+    source.write_text('{"version": 1}')
+    session = make_session(provider=Provider.CLINE, source_path=str(source))
+
+    with pytest.raises(ValueError):
+        SeshApp._validate_live_source(session)
+
+
+def test_validate_live_source_accepts_complete_cline_json(tmp_path) -> None:
+    source = tmp_path / "s.messages.json"
+    source.write_text('{"version": 1, "messages": []}')
+    session = make_session(provider=Provider.CLINE, source_path=str(source))
+
+    SeshApp._validate_live_source(session)
+
+
 def test_claude_opus() -> None:
     """Claude model IDs like 'claude-opus-4-6-YYYYMMDD' shorten to 'opus-4.6'."""
     assert _short_model_name("claude-opus-4-6-20250101") == "opus-4.6"

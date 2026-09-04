@@ -35,7 +35,9 @@ def discover_all(
     return _run_discovery(providers_list, cache)
 
 
-PROVIDER_NAMES = ("claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode")
+PROVIDER_NAMES = (
+    "claude", "codex", "cursor", "copilot", "pi", "gemini", "opencode", "cline",
+)
 
 
 def construct_provider(name: str, *, cache=None, base_dir: Path | None = None,
@@ -47,7 +49,7 @@ def construct_provider(name: str, *, cache=None, base_dir: Path | None = None,
         "claude": "ClaudeProvider", "codex": "CodexProvider",
         "cursor": "CursorProvider", "copilot": "CopilotProvider",
         "pi": "PiProvider", "gemini": "GeminiProvider",
-        "opencode": "OpencodeProvider",
+        "opencode": "OpencodeProvider", "cline": "ClineProvider",
     }
     module = importlib.import_module(f"sesh.providers.{name}")
     cls = getattr(module, class_names[name])
@@ -56,7 +58,7 @@ def construct_provider(name: str, *, cache=None, base_dir: Path | None = None,
         kwargs["base_dir"] = base_dir
     if host is not None:
         kwargs["host"] = host
-    if name in {"codex", "pi", "gemini", "opencode"}:
+    if name in {"codex", "pi", "gemini", "opencode", "cline"}:
         kwargs["cache"] = cache
     return cls(**kwargs)
 
