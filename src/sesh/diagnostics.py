@@ -68,6 +68,14 @@ def _probe_provider(name: str, *, base_dir: Path | None, host: str | None) -> di
             result["issues"].append(_issue("error", "paths", f"unreadable root: {path['path']}"))
 
     try:
+        # Optional hook: test doubles and third-party providers may lack it.
+        issues_hook = getattr(provider, "diagnostic_issues", None)
+        for message in issues_hook() if issues_hook else []:
+            result["issues"].append(_issue("warning", "schema", message))
+    except Exception as exc:
+        result["issues"].append(_issue("error", "schema", str(exc), exc))
+
+    try:
         projects = list(provider.discover_projects())
         result["projects"] = len(projects)
     except Exception as exc:

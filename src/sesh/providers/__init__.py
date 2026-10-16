@@ -53,6 +53,15 @@ class SessionProvider(ABC):
                 seen.add(path)
         return result
 
+    def diagnostic_issues(self) -> list[str]:
+        """Return warnings about on-disk data the provider cannot read.
+
+        Non-abstract for the same reason as ``diagnostic_paths``; providers
+        override it when an unreadable format would otherwise look like an
+        empty one (e.g. an unrecognized database schema).
+        """
+        return []
+
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a session's stored data. Override per provider."""
         raise NotImplementedError

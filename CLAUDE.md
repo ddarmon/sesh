@@ -130,13 +130,24 @@ unresolvable hash dirs fall back to the tmp directory path with a
 documents (not JSONL), they are parsed with `json.load` on demand
 rather than line-by-line.
 
-opencode has two on-disk formats, both supported by the provider
+opencode has three on-disk formats, all supported by the provider
 (sessions found in SQLite take precedence over the same ID in JSON):
 
--   **SQLite** (current opencode, 2026+): `opencode.db` /
-    `opencode-{channel}.db` in the data dir, with `session`, `message`,
-    and `part` tables. `message.data` / `part.data` are JSON columns
-    holding the V1 message/part payloads.
+-   **SQLite v2** (opencode 2.0+): `opencode.db` / `opencode-{channel}.db`
+    with `session_v2` and `session_message` tables. Each `session_message`
+    row is a whole message (`type` = `user` / `assistant` / `synthetic` /
+    `system` / `skill` / `shell` / `compaction` / `idle` / `*-switched`),
+    ordered by `seq`, with assistant content blocks and tool output inline in
+    its JSON `data`; there is no `part` table. Child sessions (`parent_id`)
+    are excluded from the list and counted on the parent's
+    `subagent_count`; delete removes them with the parent. The 2.0 migration
+    copies v1 rows into the v2 tables **without dropping the v1 tables**, so a
+    DB can hold both: the v2 copy of a session wins, and delete/move touch
+    both copies. `opencode.db` is read before other `opencode*.db` files so a
+    stale `opencode-next.db` (an earlier v2 DB location) never wins dedup.
+-   **SQLite v1** (2026, pre-2.0): the same files with `session`,
+    `message`, and `part` tables. `message.data` / `part.data` are JSON
+    columns holding the V1 message/part payloads.
 -   **Legacy JSON storage** (2025-era):
     `storage/session/{projectID}/{sessionID}.json` (session info),
     `storage/message/{sessionID}/{messageID}.json` (message info), and
@@ -183,7 +194,17 @@ The opencode project path comes from the session's `directory` field,
 never from project IDs or folder names. A staged `/undo` keeps physical
 messages/parts available for `/redo` and stores its logical cutoff in the
 session's `revert.messageID` plus optional `revert.partID`; sesh applies that
-cutoff to transcripts, discovery metadata, and global search in both formats.
+cutoff to transcripts, discovery metadata, and global search in all formats.
+In v2 the cutoff hides the target message and everything after it in `seq`
+order (`partID` is ignored, as in opencode's own UI).
+
+opencode's SQLite databases run in WAL mode: recent writes sit in
+`opencode.db-wal` and leave the main file's mtime/size unchanged, so DB-backed
+sessions are **never** served from the mtime-keyed sessions cache (the
+queries are indexed and cheap). A DB with neither schema is reported by
+`sesh doctor` (`[schema]` warning, via the optional
+`SessionProvider.diagnostic_issues()` hook) rather than reading as "no
+sessions found".
 
 App-managed files follow XDG base directories (absolute `XDG_*` env vars
 are honored; empty/relative values fall back to defaults):
@@ -453,7 +474,7 @@ discovery and cached alongside other metadata. Per-provider sources:
 -   **opencode**: per-assistant-message `tokens` blocks
     (`input`/`output`/`cache.read`/`cache.write`). `input_tokens` is the
     LAST turn's `input + cache.read + cache.write`; `output_tokens` sums
-    `output` across turns. In the SQLite format the session row's
+    `output` across turns. In both SQLite formats the session row's
     cumulative `tokens_*` columns provide `output_tokens` and
     `cumulative_input_tokens` directly
 -   **Cursor**: no token data available
