@@ -252,6 +252,29 @@ async def test_tool_toggle_updates_state(app):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_hidden_toggle_reveals_hidden_records(app):
+    """Pressing 'h' reveals hidden records, explains an empty session, and persists."""
+    sesh_app, pilot = app
+    session = make_session(id="empty", is_empty=True, summary="/model · no conversation")
+    messages = [make_message(role="user", content="/model", is_system=True)]
+    sesh_app._render_messages(messages, session)
+    view = sesh_app.query_one("#message-view")
+    assert view.keys == []
+    assert "No conversation" in str(view._empty_message)
+
+    assert sesh_app._show_hidden is False
+    await pilot.press("h")
+    assert sesh_app._show_hidden is True
+    assert "Hidden:ON" in sesh_app._format_status_suffix()
+    assert len(view.keys) == 1
+
+    await pilot.press("h")
+    assert sesh_app._show_hidden is False
+    assert view.keys == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_agents_toggle_updates_state(app):
     """Pressing 'a' toggles _show_agents and shows Agents:ON in the status suffix."""
     sesh_app, pilot = app

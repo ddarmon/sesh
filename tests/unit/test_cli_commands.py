@@ -2265,3 +2265,79 @@ def test_cmd_view_file_picks_up_layout_a_subagents(monkeypatch, capsys, tmp_cach
     content = _P(capsys.readouterr().out.strip()).read_text(encoding="utf-8")
     assert "Loose sub-agent work" in content
     assert "nested reply text" in content
+
+
+def test_cmd_messages_include_hidden_marks_records(monkeypatch, capsys) -> None:
+    """--include-hidden returns hidden records, flagged "hidden": true."""
+    index = {"sessions": [_session_dict(id="s1", provider=Provider.CLAUDE)]}
+    messages = [
+        make_message(role="user", content="/model", is_system=True),
+        make_message(role="user", content="real prompt"),
+    ]
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
+    monkeypatch.setattr(cli, "_load_session_messages", lambda *a, **k: (None, messages))
+
+    base = dict(session_id="s1", provider=None, limit=50, offset=0, summary=False,
+                include_tools=False, include_thinking=False, full=False)
+    cli.cmd_messages(_ns(**base))
+    default = json.loads(capsys.readouterr().out)
+    assert [m["content"] for m in default["messages"]] == ["real prompt"]
+
+    cli.cmd_messages(_ns(**base, include_hidden=True))
+    shown = json.loads(capsys.readouterr().out)["messages"]
+    assert [(m["content"], m.get("hidden", False)) for m in shown] == [
+        ("/model", True), ("real prompt", False)
+    ]
+
+
+def test_cmd_sessions_reports_empty(monkeypatch, capsys) -> None:
+    """'sesh sessions' JSON carries the empty-session flag."""
+    index = {"sessions": [
+        _session_dict(id="e", is_empty=True),
+        _session_dict(id="f"),
+    ]}
+    monkeypatch.setattr(cli, "_require_index", lambda *a, **k: index)
+    cli.cmd_sessions(_ns(project=None, provider=None, since=None, until=None,
+                         limit=None, bookmarked=False))
+    out = {s["id"]: s["empty"] for s in json.loads(capsys.readouterr().out)}
+    assert out == {"e": True, "f": False}
+
+
+def test_cmd_clean_empty_dry_run_and_delete(monkeypatch, capsys) -> None:
+    """'sesh clean --empty' targets only empty sessions and honors --dry-run."""
+    index = {"sessions": [
+        _session_dict(id="e", provider=Provider.CLAUDE, summary="/model · no conversation",
+                      is_empty=True),
+        _session_dict(id="f", provider=Provider.CLAUDE),
+    ]}
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
+    deleted: list[str] = []
+
+    class FakeProvider:
+        def delete_session(self, session):
+            deleted.append(session.id)
+
+    monkeypatch.setattr(cli, "_provider_for_session", lambda *a, **k: FakeProvider())
+    monkeypatch.setattr("sesh.viewcache.remove_view", lambda _id: None)
+
+    cli.cmd_clean(_ns(query=None, empty=True, dry_run=True, force=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert [d["session_id"] for d in out["deleted"]] == ["e"]
+    assert deleted == []
+
+    cli.cmd_clean(_ns(query=None, empty=True, dry_run=False, force=True))
+    out = json.loads(capsys.readouterr().out)
+    assert out["total"] == 1
+    assert deleted == ["e"]
+
+
+@pytest.mark.parametrize(
+    ("query", "empty", "message"),
+    [("needle", True, "not both"), (None, False, "required")],
+)
+def test_cmd_clean_requires_exactly_one_target(capsys, query, empty, message) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.cmd_clean(_ns(query=query, empty=empty, dry_run=True, force=False))
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err

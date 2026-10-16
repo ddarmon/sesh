@@ -277,6 +277,8 @@ def normalize_message(m: Message) -> tuple[str, str, str]:
     if ct == "tool_result":
         tool = m.tool_name or "tool"
         return "tool", f"{tool} (result){ts}", m.tool_output or ""
+    if m.is_system:
+        return "hidden", f"Hidden · {m.role}{ts}", m.content or ""
     if m.role == "user":
         return "user", f"User{ts}", m.content or ""
     if m.role == "assistant":
@@ -312,6 +314,7 @@ _ROLE_STYLE = {
     "thinking": "dim magenta",
     "tool": "bold yellow",
     "agent": "bold magenta",
+    "hidden": "dim italic",
     "other": "bold",
 }
 
@@ -463,7 +466,7 @@ class MessageCard(Static):
                 shown, omitted = body, 0
             else:
                 shown, omitted = preview_and_omitted(body)
-            base = "dim" if self.entry.role == "thinking" else ""
+            base = "dim" if self.entry.role in ("thinking", "hidden") else ""
             parts.append(self._highlighted(shown, base))
             if omitted:
                 parts.append(Text(omission_marker(omitted), style="dim italic"))

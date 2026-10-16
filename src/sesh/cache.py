@@ -14,7 +14,9 @@ CACHE_FILE = CACHE_DIR / "sessions.json"
 INDEX_FILE = CACHE_DIR / "index.json"
 # v5 invalidates metadata computed before staged opencode undos were projected.
 # v6 invalidates Claude metadata that counted ``api-request-blob`` records.
-CACHE_VERSION = 6
+# v7 rebuilds Claude titles that used injected ``isMeta`` text and adds
+# ``is_empty``.
+CACHE_VERSION = 7
 
 
 def _session_to_dict(s: SessionMeta) -> dict:
@@ -33,6 +35,7 @@ def _session_to_dict(s: SessionMeta) -> dict:
         "cumulative_input_tokens": s.cumulative_input_tokens,
         "host": s.host,
         "subagent_count": s.subagent_count,
+        "is_empty": s.is_empty,
     }
 
 
@@ -68,6 +71,7 @@ def _dict_to_session(d: dict) -> SessionMeta:
         cumulative_input_tokens=d.get("cumulative_input_tokens"),
         host=d.get("host"),
         subagent_count=d.get("subagent_count", 0),
+        is_empty=d.get("is_empty", False),
     )
 
 

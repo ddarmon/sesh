@@ -116,6 +116,13 @@ def _md_message_lines(m: Message, heading_offset: int = 0) -> list[str]:
         lines.append("")
         return lines
 
+    if m.is_system:
+        lines.append(f"{h3} Hidden · {m.role}{ts}")
+        lines.append("")
+        lines.append(m.content)
+        lines.append("")
+        return lines
+
     if m.role == "user":
         lines.append(f"{h2} User{ts}")
         lines.append("")
@@ -248,6 +255,11 @@ def _message_display_dict(m: Message) -> dict:
             "content": f"```\n{m.tool_output or ''}\n```",
             "match": m.tool_output or "",
         }
+
+    if m.is_system:
+        # Hidden records (shown only on request) render collapsed like tool
+        # output so injected text never reads as part of the dialogue.
+        return {"role": "tool", "label": f"Hidden · {m.role}{ts}", "kind": "tool", "content": m.content}
 
     if m.role == "user":
         return {"role": "user", "label": f"User{ts}", "kind": "text", "content": m.content}

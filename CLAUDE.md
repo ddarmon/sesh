@@ -76,7 +76,21 @@ The app has three layers:
 -   The Claude provider resolves project paths from `cwd` fields in
     JSONL entries, not from the encoded folder name.
 -   System messages (commands, reminders, warmup) are tagged
-    `is_system=True` and hidden in the message viewer.
+    `is_system=True` ("hidden records") and hidden in the message viewer
+    unless the `h` toggle / `--include-hidden` is on. For Claude, user
+    records Claude Code flags `isMeta: true` (skill bodies, slash-command
+    expansions, local-command caveats, image annotations) and
+    `<task-notification>` are hidden; `[Request interrupted by user]` stays
+    visible but never titles a session. A typed slash command renders as
+    `/name args`: it is visible when it drives a model turn (an `isMeta`
+    expansion follows) and hidden when it is answered locally
+    (`<local-command-stdout>` follows, e.g. `/model`).
+-   A session is **empty** (`SessionMeta.is_empty`) when it has no prompt the
+    user wrote and no real model turn (Claude's `<synthetic>` replies don't
+    count) — e.g. a session where only `/model` was run. Empty sessions are
+    titled by their commands (`/model · no conversation`), marked `∅` in the
+    tree, reported as `"empty": true` by `sesh sessions`, and removable with
+    `sesh clean --empty`.
 -   Each content block in a provider response becomes a separate
     `Message` with a `content_type` field: `"text"`, `"tool_use"`,
     `"tool_result"`, or `"thinking"`. Tool and thinking messages are
@@ -218,6 +232,9 @@ If the CLI binary isn't on PATH, the status bar shows an error.
 Press `t` to toggle tool call/result messages in the message viewer.
 Press `T` (shift-t) to toggle thinking/reasoning blocks. Both are hidden
 by default. The status bar shows `Tools:ON` / `Think:ON` when active.
+Press `h` to toggle hidden records (provider-injected/system text and
+local commands); they render dimmed and labelled `Hidden · …` (collapsed
+in the HTML viewer) and the status bar shows `Hidden:ON`.
 Press `a` to toggle provider-native sub-agent threads (see below); the status bar
 shows `Agents:ON` when active. Press `F` (shift-f) to toggle fullscreen
 mode for the message pane; the status bar shows `Full:ON` when active.
@@ -225,9 +242,11 @@ Press `?` to open the keyboard shortcuts help modal (press `?` or Escape
 again to close).
 
 CLI equivalents: `--include-tools`, `--include-thinking`, `--full`
-(both) on the `messages` and `export` subcommands; `--no-agents` on
+(both) on the `messages` and `export` subcommands; `--include-hidden`
+on `messages`/`export`/`view`/`follow` (not implied by `--full`; hidden
+records carry `"hidden": true` in JSON output); `--no-agents` on
 `view`/`export` suppresses sub-agent sections. These toggles (including
-`show_agents`), along with the provider filter and sort mode, persist
+`show_hidden` and `show_agents`), along with the provider filter and sort mode, persist
 across launches in `~/.config/sesh/preferences.json` by default (or
 `$XDG_CONFIG_HOME/sesh/preferences.json`) (managed by `preferences.py`).
 
@@ -606,6 +625,8 @@ CLI equivalents:
     one with the newest `timestamp` in the index); scope it to one
     provider with `--provider`
 -   `sesh clean <query>` --- delete all sessions matching a search query
+-   `sesh clean --empty` --- delete every empty session (see Key
+    conventions); discovers fresh first
 
 Both commands require interactive confirmation by default. In
 non-interactive contexts (piped stdin, LLM agents), they refuse unless
@@ -652,15 +673,15 @@ the index, then query it.
 | `sesh projects`                                                                                           | List projects from the index             |
 | `sesh sessions [--project PATH] [--provider NAME] [--since DATE] [--until DATE] [--limit N] [--bookmarked]` | List sessions with optional filters      |
 | `sesh stats [--project PATH] [--provider NAME]`                                                           | Aggregate session statistics from the index |
-| `sesh messages <id\|last> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full]` | Load messages for a session              |
+| `sesh messages <id\|last> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full] [--include-hidden]` | Load messages for a session              |
 | `sesh search <query> [--provider NAME] [--project PATH]`                                                  | Full-text search (Claude, Codex, Cursor) |
 | `sesh bookmarks`                                                                                          | List bookmarked sessions (joined with the index) |
 | `sesh delete <id\|last> [--provider NAME] [--force] [--dry-run]`                                          | Delete a session by ID, or the most recent with `last` |
-| `sesh clean <query> [--force] [--dry-run]`                                                                | Delete sessions matching a search query  |
+| `sesh clean <query>\|--empty [--force] [--dry-run]`                                                       | Delete sessions matching a search query, or all empty sessions |
 | `sesh resume <id\|last> [--provider NAME]`                                                                | Resume a session in its provider's CLI   |
-| `sesh export <id\|last> [--provider NAME] [--format md/json/html] [-o FILE] [--include-tools] [--include-thinking] [--full] [--no-agents]` | Export a session to Markdown, JSON, or HTML |
-| `sesh view <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--no-agents] [--no-open]` | Render a session as HTML and open it in the browser |
-| `sesh follow <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--no-agents] [--no-open]` | Open a live-updating browser view until Ctrl-C |
+| `sesh export <id\|last> [--provider NAME] [--format md/json/html] [-o FILE] [--include-tools] [--include-thinking] [--full] [--include-hidden] [--no-agents]` | Export a session to Markdown, JSON, or HTML |
+| `sesh view <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--include-hidden] [--no-agents] [--no-open]` | Render a session as HTML and open it in the browser |
+| `sesh follow <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--include-hidden] [--no-agents] [--no-open]` | Open a live-updating browser view until Ctrl-C |
 | `sesh move <old> <new> [--metadata-only] [--dry-run]`                                                     | Move project path and update metadata    |
 | `sesh snapshot save`                                                                                      | Capture Terminal.app tabs (macOS only)   |
 | `sesh snapshot list`                                                                                      | List stored snapshots                    |
