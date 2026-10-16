@@ -61,6 +61,24 @@ def _is_system_message(text: str) -> bool:
     return any(text.startswith(p) for p in SYSTEM_PREFIXES)
 
 
+# Record types whose ``message`` is conversation. Claude Code 2.1.300+ also
+# writes ``api-request-blob`` records carrying raw API request messages (no
+# uuid/timestamp); those, and any other future type, are not transcript.
+_TRANSCRIPT_TYPES = frozenset({"user", "assistant"})
+
+
+def _transcript_message(entry: dict) -> dict | None:
+    """Return a record's ``message`` dict if it is a transcript message.
+
+    Records with no ``type`` are accepted for legacy/minimal transcripts.
+    """
+    entry_type = entry.get("type")
+    if entry_type is not None and entry_type not in _TRANSCRIPT_TYPES:
+        return None
+    msg = entry.get("message")
+    return msg if isinstance(msg, dict) else None
+
+
 def _record_parent(entry: dict) -> str | None:
     """Resolve the logical parent UUID of a record.
 
@@ -271,12 +289,12 @@ def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
                             and entry.get("isSidechain") is not True
                         ):
                             post_checkpoint_leaf = entry_id
-                        uses, results = _content_tool_ids(entry.get("message"))
+                        uses, results = _content_tool_ids(_transcript_message(entry))
                         if uses:
                             tool_use_by_uuid[entry_id] = uses
                         if results:
                             tool_result_by_uuid[entry_id] = results
-                    elif isinstance(entry.get("message"), dict):
+                    elif _transcript_message(entry) is not None:
                         unlinked_message = True
     except OSError:
         return None
@@ -452,7 +470,7 @@ def load_loose_session(path: Path) -> tuple[SessionMeta, list[Message]]:
                 if entry.get("type") == "summary" and entry.get("summary"):
                     summary = entry["summary"]
 
-                msg = entry.get("message")
+                msg = _transcript_message(entry)
                 if not msg:
                     continue
 
@@ -762,8 +780,8 @@ def _parse_agent_file(agent_file: Path) -> tuple[dict, list[Message]] | None:
                 if raw_ts and (first_ts is None or msg_ts < first_ts):
                     first_ts = msg_ts
 
-                msg = entry.get("message")
-                if not isinstance(msg, dict):
+                msg = _transcript_message(entry)
+                if msg is None:
                     continue
                 message_count += 1
 
@@ -960,8 +978,8 @@ class ClaudeProvider(SessionProvider):
                         if active_ids is not None and entry.get("uuid") not in active_ids:
                             continue
 
-                        msg = entry.get("message")
-                        if not isinstance(msg, dict):
+                        msg = _transcript_message(entry)
+                        if msg is None:
                             continue
 
                         role = msg.get("role", "")
@@ -1350,7 +1368,7 @@ class ClaudeProvider(SessionProvider):
                             s["_leaf"] = entry["leafUuid"]
                             s["_post_checkpoint_leaf"] = None
                         entry_id = entry.get("uuid")
-                        entry_msg = entry.get("message")
+                        entry_msg = _transcript_message(entry)
                         if isinstance(entry_id, str) and entry_id:
                             s["_parents"][entry_id] = _record_parent(entry)
                             if (
@@ -1405,7 +1423,7 @@ class ClaudeProvider(SessionProvider):
                         if entry_type == "summary" and entry.get("summary"):
                             s["summary"] = entry["summary"]
 
-                        msg = entry.get("message")
+                        msg = _transcript_message(entry)
                         if not msg:
                             continue
 

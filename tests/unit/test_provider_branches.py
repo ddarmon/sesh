@@ -57,6 +57,55 @@ def test_claude_uses_last_prompt_leaf(tmp_path: Path) -> None:
     ]
 
 
+def test_claude_ignores_api_request_records(tmp_path: Path) -> None:
+    """Claude Code 2.1.300+ ``api-request*`` records are not transcript.
+
+    ``api-request-blob`` carries a raw request ``message`` with no uuid or
+    timestamp; it must neither render (stamped "now") nor disable rewind
+    projection by counting as an unlinked message.
+    """
+    path = tmp_path / "claude.jsonl"
+    sid = "session"
+
+    def record(uuid: str, parent: str | None, role: str, text: str, second: int) -> dict:
+        return {"type": role, "uuid": uuid, "parentUuid": parent, "sessionId": sid,
+                "timestamp": f"2026-01-01T00:00:0{second}Z",
+                "message": {"role": role, "content": text}}
+
+    write_jsonl(path, [
+        record("root", None, "user", "root", 1),
+        record("old", "root", "user", "old", 2),
+        record("old-a", "old", "assistant", "old answer", 3),
+        {"type": "api-request-shape", "sessionId": sid, "shapeHash": "h",
+         "shape": {"system": []}},
+        {"type": "api-request-blob", "sessionId": sid, "hash": "b1",
+         "message": {"role": "system", "content": "# Environment dump"}},
+        {"type": "api-request-blob", "sessionId": sid, "hash": "b2",
+         "message": {"role": "user", "content": "blob copy of a prompt"}},
+        {"type": "api-request", "sessionId": sid, "id": "r1", "tail": ["b1", "b2"]},
+        record("new", "root", "user", "new", 4),
+        record("new-a", "new", "assistant", "new answer", 5),
+        {"type": "last-prompt", "sessionId": sid, "leafUuid": "new-a"},
+    ])
+
+    session = make_session(id=sid, provider=Provider.CLAUDE, source_path=str(path))
+    assert [m.content for m in claude.ClaudeProvider().get_messages(session)] == [
+        "root", "new", "new answer"
+    ]
+
+    meta = claude.ClaudeProvider()._parse_sessions(tmp_path, "/repo")[0]
+    assert meta.message_count == 3
+    assert meta.summary == "new"
+
+    loose_meta, loose_messages = claude.load_loose_session(path)
+    assert "blob copy of a prompt" not in [m.content for m in loose_messages]
+    assert loose_meta.message_count == 5
+
+    agent_scan, agent_messages = claude._parse_agent_file(path)
+    assert agent_scan["message_count"] == 5
+    assert "# Environment dump" not in [m.content for m in agent_messages]
+
+
 def test_claude_follows_turns_appended_after_last_prompt_checkpoint(
     tmp_path: Path,
 ) -> None:

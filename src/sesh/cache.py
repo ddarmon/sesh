@@ -13,7 +13,8 @@ from sesh.paths import CACHE_DIR
 CACHE_FILE = CACHE_DIR / "sessions.json"
 INDEX_FILE = CACHE_DIR / "index.json"
 # v5 invalidates metadata computed before staged opencode undos were projected.
-CACHE_VERSION = 5
+# v6 invalidates Claude metadata that counted ``api-request-blob`` records.
+CACHE_VERSION = 6
 
 
 def _session_to_dict(s: SessionMeta) -> dict:
