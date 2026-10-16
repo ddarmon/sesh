@@ -311,6 +311,11 @@ sibling `tool_result` records answering an active `tool_use` (parallel tool
 calls) are re-admitted. Codex turn replay treats a `task_started` arriving
 mid-turn as closing the open turn (aborted/nested turns keep their dialogue),
 and only records the transcript actually renders count as turn dialogue.
+Only Claude records whose `type` is `user` / `assistant` (or absent) are
+transcript (`claude._transcript_message`): Claude Code 2.1.300+ also writes
+`api-request` / `api-request-shape` / `api-request-blob` records, and a blob's
+raw request `message` (no uuid or timestamp) would otherwise render as a
+ghost message and disable lineage projection as an "unlinked" record.
 During Claude discovery, lineage and branch-sensitive metadata are collected
 inline in `_parse_sessions`' single directory scan (never re-read per
 session). Active history drives transcript message counts, summaries, and
