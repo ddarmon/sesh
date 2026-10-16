@@ -161,3 +161,14 @@ def test_card_entry_defaults() -> None:
     assert entry.depth == 0
     assert entry.agent is False
     assert entry.parent_key is None
+
+
+def test_normalize_message_labels_hidden_records() -> None:
+    from sesh.transcript_view import normalize_message
+
+    role, header, body = normalize_message(
+        make_message(role="user", content="/model", is_system=True)
+    )
+    assert role == "hidden"
+    assert header.startswith("Hidden · user")
+    assert body == "/model"

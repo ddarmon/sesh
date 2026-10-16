@@ -590,3 +590,19 @@ def test_format_session_header_omits_empty_fields() -> None:
     assert "resume:" not in header
     assert "cursor" in header
     assert "1 msgs" in header
+
+
+def test_format_status_suffix_hidden_flag() -> None:
+    """The hidden-records toggle shows Hidden:ON."""
+    app = SeshApp()
+    assert "Hidden:ON" not in app._format_status_suffix()
+    app._show_hidden = True
+    assert "Hidden:ON" in app._format_status_suffix()
+
+
+def test_session_label_marks_empty_session() -> None:
+    """Empty sessions carry an ∅ marker in front of their title."""
+    app = SeshApp()
+    empty = make_session(id="e", is_empty=True, summary="/model · no conversation")
+    assert "∅ /model · no conversation" in app._session_label(empty)
+    assert "∅" not in app._session_label(make_session(id="f", summary="real"))

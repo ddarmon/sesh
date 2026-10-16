@@ -56,6 +56,8 @@ class SessionMeta:
     cumulative_input_tokens: int | None = None   # Sum of all turns' inputs
     host: str | None = None  # Set in aggregation mode
     subagent_count: int = 0  # Provider-native child-agent transcripts
+    # No prompt the user wrote and no real model turn (e.g. only ``/model``).
+    is_empty: bool = False
 
 
 @dataclass

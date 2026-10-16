@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from types import ModuleType
 
+import pytest
+
 from sesh import cli
 
 
@@ -150,3 +152,21 @@ def test_stats_args_project_provider(monkeypatch) -> None:
 
     cli.main()
     assert seen == {"project": "/repo", "provider": "claude"}
+
+
+@pytest.mark.parametrize("command", ["messages", "export", "view", "follow"])
+def test_include_hidden_flag_parsed(monkeypatch, command) -> None:
+    """--include-hidden is accepted by every transcript-reading command."""
+    seen = {}
+    monkeypatch.setattr(cli, f"cmd_{command}", lambda args: seen.update(v=args.include_hidden))
+    monkeypatch.setattr(sys, "argv", ["sesh", command, "last", "--include-hidden"])
+    cli.main()
+    assert seen == {"v": True}
+
+
+def test_clean_empty_parsed_without_query(monkeypatch) -> None:
+    seen = {}
+    monkeypatch.setattr(cli, "cmd_clean", lambda args: seen.update(q=args.query, e=args.empty))
+    monkeypatch.setattr(sys, "argv", ["sesh", "clean", "--empty", "--dry-run"])
+    cli.main()
+    assert seen == {"q": None, "e": True}

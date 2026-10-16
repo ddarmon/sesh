@@ -381,6 +381,7 @@ class HelpScreen(ModalScreen[None]):
                     ("s", "Cycle sort mode"),
                     ("t", "Toggle tool messages"),
                     ("T", "Toggle thinking messages"),
+                    ("h", "Toggle hidden records (injected/system text)"),
                     ("a", "Toggle sub-agent threads"),
                     ("F", "Toggle fullscreen message pane"),
                 ],
@@ -922,6 +923,7 @@ class SeshApp(App):
         Binding("C", "copy_focused_message", "Copy Msg", key_display="C"),
         Binding("t", "toggle_tools", "Tools"),
         Binding("T", "toggle_thinking", "Thinking", key_display="T"),
+        Binding("h", "toggle_hidden", "Hidden"),
         Binding("a", "toggle_agents", "Agents"),
         Binding("F", "toggle_fullscreen", "Fullscreen", key_display="F"),
         Binding("S", "show_snapshots", "Snapshots", key_display="S"),
@@ -952,6 +954,7 @@ class SeshApp(App):
         self._bookmarks: set[tuple[str, str]] = set()
         self._show_tools: bool = False
         self._show_thinking: bool = False
+        self._show_hidden: bool = False
         self._show_agents: bool = False
         self._fullscreen: bool = False
         self._status_base: str = "Loading..."
@@ -976,6 +979,7 @@ class SeshApp(App):
 
         self._show_tools = bool(prefs.get("show_tools", False))
         self._show_thinking = bool(prefs.get("show_thinking", False))
+        self._show_hidden = bool(prefs.get("show_hidden", False))
         self._show_agents = bool(prefs.get("show_agents", False))
         self._fullscreen = bool(prefs.get("fullscreen", False))
 
@@ -1150,6 +1154,8 @@ class SeshApp(App):
         summary = session.summary[:50]
         model = f" [{_short_model_name(session.model)}]" if session.model else ""
         agents = f" ⑂{session.subagent_count}" if session.subagent_count else ""
+        if session.is_empty:
+            summary = f"∅ {summary}"
         if show_project:
             proj = self.projects.get(self._proj_key(session.host, session.project_path))
             proj_name = proj.display_name if proj else session.project_path.rsplit("/", 1)[-1]
@@ -1386,6 +1392,8 @@ class SeshApp(App):
             parts.append("Tools:ON")
         if self._show_thinking:
             parts.append("Think:ON")
+        if self._show_hidden:
+            parts.append("Hidden:ON")
         if self._show_agents:
             parts.append("Agents:ON")
         elif self._agents_override:
@@ -1411,6 +1419,7 @@ class SeshApp(App):
                 "sort_mode": sort_mode,
                 "show_tools": self._show_tools,
                 "show_thinking": self._show_thinking,
+                "show_hidden": self._show_hidden,
                 "show_agents": self._show_agents,
                 "fullscreen": self._fullscreen,
             }
@@ -1430,6 +1439,14 @@ class SeshApp(App):
     def action_toggle_thinking(self) -> None:
         """Toggle visibility of thinking/reasoning messages."""
         self._show_thinking = not self._show_thinking
+        if self._current_session and (self._current_messages or self._current_subagents):
+            self._render_messages(self._current_messages, self._current_session)
+        self._save_current_prefs()
+        self._refresh_status()
+
+    def action_toggle_hidden(self) -> None:
+        """Toggle visibility of hidden records (provider-injected/system text)."""
+        self._show_hidden = not self._show_hidden
         if self._current_session and (self._current_messages or self._current_subagents):
             self._render_messages(self._current_messages, self._current_session)
         self._save_current_prefs()
@@ -1627,6 +1644,7 @@ class SeshApp(App):
             messages,
             include_tools=self._show_tools,
             include_thinking=self._show_thinking,
+            include_system=self._show_hidden,
         )
         subagents_arg = None
         if self._agents_visible and self._current_subagents:
@@ -1637,6 +1655,7 @@ class SeshApp(App):
                         interior,
                         include_tools=self._show_tools,
                         include_thinking=self._show_thinking,
+                        include_system=self._show_hidden,
                     ),
                 )
                 for meta, interior in self._current_subagents
@@ -1671,11 +1690,18 @@ class SeshApp(App):
 
         view = self.query_one("#message-view", TranscriptView)
         items = self._compose_transcript_items(messages)
-        empty_message = (
-            "No visible messages. Press t for tool calls, T for thinking."
-            if messages and not items
-            else "No messages found."
-        )
+        if session.is_empty and messages and not items:
+            empty_message = (
+                "No conversation in this session (only local commands). "
+                "Press h to show hidden records."
+            )
+        elif messages and not items:
+            empty_message = (
+                "No visible messages. Press t for tool calls, T for thinking, "
+                "h for hidden records."
+            )
+        else:
+            empty_message = "No messages found."
         view.set_transcript(items, highlight=highlight, empty_message=empty_message)
         self._update_message_header(session, items)
         self._update_find_count()
@@ -1956,6 +1982,7 @@ class SeshApp(App):
             provider.get_messages(session),
             include_tools=self._show_tools,
             include_thinking=self._show_thinking,
+            include_system=self._show_hidden,
         )
         subagents = None
         if (self._show_agents or include_agents_override) and hasattr(
@@ -1969,6 +1996,7 @@ class SeshApp(App):
                         interior,
                         include_tools=self._show_tools,
                         include_thinking=self._show_thinking,
+                        include_system=self._show_hidden,
                     ),
                 )
                 for meta, interior in loaded
@@ -2183,6 +2211,7 @@ class SeshApp(App):
             self._current_messages,
             include_tools=self._show_tools,
             include_thinking=self._show_thinking,
+            include_system=self._show_hidden,
         )
         subagents = None
         if self._agents_visible and self._current_subagents:
@@ -2193,6 +2222,7 @@ class SeshApp(App):
                         interior,
                         include_tools=self._show_tools,
                         include_thinking=self._show_thinking,
+                        include_system=self._show_hidden,
                     ),
                 )
                 for meta, interior in self._current_subagents

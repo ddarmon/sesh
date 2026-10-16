@@ -15,6 +15,7 @@ def test_save_and_load_preferences_roundtrip(tmp_cache_dir) -> None:
         "sort_mode": "timeline",
         "show_tools": True,
         "show_thinking": True,
+        "show_hidden": True,
         "show_agents": True,
         "fullscreen": True,
     }
@@ -68,6 +69,7 @@ def test_load_preferences_ignores_unknown_keys(tmp_cache_dir) -> None:
         "sort_mode": "date",
         "show_tools": True,
         "show_thinking": False,
+        "show_hidden": False,
         "show_agents": False,
         "fullscreen": False,
     }

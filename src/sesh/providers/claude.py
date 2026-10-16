@@ -38,7 +38,20 @@ SYSTEM_PREFIXES = (
     "This session is being continued from a previous",
     "Invalid API key",
     "Warmup",
+    "<task-notification>",
 )
+
+#: Claude's marker for an interrupted turn. It stays visible (it explains the
+#: next assistant move) but is never used as a session title.
+INTERRUPT_PREFIX = "[Request interrupted by user"
+
+#: Model name Claude Code stamps on replies it writes itself (rate-limit
+#: notices, "No response requested."); those are not a real model turn.
+SYNTHETIC_MODEL = "<synthetic>"
+
+_LOCAL_OUTPUT_PREFIXES = ("<local-command-stdout>", "<local-command-stderr>")
+_COMMAND_NAME_RE = re.compile(r"<command-name>\s*(.*?)\s*</command-name>", re.S)
+_COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.S)
 
 
 def _extract_text(content) -> str:
@@ -77,6 +90,119 @@ def _transcript_message(entry: dict) -> dict | None:
         return None
     msg = entry.get("message")
     return msg if isinstance(msg, dict) else None
+
+
+def _command_display(text: str) -> str | None:
+    """Return ``/name args`` for a slash-command record's text, else None.
+
+    Claude writes what the user typed as ``<command-name>`` /
+    ``<command-message>`` / ``<command-args>`` tags; render it the way it was
+    typed rather than hiding the turn behind its raw markup.
+    """
+    if not text.lstrip().startswith(("<command-name>", "<command-message>")):
+        return None
+    name_match = _COMMAND_NAME_RE.search(text)
+    if not name_match or not name_match.group(1):
+        return None
+    name = name_match.group(1)
+    if not name.startswith("/"):
+        name = "/" + name
+    args_match = _COMMAND_ARGS_RE.search(text)
+    args = args_match.group(1).strip() if args_match else ""
+    return f"{name} {args}" if args else name
+
+
+def _is_meta(entry: dict) -> bool:
+    """Whether Claude Code flagged a record ``isMeta`` (hidden in its own UI).
+
+    Claude sets this on text it injects as a user turn: skill bodies, slash
+    command expansions, local-command caveats, and image annotations.
+    """
+    return entry.get("isMeta") is True
+
+
+def _prompt_text(text: str, is_meta: bool) -> str | None:
+    """Return ``text`` when it is a prompt the user wrote (title-eligible)."""
+    if (
+        not text
+        or is_meta
+        or _command_display(text) is not None
+        or _is_system_message(text)
+        or text.startswith(INTERRUPT_PREFIX)
+    ):
+        return None
+    return text
+
+
+def _record_activity(msg: dict, is_meta: bool) -> tuple[bool, str | None]:
+    """Return ``(is_dialogue, command)`` for one transcript message.
+
+    Dialogue is a prompt the user wrote or a real (non-synthetic) model turn;
+    a session with neither is empty. ``command`` is the typed slash command,
+    used to title an empty session (``/model · no conversation``).
+    """
+    role = msg.get("role")
+    if role == "assistant":
+        return msg.get("model") != SYNTHETIC_MODEL, None
+    if role != "user":
+        return False, None
+    text = _extract_text(msg.get("content", ""))
+    command = None if is_meta else _command_display(text)
+    return _prompt_text(text, is_meta) is not None, command
+
+
+def _empty_session_summary(commands: list[str]) -> str:
+    """Title for a session with no dialogue, from the commands it ran."""
+    names = list(dict.fromkeys(commands))
+    return f"{' '.join(names)} · no conversation" if names else "No conversation"
+
+
+def _session_title(
+    explicit: str | None,
+    last_prompt: str | None,
+    commands: list[str],
+    has_dialogue: bool,
+    fallback: str,
+) -> str:
+    """Pick a session title: explicit summary, last prompt, or its commands.
+
+    An empty session (no dialogue) is titled by the commands it ran so it reads
+    as what it is rather than as injected caveat text.
+    """
+    if explicit:
+        return explicit
+    if not has_dialogue:
+        return _empty_session_summary(commands)
+    if last_prompt:
+        return last_prompt[:80] + "..." if len(last_prompt) > 80 else last_prompt
+    if commands:
+        return commands[-1]
+    return fallback
+
+
+def _update_pending_command(
+    pending: Message | None, msg: dict, is_meta: bool, new: list[Message]
+) -> Message | None:
+    """Hide a slash command answered locally; return the next pending command.
+
+    ``/model`` or ``/config`` is followed by ``<local-command-stdout>`` and never
+    reaches the model, so it is hidden like the output. A command that drives a
+    turn (a skill, ``/tutor-start``) is followed by an ``isMeta`` expansion
+    instead and stays visible as what the user typed. ``new`` holds the
+    messages just built from this record (in record order).
+    """
+    if msg.get("role") != "user":
+        return None if new else pending
+    text = _extract_text(msg.get("content", ""))
+    if text.startswith(_LOCAL_OUTPUT_PREFIXES):
+        if pending is not None:
+            pending.is_system = True
+        return None
+    if is_meta:
+        return pending
+    if new and _command_display(text) is not None:
+        return new[0]
+    return None if new else pending
 
 
 def _record_parent(entry: dict) -> str | None:
@@ -207,8 +333,9 @@ def _collected_active_fields(s: dict) -> dict | None:
     Pure: consumes the lineage/checkpoint maps and ``_records`` gathered during
     :meth:`ClaudeProvider._parse_sessions`' single scan and
     reproduces exactly what a second streaming pass over the active records
-    would compute (``message_count``, last non-system ``last_user_message``,
-    final ``model``, and last-turn context ``input_tokens``) — with no extra
+    would compute (``message_count``, last user-written ``last_user_message``,
+    final ``model``, last-turn context ``input_tokens``, and the
+    ``has_dialogue`` / ``commands`` that decide and title an empty session) — with no extra
     file reads. Returns ``None`` when the lineage is unusable so callers keep
     the legacy linear values. "Last" fields resolve by scan order.
     """
@@ -225,6 +352,8 @@ def _collected_active_fields(s: dict) -> dict | None:
         return None
 
     message_count = 0
+    has_dialogue = False
+    commands: list[tuple[int, str]] = []
     last_user: tuple[int, str | None] = (-1, None)
     model: tuple[int, str | None] = (-1, None)
     input_tokens: tuple[int, int | None] = (-1, None)
@@ -235,6 +364,10 @@ def _collected_active_fields(s: dict) -> dict | None:
         if rec.get("msg"):
             message_count += 1
         order = rec["order"]
+        if rec.get("dialogue"):
+            has_dialogue = True
+        if "command" in rec:
+            commands.append((order, rec["command"]))
         if "user_text" in rec and order > last_user[0]:
             last_user = (order, rec["user_text"])
         if "model" in rec and order > model[0]:
@@ -246,6 +379,8 @@ def _collected_active_fields(s: dict) -> dict | None:
         "last_user_message": last_user[1],
         "model": model[1],
         "input_tokens": input_tokens[1],
+        "has_dialogue": has_dialogue,
+        "commands": [command for _, command in sorted(commands)],
     }
 
 
@@ -436,6 +571,8 @@ def load_loose_session(path: Path) -> tuple[SessionMeta, list[Message]]:
     cumulative_input_tokens = 0
     summary: str | None = None
     last_user_message: str | None = None
+    has_dialogue = False
+    commands: list[str] = []
 
     try:
         with open(path) as f:
@@ -491,9 +628,13 @@ def load_loose_session(path: Path) -> tuple[SessionMeta, list[Message]]:
                         cumulative_input_tokens += turn_input
                         output_tokens += usage.get("output_tokens", 0)
 
+                dialogue, command = _record_activity(msg, _is_meta(entry))
+                has_dialogue = has_dialogue or dialogue
+                if command:
+                    commands.append(command)
                 if role == "user":
-                    text = _extract_text(msg.get("content", ""))
-                    if text and not _is_system_message(text):
+                    text = _prompt_text(_extract_text(msg.get("content", "")), _is_meta(entry))
+                    if text:
                         last_user_message = text
     except OSError as exc:
         raise ValueError(f"cannot read transcript file: {exc}") from exc
@@ -501,15 +642,9 @@ def load_loose_session(path: Path) -> tuple[SessionMeta, list[Message]]:
     if session_id is None:
         raise ValueError("no Claude transcript records with a sessionId found")
 
-    if not summary:
-        if last_user_message:
-            summary = (
-                last_user_message[:80] + "..."
-                if len(last_user_message) > 80
-                else last_user_message
-            )
-        else:
-            summary = path.stem
+    summary = _session_title(
+        summary, last_user_message, commands, has_dialogue, path.stem
+    )
 
     if cwd_counts:
         project_path = max(cwd_counts, key=cwd_counts.get)
@@ -533,6 +668,7 @@ def load_loose_session(path: Path) -> tuple[SessionMeta, list[Message]]:
         input_tokens=input_tokens or None,
         output_tokens=output_tokens or None,
         cumulative_input_tokens=cumulative_input_tokens or None,
+        is_empty=not has_dialogue,
     )
     messages = ClaudeProvider().get_messages(meta)
     return meta, messages
@@ -596,11 +732,28 @@ def _read_agent_sidecar(agent_file: Path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _user_text_message(role: str, ts: datetime, text: str, is_meta: bool) -> Message:
+    """Build a text ``Message``, classifying hidden user text and commands."""
+    if role == "user" and not is_meta:
+        command = _command_display(text)
+        if command is not None:
+            return Message(role=role, content=command, timestamp=ts, content_type="text")
+    is_sys = role == "user" and (is_meta or _is_system_message(text))
+    return Message(
+        role=role,
+        content=text,
+        timestamp=ts,
+        is_system=is_sys,
+        content_type="text",
+    )
+
+
 def _blocks_to_messages(
     role: str,
     ts: datetime,
     raw_content,
     tool_id_map: dict[str, str],
+    is_meta: bool = False,
 ) -> list[Message]:
     """Turn one record's ``message.content`` into a list of :class:`Message`.
 
@@ -613,14 +766,7 @@ def _blocks_to_messages(
     if isinstance(raw_content, str):
         if not raw_content.strip():
             return out
-        is_sys = role == "user" and _is_system_message(raw_content)
-        out.append(Message(
-            role=role,
-            content=raw_content,
-            timestamp=ts,
-            is_system=is_sys,
-            content_type="text",
-        ))
+        out.append(_user_text_message(role, ts, raw_content, is_meta))
         return out
     if not isinstance(raw_content, list):
         return out
@@ -634,14 +780,7 @@ def _blocks_to_messages(
             text = block.get("text", "")
             if not text.strip():
                 continue
-            is_sys = role == "user" and _is_system_message(text)
-            out.append(Message(
-                role=role,
-                content=text,
-                timestamp=ts,
-                is_system=is_sys,
-                content_type="text",
-            ))
+            out.append(_user_text_message(role, ts, text, is_meta))
 
         elif btype == "thinking":
             thinking_text = block.get("thinking", "")
@@ -757,6 +896,7 @@ def _parse_agent_file(agent_file: Path) -> tuple[dict, list[Message]] | None:
     first_user_text: str | None = None
     messages: list[Message] = []
     tool_id_map: dict[str, str] = {}
+    pending_command: Message | None = None
 
     try:
         with open(agent_file) as f:
@@ -791,13 +931,17 @@ def _parse_agent_file(agent_file: Path) -> tuple[dict, list[Message]] | None:
                     if isinstance(usage, dict):
                         output_tokens += usage.get("output_tokens", 0)
                 elif role == "user" and first_user_text is None:
-                    text = _extract_text(msg.get("content", ""))
-                    if text and not _is_system_message(text):
+                    text = _prompt_text(_extract_text(msg.get("content", "")), _is_meta(entry))
+                    if text:
                         first_user_text = text
 
-                messages.extend(
-                    _blocks_to_messages(role, msg_ts, msg.get("content", ""), tool_id_map)
+                new = _blocks_to_messages(
+                    role, msg_ts, msg.get("content", ""), tool_id_map, _is_meta(entry)
                 )
+                pending_command = _update_pending_command(
+                    pending_command, msg, _is_meta(entry), new
+                )
+                messages.extend(new)
     except OSError:
         return None
 
@@ -959,6 +1103,7 @@ class ClaudeProvider(SessionProvider):
             jsonl_files = [source_dir]
 
         active_ids = _claude_active_ids(jsonl_files, session.id)
+        pending_command: Message | None = None
         for jsonl_file in jsonl_files:
             try:
                 with open(jsonl_file) as f:
@@ -984,11 +1129,13 @@ class ClaudeProvider(SessionProvider):
 
                         role = msg.get("role", "")
                         ts = _parse_timestamp(entry.get("timestamp"))
-                        messages.extend(
-                            _blocks_to_messages(
-                                role, ts, msg.get("content", ""), tool_id_map
-                            )
+                        new = _blocks_to_messages(
+                            role, ts, msg.get("content", ""), tool_id_map, _is_meta(entry)
                         )
+                        pending_command = _update_pending_command(
+                            pending_command, msg, _is_meta(entry), new
+                        )
+                        messages.extend(new)
             except OSError:
                 continue
 
@@ -1359,6 +1506,8 @@ class ClaudeProvider(SessionProvider):
                                 "_unlinked": False,
                                 "_records": {},
                                 "_order": 0,
+                                "has_dialogue": False,
+                                "commands": [],
                             }
 
                         s = sessions[session_id]
@@ -1382,9 +1531,19 @@ class ClaudeProvider(SessionProvider):
                             if isinstance(entry_msg, dict):
                                 rec["msg"] = True
                                 rec_role = entry_msg.get("role")
+                                dialogue, command = _record_activity(
+                                    entry_msg, _is_meta(entry)
+                                )
+                                if dialogue:
+                                    rec["dialogue"] = True
+                                if command:
+                                    rec["command"] = command
                                 if rec_role == "user":
-                                    rec_text = _extract_text(entry_msg.get("content", ""))
-                                    if rec_text and not _is_system_message(rec_text):
+                                    rec_text = _prompt_text(
+                                        _extract_text(entry_msg.get("content", "")),
+                                        _is_meta(entry),
+                                    )
+                                    if rec_text:
                                         rec["user_text"] = rec_text
                                 elif rec_role == "assistant":
                                     if entry_msg.get("model"):
@@ -1449,10 +1608,18 @@ class ClaudeProvider(SessionProvider):
                         if role == "user" and entry.get("parentUuid") is None and entry.get("uuid"):
                             first_user_msgs[session_id] = entry["uuid"]
 
-                        # Track last non-system user message for summary fallback
+                        dialogue, command = _record_activity(msg, _is_meta(entry))
+                        if dialogue:
+                            s["has_dialogue"] = True
+                        if command:
+                            s["commands"].append(command)
+
+                        # Track last user-written prompt for summary fallback
                         if role == "user":
-                            text = _extract_text(msg.get("content", ""))
-                            if text and not _is_system_message(text):
+                            text = _prompt_text(
+                                _extract_text(msg.get("content", "")), _is_meta(entry)
+                            )
+                            if text:
                                 s["last_user_message"] = text
 
             except OSError:
@@ -1488,13 +1655,13 @@ class ClaudeProvider(SessionProvider):
             active = _collected_active_fields(s)
             if active is not None:
                 s.update(active)
-            summary = s["summary"]
-            if not summary:
-                if s["last_user_message"]:
-                    text = s["last_user_message"]
-                    summary = text[:80] + "..." if len(text) > 80 else text
-                else:
-                    summary = "New Session"
+            summary = _session_title(
+                s["summary"],
+                s["last_user_message"],
+                s["commands"],
+                s["has_dialogue"],
+                "New Session",
+            )
 
             # Skip sessions that look like JSON blobs
             if summary.startswith('{ "'):
@@ -1517,6 +1684,7 @@ class ClaudeProvider(SessionProvider):
                 cumulative_input_tokens=s["cumulative_input_tokens"] or None,
                 host=self.host,
                 subagent_count=self.count_subagents(sid, project_dir),
+                is_empty=not s["has_dialogue"],
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)

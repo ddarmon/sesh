@@ -319,6 +319,7 @@ def cmd_sessions(args: argparse.Namespace) -> None:
             "cumulative_input_tokens": s.get("cumulative_input_tokens"),
             "host": s.get("host"),
             "subagent_count": s.get("subagent_count", 0),
+            "empty": s.get("is_empty", False),
         })
 
     _json_out(out)
@@ -474,13 +475,13 @@ def _resolve_export_source(args: argparse.Namespace):
     return _load_session_messages(matches[0], args)
 
 
-def _resolve_subagents(session, args, *, include_tools, include_thinking):
+def _resolve_subagents(session, args, *, include_tools, include_thinking, include_hidden=False):
     """Discover and load provider-native sub-agent threads for view/export.
 
     Returns a list of ``(SubagentMeta, filtered interior messages)`` pairs, or
     an empty list for providers without a loader, when ``--no-agents`` is
     passed, or when the session has no sub-agents. The interior of each sub-agent gets the
-    same tool/thinking filtering applied to the main thread — the collapsed
+    same tool/thinking/hidden filtering applied to the main thread — the collapsed
     block itself is shown regardless (sub-agents are turns, not tool calls).
     """
     from sesh.models import filter_messages
@@ -507,6 +508,7 @@ def _resolve_subagents(session, args, *, include_tools, include_thinking):
                 interior,
                 include_tools=include_tools,
                 include_thinking=include_thinking,
+                include_system=include_hidden,
             )
             out.append((meta, interior))
         except Exception:
@@ -530,6 +532,7 @@ def cmd_messages(args: argparse.Namespace) -> None:
 
     include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
     include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
+    include_hidden = getattr(args, "include_hidden", False)
 
     # --summary: only user text messages
     if args.summary:
@@ -539,6 +542,7 @@ def cmd_messages(args: argparse.Namespace) -> None:
             messages,
             include_tools=include_tools,
             include_thinking=include_thinking,
+            include_system=include_hidden,
         )
 
     total = len(messages)
@@ -562,6 +566,8 @@ def cmd_messages(args: argparse.Namespace) -> None:
             entry["tool_output"] = m.tool_output
         if m.thinking:
             entry["thinking"] = m.thinking
+        if m.is_system:
+            entry["hidden"] = True
         out_messages.append(entry)
 
     _json_out({
@@ -667,9 +673,63 @@ def cmd_bookmarks(args: argparse.Namespace) -> None:
     _json_out(out)
 
 
+def _clean_empty(args: argparse.Namespace) -> None:
+    """Delete sessions with no conversation (e.g. only ``/model`` was run)."""
+    from sesh.cache import _dict_to_session
+    from sesh.viewcache import remove_view
+
+    index = _refresh_index(args)
+    targets = [s for s in index["sessions"] if s.get("is_empty")]
+
+    if targets and not args.dry_run:
+        _confirm_destructive(
+            f"Delete {len(targets)} empty session(s)?",
+            force=args.force,
+        )
+
+    deleted = []
+    errors = []
+    for data in targets:
+        out_entry = {
+            "session_id": data["id"],
+            "provider": data["provider"],
+            "project_path": data["project_path"],
+            "summary": data["summary"],
+        }
+        if args.dry_run:
+            deleted.append(out_entry)
+            continue
+        session = _dict_to_session(data)
+        provider = _provider_for_session(session, None)
+        if provider is None:
+            continue
+        try:
+            provider.delete_session(session)
+            remove_view(session.id)
+            deleted.append(out_entry)
+        except Exception as exc:
+            out_entry["error"] = str(exc)
+            errors.append(out_entry)
+
+    out: dict = {"deleted": deleted, "total": len(deleted), "dry_run": args.dry_run}
+    if errors:
+        out["errors"] = errors
+    _json_out(out)
+
+
 def cmd_clean(args: argparse.Namespace) -> None:
-    """Delete sessions matching a search query."""
+    """Delete sessions matching a search query, or with ``--empty`` all empty ones."""
     _refuse_in_aggregation(args, "clean")
+
+    if getattr(args, "empty", False):
+        if args.query:
+            print("clean: pass either a query or --empty, not both", file=sys.stderr)
+            raise SystemExit(2)
+        _clean_empty(args)
+        return
+    if not args.query:
+        print("clean: a query (or --empty) is required", file=sys.stderr)
+        raise SystemExit(2)
 
     from sesh.models import Provider, SessionMeta
     from sesh.search import ripgrep_search
@@ -1026,15 +1086,21 @@ def cmd_export(args: argparse.Namespace) -> None:
 
     include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
     include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
+    include_hidden = getattr(args, "include_hidden", False)
 
     messages = filter_messages(
         messages,
         include_tools=include_tools,
         include_thinking=include_thinking,
+        include_system=include_hidden,
     )
 
     subagents = _resolve_subagents(
-        session, args, include_tools=include_tools, include_thinking=include_thinking
+        session,
+        args,
+        include_tools=include_tools,
+        include_thinking=include_thinking,
+        include_hidden=include_hidden,
     )
 
     if args.output_format == "json":
@@ -1052,6 +1118,8 @@ def cmd_export(args: argparse.Namespace) -> None:
                 entry["tool_output"] = m.tool_output
             if m.thinking:
                 entry["thinking"] = m.thinking
+            if m.is_system:
+                entry["hidden"] = True
             return entry
 
         payload = {
@@ -1123,15 +1191,21 @@ def cmd_view(args: argparse.Namespace) -> None:
 
     include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
     include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
+    include_hidden = getattr(args, "include_hidden", False)
 
     messages = filter_messages(
         messages,
         include_tools=include_tools,
         include_thinking=include_thinking,
+        include_system=include_hidden,
     )
 
     subagents = _resolve_subagents(
-        session, args, include_tools=include_tools, include_thinking=include_thinking
+        session,
+        args,
+        include_tools=include_tools,
+        include_thinking=include_thinking,
+        include_hidden=include_hidden,
     )
 
     content = format_session_html(session, messages, subagents)
@@ -1170,18 +1244,21 @@ def cmd_follow(args: argparse.Namespace) -> None:
 
     include_tools = getattr(args, "include_tools", False) or getattr(args, "full", False)
     include_thinking = getattr(args, "include_thinking", False) or getattr(args, "full", False)
+    include_hidden = getattr(args, "include_hidden", False)
 
     def load_snapshot():
         messages = filter_messages(
             provider.get_messages(session),
             include_tools=include_tools,
             include_thinking=include_thinking,
+            include_system=include_hidden,
         )
         subagents = _resolve_subagents(
             session,
             args,
             include_tools=include_tools,
             include_thinking=include_thinking,
+            include_hidden=include_hidden,
         )
         return session, messages, subagents
 
@@ -1561,6 +1638,11 @@ def main() -> None:
         help="Include thinking/reasoning messages",
     )
     p_messages.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="Include hidden records (provider-injected/system text, local commands)",
+    )
+    p_messages.add_argument(
         "--full",
         action="store_true",
         help="Include all message types (tools + thinking)",
@@ -1616,7 +1698,16 @@ def main() -> None:
     )
     p_clean.add_argument(
         "query",
+        nargs="?",
         help="The search term or regex pattern to match sessions for deletion",
+    )
+    p_clean.add_argument(
+        "--empty",
+        action="store_true",
+        help=(
+            "Delete sessions with no conversation instead of matching a query "
+            "(no prompt you wrote and no real model reply, e.g. only /model)"
+        ),
     )
     p_clean.add_argument(
         "--dry-run",
@@ -1752,6 +1843,11 @@ def main() -> None:
         help="Include thinking/reasoning messages",
     )
     p_export.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="Include hidden records (provider-injected/system text, local commands)",
+    )
+    p_export.add_argument(
         "--full",
         action="store_true",
         help="Include all message types (tools + thinking)",
@@ -1812,6 +1908,11 @@ def main() -> None:
         help="Include thinking/reasoning messages",
     )
     p_view.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="Include hidden records (provider-injected/system text, local commands)",
+    )
+    p_view.add_argument(
         "--full",
         action="store_true",
         help="Include all message types (tools + thinking)",
@@ -1858,6 +1959,11 @@ def main() -> None:
         "--include-thinking",
         action="store_true",
         help="Include thinking/reasoning messages",
+    )
+    p_follow.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="Include hidden records (provider-injected/system text, local commands)",
     )
     p_follow.add_argument(
         "--full",

@@ -916,3 +916,17 @@ def test_format_duration_and_time_range_helpers() -> None:
     assert format_time_range(same) == "2026-07-10 12:00 → 13:00 (1h)"
     endonly = make_session(start_timestamp=None, timestamp=d0)
     assert format_time_range(endonly) == "2026-07-10 12:00"
+
+
+def test_hidden_records_render_distinctly() -> None:
+    """Hidden records never read as dialogue in Markdown or the HTML payload."""
+    from sesh.export import _message_display_dict
+
+    hidden = make_message(role="user", content="<local-command-caveat>x", is_system=True)
+    md = format_session_markdown(make_session(), [hidden])
+    assert "### Hidden · user" in md
+    assert "## User" not in md
+
+    payload = _message_display_dict(hidden)
+    assert payload["kind"] == "tool"
+    assert payload["label"].startswith("Hidden · user")
