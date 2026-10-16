@@ -1,25 +1,41 @@
 """opencode (sst/opencode) session provider.
 
-opencode stores its data under ``~/.local/share/opencode``. Two on-disk
+opencode stores its data under ``~/.local/share/opencode``. Three on-disk
 formats exist in the wild:
 
-1. **SQLite** (current, 2026+): a single ``opencode.db`` (or
-   ``opencode-{channel}.db``) database with ``session``, ``message``,
-   and ``part`` tables. ``message.data`` / ``part.data`` are JSON
-   columns holding the V1 message/part payloads.
-2. **Legacy JSON storage** (2025-era): individual JSON files under
+1. **SQLite v2** (opencode 2.0+): ``opencode.db`` (or
+   ``opencode-{channel}.db``) with a ``session_v2`` table and a
+   ``session_message`` table. Each ``session_message`` row is one whole
+   message (``type`` = ``user`` / ``assistant`` / ``synthetic`` / ``system``
+   / ``skill`` / ``shell`` / ``compaction`` / ``idle`` / ``*-switched``)
+   ordered by ``seq``; assistant content blocks (text / reasoning / tool,
+   with tool output inline) live in its JSON ``data``. There is no ``part``
+   table. Child sessions (``parent_id`` set) are sub-agents: they are
+   excluded from the session list and counted on the parent.
+2. **SQLite v1** (2026, pre-2.0): the same file with ``session``,
+   ``message``, and ``part`` tables. ``message.data`` / ``part.data`` are
+   JSON columns holding the V1 message/part payloads. opencode 2.0
+   migrates these rows into the v2 tables in place without dropping them,
+   so a DB can hold both; the v2 copy of a session wins.
+3. **Legacy JSON storage** (2025-era): individual JSON files under
    ``storage/``::
 
        storage/session/{projectID}/{sessionID}.json   # session info
        storage/message/{sessionID}/{messageID}.json   # message info
        storage/part/{messageID}/{partID}.json         # content parts
 
-Both formats are read; sessions found in SQLite take precedence when
+All formats are read; sessions found in SQLite take precedence when
 the same session ID appears in both (the SQLite migration imported the
 JSON data). While ``/undo`` is staged for possible ``/redo``, opencode
 retains the physical tail and records the logical cutoff in
 ``session.revert`` (message ID plus optional part ID); sesh projects that
-cutoff in transcripts, discovery metadata, and search.
+cutoff in transcripts, discovery metadata, and search. In v2 the cutoff
+hides the target message and everything after it in ``seq`` order (v2
+messages have no parts, so ``partID`` is ignored, as opencode's UI does).
+
+The SQLite databases run in WAL mode, so recent writes live in
+``opencode.db-wal`` while the main file's mtime/size stay put. DB-backed
+sessions are therefore never served from the mtime-keyed metadata cache.
 
 The project path is resolved from the session's ``directory`` field
 (both formats), never from encoded folder or project IDs.
@@ -33,6 +49,12 @@ Message parts map onto sesh content types:
 - ``step-start`` / ``step-finish`` / ``snapshot`` / ``patch`` /
   ``file`` / ``agent`` / ``retry`` / ``subtask`` / ``compaction``
   are skipped.
+
+v2 messages map the same way (see ``_v2_message_to_messages``): user text
+is a visible prompt; ``synthetic`` / ``system`` / ``skill`` text and a
+completed ``compaction`` summary are hidden records; a user ``shell``
+command is a tool call/result pair; ``idle`` and ``*-switched`` markers
+are skipped.
 
 Token conventions follow the repo standard: ``input_tokens`` is the
 LAST assistant turn's ``tokens.input + cache.read + cache.write``
@@ -223,6 +245,180 @@ def _part_to_messages(role: str, ts: datetime, part: dict) -> list[Message]:
     return []
 
 
+def _model_id(model_json: object) -> str | None:
+    """Model ID from a session row's JSON ``model`` column."""
+    if not model_json:
+        return None
+    try:
+        model_obj = json.loads(model_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return (model_obj.get("id") or None) if isinstance(model_obj, dict) else None
+
+
+def db_paths(data_dir: Path) -> list[Path]:
+    """opencode SQLite databases, the default ``opencode.db`` first.
+
+    Earlier files win session-ID dedup, so the live default DB must beat a
+    stale ``opencode-next.db`` left behind by the 2.0 migration (which would
+    otherwise sort first because ``-`` < ``.``).
+    """
+    if not data_dir.is_dir():
+        return []
+    return sorted(
+        (p for p in data_dir.glob("opencode*.db") if p.is_file()),
+        key=lambda p: (p.name != "opencode.db", p.name),
+    )
+
+
+def db_tables(conn: sqlite3.Connection) -> set[str]:
+    """Names of the tables in an opencode database."""
+    try:
+        return {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+    except sqlite3.Error:
+        return set()
+
+
+def has_v2_schema(tables: set[str]) -> bool:
+    return {"session_v2", "session_message"} <= tables
+
+
+def has_v1_schema(tables: set[str]) -> bool:
+    return {"session", "message"} <= tables
+
+
+def v2_cutoffs(conn: sqlite3.Connection) -> dict[str, int]:
+    """Map session ID -> ``seq`` of its staged-undo target message.
+
+    Messages at or after that ``seq`` are hidden. A revert whose target
+    message is missing projects nothing, matching opencode's own UI.
+    """
+    result: dict[str, int] = {}
+    try:
+        rows = conn.execute(
+            "SELECT s.id, s.revert FROM session_v2 s WHERE s.revert IS NOT NULL"
+        ).fetchall()
+        for session_id, raw in rows:
+            revert = _parse_revert(raw)
+            if revert is None:
+                continue
+            row = conn.execute(
+                "SELECT seq FROM session_message WHERE session_id = ? AND id = ?",
+                (session_id, revert[0]),
+            ).fetchone()
+            if row is not None and isinstance(row[0], int):
+                result[session_id] = row[0]
+    except sqlite3.Error:
+        pass
+    return result
+
+
+def v2_is_active(seq: object, cutoff: int | None) -> bool:
+    """Whether a v2 message survives the staged undo ``cutoff``."""
+    return cutoff is None or not isinstance(seq, int) or seq < cutoff
+
+
+def _v2_tool_output(state: dict) -> str:
+    """Flatten a v2 tool state's inline result (text content and/or error)."""
+    pieces: list[str] = []
+    error = state.get("error")
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message:
+            pieces.append(message)
+    content = state.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text")
+                if isinstance(text, str) and text:
+                    pieces.append(text)
+    return "\n".join(pieces)
+
+
+def _v2_message_to_messages(mtype: str, info: dict) -> list[Message]:
+    """Convert one v2 ``session_message`` row into zero or more Messages."""
+    time_obj = info.get("time")
+    ts = _parse_timestamp(
+        time_obj.get("created") if isinstance(time_obj, dict) else None
+    )
+
+    if mtype in ("user", "synthetic", "system", "skill"):
+        text = info.get("text", "")
+        if not isinstance(text, str) or not text.strip():
+            return []
+        is_sys = mtype != "user" or _is_system_message(text)
+        return [Message(
+            role="user", content=text, timestamp=ts,
+            is_system=is_sys, content_type="text",
+        )]
+
+    if mtype == "compaction":
+        summary = info.get("summary", "")
+        if info.get("status") != "completed" or not isinstance(summary, str):
+            return []
+        if not summary.strip():
+            return []
+        return [Message(
+            role="assistant", content=summary, timestamp=ts,
+            is_system=True, content_type="text",
+        )]
+
+    if mtype == "shell":
+        command = info.get("command", "")
+        out = [Message(
+            role="user", content="", timestamp=ts, tool_name="shell",
+            tool_input=command if isinstance(command, str) else "",
+            content_type="tool_use",
+        )]
+        output = info.get("output")
+        if isinstance(output, dict) and isinstance(output.get("output"), str):
+            out.append(Message(
+                role="tool", content="", timestamp=ts, tool_name="shell",
+                tool_output=output["output"], content_type="tool_result",
+            ))
+        return out
+
+    if mtype != "assistant":
+        # idle, agent-switched, model-switched, location-switched
+        return []
+
+    messages: list[Message] = []
+    content = info.get("content")
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype in ("text", "reasoning"):
+            # Same shapes as the v1 text/reasoning parts.
+            messages.extend(_part_to_messages("assistant", ts, block))
+        elif btype == "tool":
+            name = block.get("name", "")
+            state = block.get("state")
+            if not isinstance(state, dict):
+                state = {}
+            try:
+                tool_input = json.dumps(state.get("input", {}), indent=2)
+            except TypeError:
+                tool_input = str(state.get("input", ""))
+            messages.append(Message(
+                role="assistant", content="", timestamp=ts,
+                tool_name=name, tool_input=tool_input,
+                content_type="tool_use",
+            ))
+            if state.get("status") in ("completed", "error"):
+                messages.append(Message(
+                    role="tool", content="", timestamp=ts,
+                    tool_name=name, tool_output=_v2_tool_output(state),
+                    content_type="tool_result",
+                ))
+    return messages
+
+
 def _atomic_rewrite_json(path: Path, data: dict) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".json.tmp")
     try:
@@ -259,9 +455,31 @@ class OpencodeProvider(SessionProvider):
         return self._data_dir / "storage"
 
     def _db_paths(self) -> list[Path]:
-        if not self._data_dir.is_dir():
-            return []
-        return sorted(p for p in self._data_dir.glob("opencode*.db") if p.is_file())
+        return db_paths(self._data_dir)
+
+    def diagnostic_issues(self) -> list[str]:
+        """Flag databases whose schema no reader recognizes.
+
+        Without this, an unknown layout reads as "no sessions found", which is
+        how the opencode 2.0 schema change went unnoticed.
+        """
+        issues: list[str] = []
+        for db_path in self._db_paths():
+            try:
+                conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            except sqlite3.Error as exc:
+                issues.append(f"cannot open {db_path}: {exc}")
+                continue
+            try:
+                tables = db_tables(conn)
+            finally:
+                conn.close()
+            if not has_v2_schema(tables) and not has_v1_schema(tables):
+                issues.append(
+                    f"unrecognized opencode database schema in {db_path} "
+                    "(no session_v2/session_message or session/message tables)"
+                )
+        return issues
 
     # ------------------------------------------------------------------
     # SessionProvider interface
@@ -312,12 +530,23 @@ class OpencodeProvider(SessionProvider):
             try:
                 conn = sqlite3.connect(str(db_path))
                 try:
-                    cur = conn.execute(
-                        "UPDATE session SET directory = ? WHERE directory = ?",
-                        (new_path, old_path),
-                    )
+                    tables = db_tables(conn)
+                    # A migrated DB holds v1 and v2 copies; rewrite both so
+                    # the v1 fallback never resurfaces the old path.
+                    for table in ("session_v2", "session"):
+                        if table not in tables:
+                            continue
+                        cur = conn.execute(
+                            f"UPDATE {table} SET directory = ? WHERE directory = ?",
+                            (new_path, old_path),
+                        )
+                        files_modified += cur.rowcount if cur.rowcount > 0 else 0
+                    if "project" in tables:
+                        conn.execute(
+                            "UPDATE project SET worktree = ? WHERE worktree = ?",
+                            (new_path, old_path),
+                        )
                     conn.commit()
-                    files_modified += cur.rowcount if cur.rowcount > 0 else 0
                 finally:
                     conn.close()
             except sqlite3.Error as exc:
@@ -382,20 +611,142 @@ class OpencodeProvider(SessionProvider):
         return self._index
 
     def _sessions_from_db(self, db_path: Path) -> list[SessionMeta]:
-        """Read all sessions from one opencode SQLite database."""
-        db_str = str(db_path)
-        cache = self._cache
-        if cache:
-            cached = cache.get_sessions(db_str)
-            if cached:
-                return cached
+        """Read all sessions from one opencode SQLite database.
 
-        sessions: list[SessionMeta] = []
+        Not cached: WAL writes leave the main file's mtime/size unchanged, so
+        an mtime-keyed cache entry would hide new sessions indefinitely.
+        """
+        db_str = str(db_path)
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         except sqlite3.Error:
-            return sessions
+            return []
 
+        try:
+            tables = db_tables(conn)
+            v2_ids: set[str] = set()
+            sessions: list[SessionMeta] = []
+            if has_v2_schema(tables):
+                sessions.extend(self._sessions_from_db_v2(conn, db_str, v2_ids))
+            if has_v1_schema(tables):
+                sessions.extend(
+                    s for s in self._sessions_from_db_v1(conn, db_str)
+                    if s.id not in v2_ids
+                )
+            return sessions
+        finally:
+            conn.close()
+
+    def _sessions_from_db_v2(
+        self, conn: sqlite3.Connection, db_str: str, seen_ids: set[str],
+    ) -> list[SessionMeta]:
+        """Read root sessions from the opencode 2.0 ``session_v2`` table.
+
+        Every session ID (children included) is added to *seen_ids* so the
+        v1 copies a migration leaves behind are suppressed.
+        """
+        try:
+            rows = conn.execute(
+                "SELECT id, parent_id, directory, title, time_created,"
+                " time_updated, model, tokens_input, tokens_output,"
+                " tokens_cache_read, tokens_cache_write FROM session_v2"
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+
+        cutoffs = v2_cutoffs(conn)
+        child_counts: dict[str, int] = {}
+        roots = []
+        for row in rows:
+            sid, parent_id = row[0], row[1]
+            if not sid:
+                continue
+            seen_ids.add(sid)
+            if parent_id:
+                child_counts[parent_id] = child_counts.get(parent_id, 0) + 1
+            else:
+                roots.append(row)
+
+        sessions: list[SessionMeta] = []
+        for (
+            sid, _parent, directory, title, t_created, t_updated,
+            model_json, tok_in, tok_out, tok_cr, tok_cw,
+        ) in roots:
+            if not directory:
+                continue
+            cutoff = cutoffs.get(sid)
+            try:
+                count_row = conn.execute(
+                    "SELECT COUNT(*) FROM session_message"
+                    " WHERE session_id = ? AND type IN ('user', 'assistant')"
+                    " AND (? IS NULL OR seq < ?)",
+                    (sid, cutoff, cutoff),
+                ).fetchone()
+                last_row = conn.execute(
+                    "SELECT data FROM session_message"
+                    " WHERE session_id = ? AND type = 'assistant'"
+                    " AND (? IS NULL OR seq < ?)"
+                    " ORDER BY seq DESC LIMIT 1",
+                    (sid, cutoff, cutoff),
+                ).fetchone()
+            except sqlite3.Error:
+                continue
+
+            model = _model_id(model_json)
+            last_input = None
+            if last_row is not None:
+                try:
+                    info = json.loads(last_row[0])
+                except (json.JSONDecodeError, TypeError):
+                    info = None
+                if isinstance(info, dict):
+                    model_obj = info.get("model")
+                    if isinstance(model_obj, dict) and model_obj.get("id"):
+                        model = model_obj["id"]
+                    tokens = _tokens_from_message(info)
+                    if tokens is not None:
+                        last_input = tokens[0] or None
+
+            sessions.append(self._db_session_meta(
+                sid, directory, title, t_created, t_updated, model,
+                count_row[0] if count_row else 0, db_str, last_input,
+                tok_in, tok_out, tok_cr, tok_cw,
+                subagent_count=child_counts.get(sid, 0),
+            ))
+        return sessions
+
+    def _db_session_meta(
+        self, sid, directory, title, t_created, t_updated, model,
+        message_count, db_str, last_input, tok_in, tok_out, tok_cr, tok_cw,
+        subagent_count: int = 0,
+    ) -> SessionMeta:
+        """Build a SessionMeta from a ``session``/``session_v2`` row."""
+        output_tokens = int(tok_out) if tok_out else None
+        cumulative = None
+        if any(v for v in (tok_in, tok_cr, tok_cw)):
+            cumulative = int(tok_in or 0) + int(tok_cr or 0) + int(tok_cw or 0)
+        return SessionMeta(
+            id=sid,
+            project_path=directory,
+            provider=Provider.OPENCODE,
+            summary=(title or "").strip() or "OpenCode Session",
+            timestamp=_parse_timestamp(t_updated),
+            start_timestamp=_parse_timestamp(t_created),
+            message_count=message_count,
+            model=model,
+            source_path=db_str,
+            input_tokens=last_input,
+            output_tokens=output_tokens,
+            cumulative_input_tokens=cumulative,
+            host=self.host,
+            subagent_count=subagent_count,
+        )
+
+    def _sessions_from_db_v1(
+        self, conn: sqlite3.Connection, db_str: str,
+    ) -> list[SessionMeta]:
+        """Read sessions from the pre-2.0 ``session``/``message`` tables."""
+        sessions: list[SessionMeta] = []
         try:
             cur = conn.cursor()
             try:
@@ -437,48 +788,20 @@ class OpencodeProvider(SessionProvider):
                 if not sid or not directory:
                     continue
 
-                model = None
-                if model_json:
-                    try:
-                        model_obj = json.loads(model_json)
-                        if isinstance(model_obj, dict):
-                            model = model_obj.get("id") or None
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-
+                model = _model_id(model_json)
                 last_input, last_model = self._last_assistant_tokens_db(
                     cur, sid, reverts.get(sid)
                 )
                 if last_model is not None:
                     model = last_model
 
-                output_tokens = int(tok_out) if tok_out else None
-                cumulative = None
-                if any(v for v in (tok_in, tok_cr, tok_cw)):
-                    cumulative = int(tok_in or 0) + int(tok_cr or 0) + int(tok_cw or 0)
-
-                sessions.append(SessionMeta(
-                    id=sid,
-                    project_path=directory,
-                    provider=Provider.OPENCODE,
-                    summary=(title or "").strip() or "OpenCode Session",
-                    timestamp=_parse_timestamp(t_updated),
-                    start_timestamp=_parse_timestamp(t_created),
-                    message_count=counts.get(sid, 0),
-                    model=model,
-                    source_path=db_str,
-                    input_tokens=last_input,
-                    output_tokens=output_tokens,
-                    cumulative_input_tokens=cumulative,
-                    host=self.host,
+                sessions.append(self._db_session_meta(
+                    sid, directory, title, t_created, t_updated, model,
+                    counts.get(sid, 0), db_str, last_input,
+                    tok_in, tok_out, tok_cr, tok_cw,
                 ))
         except sqlite3.Error:
             pass
-        finally:
-            conn.close()
-
-        if cache and sessions:
-            cache.put_sessions(db_str, sessions)
         return sessions
 
     @staticmethod
@@ -631,12 +954,57 @@ class OpencodeProvider(SessionProvider):
     # ------------------------------------------------------------------
 
     def _get_messages_db(self, db_path: Path, session_id: str) -> list[Message]:
-        messages: list[Message] = []
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         except sqlite3.Error:
-            return messages
+            return []
 
+        try:
+            tables = db_tables(conn)
+            if has_v2_schema(tables):
+                try:
+                    in_v2 = conn.execute(
+                        "SELECT 1 FROM session_v2 WHERE id = ?", (session_id,)
+                    ).fetchone() is not None
+                except sqlite3.Error:
+                    in_v2 = False
+                if in_v2:
+                    return self._get_messages_db_v2(conn, session_id)
+            if has_v1_schema(tables):
+                return self._get_messages_db_v1(conn, session_id)
+            return []
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _get_messages_db_v2(
+        conn: sqlite3.Connection, session_id: str,
+    ) -> list[Message]:
+        messages: list[Message] = []
+        cutoff = v2_cutoffs(conn).get(session_id)
+        try:
+            rows = conn.execute(
+                "SELECT seq, type, data FROM session_message"
+                " WHERE session_id = ? ORDER BY seq",
+                (session_id,),
+            )
+            for seq, mtype, data in rows:
+                if not v2_is_active(seq, cutoff):
+                    break
+                try:
+                    info = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(info, dict):
+                    messages.extend(_v2_message_to_messages(mtype, info))
+        except sqlite3.Error:
+            pass
+        return messages
+
+    def _get_messages_db_v1(
+        self, conn: sqlite3.Connection, session_id: str,
+    ) -> list[Message]:
+        messages: list[Message] = []
         try:
             revert = self._db_reverts(conn.cursor()).get(session_id)
             rows = conn.execute(
@@ -669,9 +1037,6 @@ class OpencodeProvider(SessionProvider):
                 messages.extend(_part_to_messages(role, ts, part))
         except sqlite3.Error:
             pass
-        finally:
-            conn.close()
-
         return messages
 
     def _get_messages_storage(self, info_file: Path, session_id: str) -> list[Message]:
@@ -727,9 +1092,33 @@ class OpencodeProvider(SessionProvider):
             return
         try:
             conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute("DELETE FROM part WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM message WHERE session_id = ?", (session_id,))
-            conn.execute("DELETE FROM session WHERE id = ?", (session_id,))
+            tables = db_tables(conn)
+            if has_v2_schema(tables):
+                # Child (sub-agent) sessions are hidden under their parent, so
+                # they go with it rather than surfacing as orphans.
+                targets = [session_id]
+                for target in targets:
+                    targets.extend(
+                        row[0] for row in conn.execute(
+                            "SELECT id FROM session_v2 WHERE parent_id = ?",
+                            (target,),
+                        )
+                    )
+                for target in targets:
+                    conn.execute(
+                        "DELETE FROM session_message WHERE session_id = ?",
+                        (target,),
+                    )
+                    conn.execute("DELETE FROM session_v2 WHERE id = ?", (target,))
+            # A migrated DB keeps the v1 copy too; leaving it would resurface
+            # the session through the v1 fallback.
+            for table, column in (
+                ("part", "session_id"), ("message", "session_id"), ("session", "id"),
+            ):
+                if table in tables:
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE {column} = ?", (session_id,)
+                    )
             conn.commit()
         except sqlite3.Error:
             pass

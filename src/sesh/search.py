@@ -13,7 +13,17 @@ from pathlib import Path
 
 from sesh.models import Provider, SearchResult
 from sesh.providers.cline import resolve_data_dir as _cline_data_dir
-from sesh.providers.opencode import _parse_revert, _part_is_active
+from sesh.providers.opencode import (
+    _parse_revert,
+    _part_is_active,
+    _v2_message_to_messages,
+    db_paths as _opencode_db_paths,
+    db_tables as _opencode_db_tables,
+    has_v1_schema as _opencode_has_v1,
+    has_v2_schema as _opencode_has_v2,
+    v2_cutoffs as _opencode_v2_cutoffs,
+    v2_is_active as _opencode_v2_is_active,
+)
 
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
@@ -895,20 +905,27 @@ def _search_opencode_db(
     opencode_data: Path,
     host: str | None,
 ) -> list[SearchResult]:
-    """Search opencode SQLite databases (part content) via LIKE."""
-    if not opencode_data.is_dir():
-        return []
+    """Search opencode SQLite databases via LIKE.
 
+    v2 (``session_message``) rows are searched first; v1 ``part`` rows only
+    for sessions with no v2 copy, since a migrated DB keeps both.
+    """
     results: list[SearchResult] = []
     like_pattern = f"%{_escape_like(query)}%"
     query_lower = query.lower()
 
-    for db_path in sorted(opencode_data.glob("opencode*.db")):
-        if not db_path.is_file():
-            continue
+    for db_path in _opencode_db_paths(opencode_data):
         seen: set[str] = set()
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            tables = _opencode_db_tables(conn)
+            if _opencode_has_v2(tables):
+                results.extend(_search_opencode_db_v2(
+                    conn, like_pattern, query, db_path, host, seen,
+                ))
+            if not _opencode_has_v1(tables) or "part" not in tables:
+                conn.close()
+                continue
             cur = conn.cursor()
             columns = {
                 row[1] for row in cur.execute("PRAGMA table_info(session)").fetchall()
@@ -959,6 +976,64 @@ def _search_opencode_db(
         except (sqlite3.Error, OSError):
             continue
 
+    return results
+
+
+def _search_opencode_db_v2(
+    conn: sqlite3.Connection,
+    like_pattern: str,
+    query: str,
+    db_path: Path,
+    host: str | None,
+    seen: set[str],
+) -> list[SearchResult]:
+    """Search opencode 2.0 ``session_message`` rows.
+
+    Every v2 session ID lands in *seen* (hit or not) so the v1 pass skips
+    the stale pre-migration copies. Child (sub-agent) sessions are not
+    listed as sessions, so their hits are dropped.
+    """
+    results: list[SearchResult] = []
+    query_lower = query.lower()
+    seen.update(row[0] for row in conn.execute("SELECT id FROM session_v2"))
+    cutoffs = _opencode_v2_cutoffs(conn)
+    rows = conn.execute(
+        "SELECT m.session_id, m.seq, m.type, m.data, s.directory"
+        " FROM session_message m JOIN session_v2 s ON s.id = m.session_id"
+        " WHERE m.data LIKE ? ESCAPE '!' AND s.parent_id IS NULL"
+        " ORDER BY m.session_id, m.seq",
+        (like_pattern,),
+    ).fetchall()
+    matched: set[str] = set()
+    for session_id, seq, mtype, data, directory in rows:
+        if session_id in matched:
+            continue
+        if not _opencode_v2_is_active(seq, cutoffs.get(session_id)):
+            continue
+        try:
+            obj = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        candidates = [
+            text
+            for msg in _v2_message_to_messages(mtype, obj)
+            for text in (msg.content, msg.thinking, msg.tool_input, msg.tool_output)
+            if text
+        ]
+        matches = [c for c in candidates if query_lower in c.lower()]
+        if not matches:
+            continue
+        matched.add(session_id)
+        results.append(SearchResult(
+            session_id=session_id,
+            project_path=directory or "",
+            provider=Provider.OPENCODE,
+            matched_line=_extract_display_text(max(matches, key=len), query),
+            file_path=str(db_path),
+            host=host,
+        ))
     return results
 
 

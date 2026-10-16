@@ -328,6 +328,92 @@ def create_opencode_db(
         conn.close()
 
 
+
+def create_opencode_v2_db(
+    db_path: Path,
+    sessions: list[dict],
+    messages: list[dict] | None = None,
+    projects: list[dict] | None = None,
+) -> None:
+    """Create a minimal opencode 2.0 SQLite database (``session_v2``).
+
+    Columns mirror opencode 2.0.31's schema (trimmed to what sesh reads).
+    *sessions* rows need: id, directory; optional parent_id, title,
+    time_created, time_updated, model (dict), revert (dict), tokens_* ints.
+    *messages* rows need: id, session_id, seq, type, data (dict).
+    *projects* rows need: id, worktree.
+    Opening on an existing file adds the v2 tables next to any v1 ones,
+    the way opencode's in-place migration does.
+    """
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS project ("
+            " id TEXT PRIMARY KEY, worktree TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE session_v2 ("
+            " id TEXT PRIMARY KEY, project_id TEXT NOT NULL,"
+            " parent_id TEXT, slug TEXT NOT NULL, directory TEXT NOT NULL,"
+            " title TEXT, version TEXT NOT NULL,"
+            " tokens_input INTEGER DEFAULT 0 NOT NULL,"
+            " tokens_output INTEGER DEFAULT 0 NOT NULL,"
+            " tokens_reasoning INTEGER DEFAULT 0 NOT NULL,"
+            " tokens_cache_read INTEGER DEFAULT 0 NOT NULL,"
+            " tokens_cache_write INTEGER DEFAULT 0 NOT NULL,"
+            " revert TEXT, model TEXT,"
+            " time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE session_message ("
+            " id TEXT PRIMARY KEY,"
+            " session_id TEXT NOT NULL"
+            "  REFERENCES session_v2(id) ON DELETE CASCADE,"
+            " type TEXT NOT NULL, seq INTEGER NOT NULL,"
+            " time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,"
+            " data TEXT NOT NULL)"
+        )
+        for p in projects or []:
+            conn.execute(
+                "INSERT INTO project (id, worktree) VALUES (?, ?)",
+                (p["id"], p["worktree"]),
+            )
+        for s in sessions:
+            model = s.get("model")
+            revert = s.get("revert")
+            conn.execute(
+                "INSERT INTO session_v2 (id, project_id, parent_id, slug,"
+                " directory, title, version, tokens_input, tokens_output,"
+                " tokens_cache_read, tokens_cache_write, revert, model,"
+                " time_created, time_updated)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    s["id"], s.get("project_id", "proj"), s.get("parent_id"),
+                    s.get("slug", "slug"), s["directory"], s.get("title", ""),
+                    "2.0.31", s.get("tokens_input", 0),
+                    s.get("tokens_output", 0), s.get("tokens_cache_read", 0),
+                    s.get("tokens_cache_write", 0),
+                    json.dumps(revert) if revert else None,
+                    json.dumps(model) if model else None,
+                    s.get("time_created", 0), s.get("time_updated", 0),
+                ),
+            )
+        for m in messages or []:
+            conn.execute(
+                "INSERT INTO session_message (id, session_id, type, seq,"
+                " time_created, time_updated, data) VALUES (?,?,?,?,?,?,?)",
+                (
+                    m["id"], m["session_id"], m["type"], m["seq"],
+                    m.get("time_created", 0), m.get("time_created", 0),
+                    json.dumps(m["data"]),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def write_cline_session(
     data_dir: Path,
     *,

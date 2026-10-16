@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 from sesh import search
 from sesh.models import Provider
-from tests.helpers import create_opencode_db, write_opencode_storage_session
+from tests.helpers import (
+    create_opencode_db,
+    create_opencode_v2_db,
+    write_opencode_storage_session,
+)
 
 
 def _rg_match(file_path: str, line_text: str) -> str:
@@ -256,3 +260,65 @@ def test_search_one_host_dedups_db_and_storage(
     opencode_results = [r for r in results if r.provider is Provider.OPENCODE]
     assert len(opencode_results) == 1
     assert opencode_results[0].file_path.endswith("opencode.db")
+
+
+def _v2_user(mid: str, sid: str, seq: int, text: str) -> dict:
+    return {"id": mid, "session_id": sid, "type": "user", "seq": seq,
+            "data": {"time": {"created": seq}, "text": text, "files": []}}
+
+
+def test_search_opencode_v2_matches_messages_and_tool_output(tmp_search_dirs) -> None:
+    data_dir = tmp_search_dirs["opencode_data"]
+    create_opencode_v2_db(
+        data_dir / "opencode.db",
+        sessions=[
+            {"id": "ses_user", "directory": "/Users/me/repo"},
+            {"id": "ses_tool", "directory": "/Users/me/other"},
+        ],
+        messages=[
+            _v2_user("msg_1", "ses_user", 1, "where is NeedleToken defined"),
+            {"id": "msg_2", "session_id": "ses_tool", "type": "assistant", "seq": 1,
+             "data": {"time": {"created": 1}, "content": [
+                 {"type": "tool", "id": "c", "name": "read", "state": {
+                     "status": "completed", "input": {"path": "a.py"},
+                     "content": [{"type": "text", "text": "x = NeedleToken"}]}},
+             ]}},
+        ],
+    )
+
+    results = search._search_opencode_db("needletoken", data_dir, None)
+    by_id = {r.session_id: r for r in results}
+    assert set(by_id) == {"ses_user", "ses_tool"}
+    assert by_id["ses_user"].project_path == "/Users/me/repo"
+    assert "NeedleToken" in by_id["ses_tool"].matched_line
+    assert all(r.provider is Provider.OPENCODE for r in results)
+
+
+def test_search_opencode_v2_skips_reverted_child_and_stale_v1_copy(
+    tmp_search_dirs,
+) -> None:
+    data_dir = tmp_search_dirs["opencode_data"]
+    db = data_dir / "opencode.db"
+    # Pre-2.0 rows the migration copied into v2 but left in place.
+    create_opencode_db(
+        db,
+        sessions=[{"id": "ses_rev", "directory": "/r", "title": "t",
+                   "time_created": 1, "time_updated": 1}],
+        messages=[{"id": "msg_v1", "session_id": "ses_rev", "data": {"role": "user"}}],
+        parts=[{"id": "prt_v1", "message_id": "msg_v1", "session_id": "ses_rev",
+                "data": {"type": "text", "text": "undone NeedleToken"}}],
+    )
+    create_opencode_v2_db(
+        db,
+        sessions=[
+            {"id": "ses_rev", "directory": "/r", "revert": {"messageID": "msg_2"}},
+            {"id": "ses_child", "directory": "/r", "parent_id": "ses_rev"},
+        ],
+        messages=[
+            _v2_user("msg_1", "ses_rev", 1, "kept"),
+            _v2_user("msg_2", "ses_rev", 2, "undone NeedleToken"),
+            _v2_user("msg_3", "ses_child", 1, "child NeedleToken"),
+        ],
+    )
+
+    assert search._search_opencode_db("needletoken", data_dir, None) == []

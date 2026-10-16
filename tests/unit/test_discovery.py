@@ -112,6 +112,7 @@ def test_discover_all_merges_projects_and_sorts_sessions(monkeypatch) -> None:
     import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
     import sesh.providers.gemini as gemini_mod
+    import sesh.providers.opencode as opencode_mod
     import sesh.providers.pi as pi_mod
 
     monkeypatch.setattr(claude_mod, "ClaudeProvider", FakeClaudeProvider)
@@ -121,6 +122,7 @@ def test_discover_all_merges_projects_and_sorts_sessions(monkeypatch) -> None:
     monkeypatch.setattr(pi_mod, "PiProvider", FakePiProvider)
     monkeypatch.setattr(gemini_mod, "GeminiProvider", FakeGeminiProvider)
     monkeypatch.setattr(cline_mod, "ClineProvider", FakeClineProvider)
+    monkeypatch.setattr(opencode_mod, "OpencodeProvider", FakeClineProvider)
 
     projects, sessions = discovery.discover_all(cache=cache_obj)
 
@@ -210,6 +212,7 @@ def test_discover_all_ignores_provider_exceptions(monkeypatch) -> None:
     import sesh.providers.copilot as copilot_mod
     import sesh.providers.cursor as cursor_mod
     import sesh.providers.gemini as gemini_mod
+    import sesh.providers.opencode as opencode_mod
     import sesh.providers.pi as pi_mod
 
     monkeypatch.setattr(claude_mod, "ClaudeProvider", GoodClaudeProvider)
@@ -219,6 +222,7 @@ def test_discover_all_ignores_provider_exceptions(monkeypatch) -> None:
     monkeypatch.setattr(pi_mod, "PiProvider", NullPiProvider)
     monkeypatch.setattr(gemini_mod, "GeminiProvider", NullGeminiProvider)
     monkeypatch.setattr(cline_mod, "ClineProvider", NullClineProvider)
+    monkeypatch.setattr(opencode_mod, "OpencodeProvider", NullClineProvider)
 
     projects, sessions = discovery.discover_all()
     assert set(projects) == {"/repo", "/cursor"}
