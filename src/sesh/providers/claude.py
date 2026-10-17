@@ -444,6 +444,42 @@ def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
     )
 
 
+def _redundant_copies(sessions: dict[str, dict], roots: dict[str, str]) -> set[str]:
+    """Return ids of sessions to hide as redundant copies of another session.
+
+    Sessions sharing a root user record (``roots``: session id -> uuid of a
+    ``parentUuid: null`` user record) are candidates. A Claude Code
+    ``/branch`` copy (its records carry ``forkedFrom``) and the session it names
+    are never hidden: a branch is deliberate. Among the remaining candidates a
+    session is hidden only when every record uuid it holds also appears in
+    another candidate (for identical sets the newer session is kept), so a
+    session with content of its own is never dropped.
+    """
+    branched = {s["forked_from"] for s in sessions.values() if s["forked_from"]}
+    groups: dict[str, list[str]] = defaultdict(list)
+    for sid, root in roots.items():
+        if sessions[sid]["forked_from"] or sid in branched:
+            continue
+        groups[root].append(sid)
+
+    def rank(sid: str) -> tuple[datetime, str]:
+        ts = sessions[sid]["timestamp"] or datetime.min.replace(tzinfo=timezone.utc)
+        return (ts, sid)
+
+    hidden: set[str] = set()
+    for sids in groups.values():
+        for a in sids:
+            uuids_a = sessions[a]["_parents"].keys()
+            for b in sids:
+                if b == a:
+                    continue
+                uuids_b = sessions[b]["_parents"].keys()
+                if uuids_a <= uuids_b and (uuids_a != uuids_b or rank(b) > rank(a)):
+                    hidden.add(a)
+                    break
+    return hidden
+
+
 def _parse_timestamp(ts) -> datetime:
     """Parse a timestamp from string or epoch millis.
 
@@ -1063,7 +1099,7 @@ class ClaudeProvider(SessionProvider):
             save_project_paths(cached_paths)
 
     def get_sessions(self, project_path: str, cache=None) -> list[SessionMeta]:
-        """Return sessions for a project, grouped by first user message."""
+        """Return sessions for a project, minus redundant copies (_redundant_copies)."""
         project_dir = self._find_project_dir(project_path)
         if not project_dir:
             return []
@@ -1508,9 +1544,35 @@ class ClaudeProvider(SessionProvider):
                                 "_order": 0,
                                 "has_dialogue": False,
                                 "commands": [],
+                                "custom_title": None,
+                                "ai_title": None,
+                                # Claude Code ``/branch`` copies the history into
+                                # a new session, stamping each copied record with
+                                # ``forkedFrom``; see _redundant_copies.
+                                "forked_from": None,
+                                "forked_at": None,
                             }
 
                         s = sessions[session_id]
+
+                        # Session titles: a user ``/rename`` (or ``/branch``)
+                        # writes ``custom-title``; Claude Code's generated title
+                        # is ``ai-title``. The latest of each wins.
+                        if entry_type == "custom-title":
+                            title = entry.get("customTitle")
+                            if isinstance(title, str) and title.strip():
+                                s["custom_title"] = title.strip()
+                        elif entry_type == "ai-title":
+                            title = entry.get("aiTitle")
+                            if isinstance(title, str) and title.strip():
+                                s["ai_title"] = title.strip()
+
+                        forked = entry.get("forkedFrom")
+                        copied = isinstance(forked, dict)
+                        if copied and s["forked_from"] is None:
+                            parent_id = forked.get("sessionId")
+                            if isinstance(parent_id, str) and parent_id and parent_id != session_id:
+                                s["forked_from"] = parent_id
 
                         # Collect lineage + branch-sensitive metadata inline.
                         if entry_type == "last-prompt" and isinstance(entry.get("leafUuid"), str):
@@ -1572,6 +1634,8 @@ class ClaudeProvider(SessionProvider):
                                 s["timestamp"] = parsed
                             if s["start_timestamp"] is None or parsed < s["start_timestamp"]:
                                 s["start_timestamp"] = parsed
+                            if copied and (s["forked_at"] is None or parsed > s["forked_at"]):
+                                s["forked_at"] = parsed
 
                         # Apply pending summary
                         parent_uuid = entry.get("parentUuid")
@@ -1601,8 +1665,11 @@ class ClaudeProvider(SessionProvider):
                                     + usage.get("cache_read_input_tokens", 0)
                                 )
                                 s["input_tokens"] = turn_input
-                                s["cumulative_input_tokens"] += turn_input
-                                s["output_tokens"] += usage.get("output_tokens", 0)
+                                # A branch's copied records were paid for in the
+                                # original session; count only its own turns.
+                                if not copied:
+                                    s["cumulative_input_tokens"] += turn_input
+                                    s["output_tokens"] += usage.get("output_tokens", 0)
 
                         # Track first user message (parentUuid is null)
                         if role == "user" and entry.get("parentUuid") is None and entry.get("uuid"):
@@ -1625,25 +1692,8 @@ class ClaudeProvider(SessionProvider):
             except OSError:
                 continue
 
-        # Group sessions by first user message UUID
-        uuid_to_sessions: dict[str, list[str]] = defaultdict(list)
-        ungrouped = []
-        for sid, uuid in first_user_msgs.items():
-            uuid_to_sessions[uuid].append(sid)
-        grouped_ids = set()
-        for uuid, sids in uuid_to_sessions.items():
-            grouped_ids.update(sids)
-
-        # Pick latest session from each group
-        result_ids = set()
-        for uuid, sids in uuid_to_sessions.items():
-            best = max(sids, key=lambda sid: sessions[sid]["timestamp"] or datetime.min.replace(tzinfo=timezone.utc))
-            result_ids.add(best)
-
-        # Add ungrouped sessions
-        for sid in sessions:
-            if sid not in grouped_ids:
-                result_ids.add(sid)
+        hidden_ids = _redundant_copies(sessions, first_user_msgs)
+        result_ids = [sid for sid in sessions if sid not in hidden_ids]
 
         # Build SessionMeta list. Branch-sensitive fields are derived from data
         # collected during the single scan above (no per-session re-read);
@@ -1656,7 +1706,7 @@ class ClaudeProvider(SessionProvider):
             if active is not None:
                 s.update(active)
             summary = _session_title(
-                s["summary"],
+                s["custom_title"] or s["summary"] or s["ai_title"],
                 s["last_user_message"],
                 s["commands"],
                 s["has_dialogue"],
@@ -1685,6 +1735,8 @@ class ClaudeProvider(SessionProvider):
                 host=self.host,
                 subagent_count=self.count_subagents(sid, project_dir),
                 is_empty=not s["has_dialogue"],
+                forked_from=s["forked_from"],
+                forked_at=s["forked_at"],
             ))
 
         result.sort(key=lambda s: s.timestamp, reverse=True)

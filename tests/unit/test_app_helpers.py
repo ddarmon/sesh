@@ -488,6 +488,25 @@ def test_session_label_no_badge_when_zero() -> None:
     assert "⑂" not in app._session_label(session)
 
 
+def test_session_label_marks_branch() -> None:
+    """A branch session carries a ⎇ marker; an ordinary one does not."""
+    app = SeshApp()
+    assert "⎇" in app._session_label(make_session(id="b", forked_from="orig"))
+    assert "⎇" not in app._session_label(make_session(id="s"))
+
+
+def test_format_session_header_includes_branch_origin() -> None:
+    """The caller's branch note sits after the session id."""
+    from sesh.app import format_session_header
+
+    session = make_session(id="branch-1", forked_from="orig")
+    header = format_session_header(
+        session, message_count=1, branch_origin="⎇ branched from orig"
+    )
+    assert "branch-1  ·  ⎇ branched from orig" in header
+    assert "⎇" not in format_session_header(session, message_count=1)
+
+
 def test_splice_mixed_naive_and_aware_timestamps() -> None:
     """[finding 2] Splicing must not crash when a message timestamp came from a
     no-offset (naive-source) stamp and the sub-agent's from a Z stamp."""

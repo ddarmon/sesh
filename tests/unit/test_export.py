@@ -11,6 +11,31 @@ from sesh.models import Provider, SubagentMeta
 from tests.helpers import make_message, make_session
 
 
+def test_format_branch_origin_variants() -> None:
+    """Parent title when known, "deleted" when looked up and missing, short id
+    otherwise; the branch time is appended; None for ordinary sessions."""
+    from sesh.export import format_branch_origin
+
+    at = datetime(2026, 10, 17, 16, 36, tzinfo=timezone.utc)
+    branch = make_session(id="b", forked_from="be1decc5-2aff-4e1e", forked_at=at)
+    assert format_branch_origin(branch, "Clef tutorial") == (
+        "⎇ branched from “Clef tutorial” (be1decc5) at 2026-10-17 16:36"
+    )
+    assert format_branch_origin(branch, parent_missing=True) == (
+        "⎇ branched from deleted session be1decc5 at 2026-10-17 16:36"
+    )
+    no_time = make_session(id="b", forked_from="be1decc5-2aff-4e1e")
+    assert format_branch_origin(no_time) == "⎇ branched from be1decc5"
+    assert format_branch_origin(make_session(id="s")) is None
+
+
+def test_html_meta_header_shows_branch_origin() -> None:
+    """The HTML header names a branch's parent session."""
+    session = make_session(id="b", forked_from="be1decc5-2aff-4e1e")
+    out = format_session_html(session, [make_message(content="hi")])
+    assert "⎇ branched from be1decc5" in _meta_header(out)
+
+
 def _subagent(**overrides):
     """Build a (SubagentMeta, interior messages) pair for export tests."""
     data = {

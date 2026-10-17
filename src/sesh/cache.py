@@ -16,7 +16,9 @@ INDEX_FILE = CACHE_DIR / "index.json"
 # v6 invalidates Claude metadata that counted ``api-request-blob`` records.
 # v7 rebuilds Claude titles that used injected ``isMeta`` text and adds
 # ``is_empty``.
-CACHE_VERSION = 7
+# v8 lists Claude ``/branch`` sessions separately (``forked_from``/``forked_at``),
+# excludes their copied usage, and titles from ``custom-title``/``ai-title``.
+CACHE_VERSION = 8
 
 
 def _session_to_dict(s: SessionMeta) -> dict:
@@ -36,6 +38,8 @@ def _session_to_dict(s: SessionMeta) -> dict:
         "host": s.host,
         "subagent_count": s.subagent_count,
         "is_empty": s.is_empty,
+        "forked_from": s.forked_from,
+        "forked_at": s.forked_at.isoformat() if s.forked_at else None,
     }
 
 
@@ -72,6 +76,8 @@ def _dict_to_session(d: dict) -> SessionMeta:
         host=d.get("host"),
         subagent_count=d.get("subagent_count", 0),
         is_empty=d.get("is_empty", False),
+        forked_from=d.get("forked_from"),
+        forked_at=_parse_dt(d.get("forked_at"), default=None),
     )
 
 
@@ -134,7 +140,7 @@ class SessionCache:
     def get_sessions_for_dir(self, dir_path: str) -> list[SessionMeta] | None:
         """Return cached sessions if no files in the directory have changed."""
         entry = self._cache.get(f"dir:{dir_path}")
-        if not entry:
+        if not entry or entry.get("cache_version") != CACHE_VERSION:
             return None
 
         current_fp = self._dir_fingerprint(dir_path)
@@ -153,6 +159,7 @@ class SessionCache:
             return
 
         self._cache[f"dir:{dir_path}"] = {
+            "cache_version": CACHE_VERSION,
             "fingerprint": fp,
             "sessions": [_session_to_dict(s) for s in sessions],
         }

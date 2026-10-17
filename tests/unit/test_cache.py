@@ -126,6 +126,31 @@ def test_put_get_roundtrip(tmp_cache_dir, tmp_path: Path) -> None:
     assert sc.get_sessions(str(file_path)) == sessions
 
 
+def test_branch_fields_roundtrip(tmp_cache_dir) -> None:
+    """forked_from / forked_at survive the cache dict round-trip."""
+    session = make_session(
+        id="branch",
+        forked_from="orig",
+        forked_at=datetime(2026, 10, 17, 16, 36, tzinfo=timezone.utc),
+    )
+    assert cache._dict_to_session(cache._session_to_dict(session)) == session
+
+
+def test_dir_cache_miss_for_other_version(tmp_cache_dir, tmp_path: Path) -> None:
+    """A CACHE_VERSION bump invalidates per-directory entries too, not only
+    per-file ones; otherwise Claude metadata never picks up parser changes."""
+    _write(tmp_path / "s.jsonl", "{}\n")
+    sc = cache.SessionCache()
+    sessions = [make_session(id="s1")]
+    sc.put_sessions_for_dir(str(tmp_path), sessions)
+    assert sc.get_sessions_for_dir(str(tmp_path)) == sessions
+
+    sc._cache[f"dir:{tmp_path}"]["cache_version"] = cache.CACHE_VERSION - 1
+    assert sc.get_sessions_for_dir(str(tmp_path)) is None
+    del sc._cache[f"dir:{tmp_path}"]["cache_version"]
+    assert sc.get_sessions_for_dir(str(tmp_path)) is None
+
+
 def test_cache_miss_no_entry(tmp_cache_dir, tmp_path: Path) -> None:
     """Per-file cache: querying an uncached path returns None."""
     file_path = tmp_path / "session.jsonl"
