@@ -1,5 +1,5 @@
 ---
-Status: in progress
+Status: done
 Type: feature
 Owner: David Darmon
 Branch: feature/claude-branch-sessions
@@ -71,3 +71,12 @@ uv run sesh refresh && uv run sesh sessions --project ~/workspace/clef
 
 Expect both `be1decc5` and `20cefa03` (and `d774ddd2` / `f7a1915a` under
 `~/workspace`), and `sesh stats` not to grow by the copied tokens.
+
+## Outcome
+
+Implemented in PR #70. Found and fixed along the way: per-directory sessions
+cache entries ignored `CACHE_VERSION`, so earlier version bumps never
+invalidated Claude metadata. The deferred sub-agent gap is confirmed on real
+data (an original with three sub-agents whose branch shows none). A planned
+switch from the last to the first root user record was dropped: no test could
+distinguish the two under the new merge rule.
