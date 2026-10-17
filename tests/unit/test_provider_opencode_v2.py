@@ -115,6 +115,98 @@ def test_v2_child_sessions_are_counted_not_listed(tmp_opencode_dir: Path) -> Non
     assert sessions[0].subagent_count == 2
 
 
+def test_v2_nested_descendants_count_toward_root(tmp_opencode_dir: Path) -> None:
+    create_opencode_v2_db(
+        tmp_opencode_dir / "opencode.db",
+        sessions=[
+            _session("ses_root"),
+            _session("ses_kid", parent_id="ses_root"),
+            _session("ses_grandkid", parent_id="ses_kid"),
+        ],
+    )
+    [root] = OpencodeProvider().get_sessions(REPO)
+    assert root.subagent_count == 2
+
+
+def test_v2_load_subagents_returns_child_threads(tmp_opencode_dir: Path) -> None:
+    db = tmp_opencode_dir / "opencode.db"
+    create_opencode_v2_db(
+        db,
+        sessions=[
+            _session("ses_root"),
+            # Created out of order: results are sorted by time_created.
+            _session("ses_b", parent_id="ses_root", title="Second critic",
+                     time_created=3000, tokens_output=40),
+            _session("ses_a", parent_id="ses_root", title="First critic",
+                     time_created=2000),
+            _session("ses_a_kid", parent_id="ses_a", title="Nested helper",
+                     time_created=2500),
+            _session("ses_other", title="Unrelated root"),
+            _session("ses_other_kid", parent_id="ses_other"),
+        ],
+        messages=[
+            _user("msg_r1", "ses_root", 1, "Ask two critics."),
+            _user("msg_a1", "ses_a", 1, "Critique this.", created=2001),
+            _assistant("msg_a2", "ses_a", 2, [
+                {"type": "reasoning", "text": "Thinking it over."},
+                {"type": "text", "text": "Looks fine."},
+            ], created=2002),
+            _idle("msg_a3", "ses_a", 3),
+            _user("msg_b1", "ses_b", 1, "Critique again.", created=3001),
+        ],
+    )
+    root = next(s for s in OpencodeProvider().get_sessions(REPO) if s.id == "ses_root")
+    loaded = OpencodeProvider().load_subagents(root)
+
+    assert [m.agent_id for m, _ in loaded] == ["ses_a", "ses_a_kid", "ses_b"]
+    meta_a, msgs_a = loaded[0]
+    assert meta_a.description == "First critic"
+    assert meta_a.agent_type == "build"
+    assert meta_a.file_path == str(db)
+    assert meta_a.first_timestamp == opencode._parse_timestamp(2000)
+    # Reasoning is loaded (shown under the thinking toggle) but not counted.
+    assert [m.content_type for m in msgs_a] == ["text", "thinking", "text"]
+    assert meta_a.message_count == 2
+    assert meta_a.output_tokens is None
+
+    meta_b, msgs_b = loaded[2]
+    assert meta_b.agent_type is None  # no assistant reply yet
+    assert meta_b.output_tokens == 40
+    assert [m.content for m in msgs_b] == ["Critique again."]
+
+    assert OpencodeProvider().discover_subagents(root) == [m for m, _ in loaded]
+
+
+def test_v2_load_subagents_survives_parent_cycle(tmp_opencode_dir: Path) -> None:
+    create_opencode_v2_db(
+        tmp_opencode_dir / "opencode.db",
+        sessions=[
+            _session("ses_root"),
+            _session("ses_x", parent_id="ses_y"),
+            _session("ses_y", parent_id="ses_x"),
+            _session("ses_kid", parent_id="ses_root"),
+        ],
+    )
+    root = next(s for s in OpencodeProvider().get_sessions(REPO) if s.id == "ses_root")
+    assert [m.agent_id for m, _ in OpencodeProvider().load_subagents(root)] == [
+        "ses_kid"
+    ]
+
+
+def test_load_subagents_ignores_v1_and_storage_sessions(
+    tmp_opencode_dir: Path,
+) -> None:
+    create_opencode_db(
+        tmp_opencode_dir / "opencode.db",
+        sessions=[{"id": "ses_v1", "directory": REPO, "title": "t",
+                   "time_created": 1, "time_updated": 1}],
+    )
+    [session] = OpencodeProvider().get_sessions(REPO)
+    assert OpencodeProvider().load_subagents(session) == []
+    session.source_path = str(tmp_opencode_dir / "storage" / "session" / "p" / "s.json")
+    assert OpencodeProvider().load_subagents(session) == []
+
+
 def test_v2_get_messages_maps_message_and_content_types(
     tmp_opencode_dir: Path,
 ) -> None:

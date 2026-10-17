@@ -139,8 +139,9 @@ opencode has three on-disk formats, all supported by the provider
     `system` / `skill` / `shell` / `compaction` / `idle` / `*-switched`),
     ordered by `seq`, with assistant content blocks and tool output inline in
     its JSON `data`; there is no `part` table. Child sessions (`parent_id`)
-    are excluded from the list and counted on the parent's
-    `subagent_count`; delete removes them with the parent. The 2.0 migration
+    are excluded from the list and counted on the root's `subagent_count`
+    (nested descendants included); `load_subagents` renders them as
+    sub-agent threads, and delete removes them with the parent. The 2.0 migration
     copies v1 rows into the v2 tables **without dropping the v1 tables**, so a
     DB can hold both: the v2 copy of a session wins, and delete/move touch
     both copies. `opencode.db` is read before other `opencode*.db` files so a
@@ -332,8 +333,8 @@ is an alias of `export.format_duration`.
 ## Native sub-agent transcripts
 
 Sesh uses the provider-neutral `SubagentMeta` + `load_subagents(session)` API to
-render child-agent threads in the TUI and exports. Claude and Codex currently
-implement this API.
+render child-agent threads in the TUI and exports. Claude, Codex, and opencode
+(2.0 `session_v2` databases only) currently implement this API.
 
 ### Rewind and rollback history
 
@@ -377,6 +378,22 @@ plaintext `NEW_TASK` handoff. Nested descendants are attached to the root via
 reads the matched Codex file's first-line header so child hits carry the root
 session id plus child `agent_id`; current `custom_tool_call` /
 `custom_tool_call_output` records render under the normal tool toggle.
+
+### opencode subagents
+
+opencode 2.0 runs each `subagent` tool call in a child `session_v2` row whose
+`parent_id` is the spawning session. `load_subagents` reads every transitive
+descendant of the root from the same database (cycle-safe), converts its
+`session_message` rows with the normal v2 mapping (staged-undo cutoff
+included), and returns them as one flat list sorted by `time_created`, which
+is the spawn timestamp used for splicing. `description` is the child's title
+(the tool call's `description`), `agent_type` is the `agent` field of the
+child's first assistant message (the `session_v2.agent` column is not read),
+and `output_tokens` is the child row's `tokens_output`. The parent's
+`subagent` tool result still carries the child's final reply wrapped in
+`<subagent sessionID=…>`; the child thread adds the prompt and any reasoning.
+Pre-2.0 SQLite and legacy JSON child sessions are not linked to their parent
+yet, so they still list as ordinary sessions.
 
 ### Claude Code subagents
 
