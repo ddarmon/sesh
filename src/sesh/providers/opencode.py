@@ -11,10 +11,14 @@ formats exist in the wild:
    ordered by ``seq``; assistant content blocks (text / reasoning / tool,
    with tool output inline) live in its JSON ``data``. There is no ``part``
    table. Child sessions (``parent_id`` set) are sub-agents: they are
-   excluded from the session list and counted on the parent.
+   excluded from the session list, counted on their root session (nested
+   descendants included), and loaded as sub-agent threads on demand by
+   ``load_subagents``.
 2. **SQLite v1** (2026, pre-2.0): the same file with ``session``,
    ``message``, and ``part`` tables. ``message.data`` / ``part.data`` are
-   JSON columns holding the V1 message/part payloads. opencode 2.0
+   JSON columns holding the V1 message/part payloads. Child sessions
+   (``session.parent_id``, written by the ``task`` tool) are sub-agents,
+   handled exactly as in v2. opencode 2.0
    migrates these rows into the v2 tables in place without dropping them,
    so a DB can hold both; the v2 copy of a session wins.
 3. **Legacy JSON storage** (2025-era): individual JSON files under
@@ -67,6 +71,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -74,7 +79,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sesh.models import Message, MoveReport, Provider, SessionMeta
+from sesh.models import Message, MoveReport, Provider, SessionMeta, SubagentMeta
 from sesh.providers import SessionProvider
 from sesh.providers.claude import _is_system_message
 
@@ -317,6 +322,43 @@ def v2_cutoffs(conn: sqlite3.Connection) -> dict[str, int]:
     return result
 
 
+# opencode 1.x titles a task-tool child session "{description} (@{agent} subagent)".
+_SUBAGENT_TITLE_SUFFIX = re.compile(r"\s*\(@[^()]*\bsubagent\)\s*$")
+
+
+def subagent_description(title: object) -> str | None:
+    """A child session's title without the 1.x ``(@agent subagent)`` suffix."""
+    if not isinstance(title, str):
+        return None
+    return _SUBAGENT_TITLE_SUFFIX.sub("", title).strip() or None
+
+
+def child_map(rows) -> dict[str, list[str]]:
+    """Map parent session ID -> child IDs from ``(id, parent_id, ...)`` rows."""
+    children: dict[str, list[str]] = {}
+    for row in rows:
+        if row[0] and row[1]:
+            children.setdefault(row[1], []).append(row[0])
+    return children
+
+
+def descendants(children: dict[str, list[str]], root_id: str) -> list[str]:
+    """All transitive child session IDs of *root_id* (breadth-first).
+
+    A cycle in corrupt data cannot loop forever: each ID is visited once.
+    """
+    found: list[str] = []
+    seen = {root_id}
+    queue = [root_id]
+    while queue:
+        for child in children.get(queue.pop(0), []):
+            if child not in seen:
+                seen.add(child)
+                found.append(child)
+                queue.append(child)
+    return found
+
+
 def v2_is_active(seq: object, cutoff: int | None) -> bool:
     """Whether a v2 message survives the staged undo ``cutoff``."""
     return cutoff is None or not isinstance(seq, int) or seq < cutoff
@@ -419,6 +461,16 @@ def _v2_message_to_messages(mtype: str, info: dict) -> list[Message]:
     return messages
 
 
+def _agent_from_data(data: object) -> str | None:
+    """The ``agent`` field of a message's JSON ``data``, if any."""
+    try:
+        info = json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    agent = info.get("agent") if isinstance(info, dict) else None
+    return agent if isinstance(agent, str) and agent else None
+
+
 def _atomic_rewrite_json(path: Path, data: dict) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".json.tmp")
     try:
@@ -509,6 +561,131 @@ class OpencodeProvider(SessionProvider):
         if source.suffix == ".db":
             return self._get_messages_db(source, session.id)
         return self._get_messages_storage(source, session.id)
+
+    def load_subagents(
+        self, session: SessionMeta
+    ) -> list[tuple[SubagentMeta, list[Message]]]:
+        """Load a DB session's child sessions as sub-agent threads.
+
+        Nested descendants are attached to the root and returned as one flat
+        chronological list (as Codex does). Child sessions live in the same
+        table as their parent, so the schema that holds the root (v2 first,
+        as in ``get_messages``) supplies them. Legacy JSON storage is not
+        linked to its children.
+        """
+        if not session.source_path or not session.source_path.endswith(".db"):
+            return []
+        db_path = Path(session.source_path)
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            return []
+
+        loaded: list[tuple[SubagentMeta, list[Message]]] = []
+        try:
+            tables = db_tables(conn)
+            if has_v2_schema(tables) and self._in_v2(conn, session.id):
+                rows = self._session_rows(conn, "session_v2")
+                get_messages = self._get_messages_db_v2
+                agent_name = self._v2_agent_name
+            elif has_v1_schema(tables):
+                rows = self._session_rows(conn, "session")
+                get_messages = self._get_messages_db_v1
+                agent_name = self._v1_agent_name
+            else:
+                return []
+            info = {row[0]: row for row in rows if row[0]}
+            for child_id in descendants(child_map(rows), session.id):
+                _sid, _parent, title, t_created, tok_out = info[child_id]
+                messages = get_messages(conn, child_id)
+                meta = SubagentMeta(
+                    agent_id=child_id,
+                    file_path=str(db_path),
+                    description=subagent_description(title),
+                    agent_type=agent_name(conn, child_id),
+                    first_timestamp=_parse_timestamp(t_created),
+                    message_count=len([
+                        m for m in messages
+                        if m.role in ("user", "assistant")
+                        and m.content_type == "text"
+                    ]),
+                    output_tokens=int(tok_out) if tok_out else None,
+                )
+                loaded.append((meta, messages))
+        finally:
+            conn.close()
+
+        loaded.sort(
+            key=lambda pair: pair[0].first_timestamp
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        return loaded
+
+    def discover_subagents(self, session: SessionMeta) -> list[SubagentMeta]:
+        return [meta for meta, _ in self.load_subagents(session)]
+
+    @staticmethod
+    def _in_v2(conn: sqlite3.Connection, session_id: str) -> bool:
+        try:
+            return conn.execute(
+                "SELECT 1 FROM session_v2 WHERE id = ?", (session_id,)
+            ).fetchone() is not None
+        except sqlite3.Error:
+            return False
+
+    @staticmethod
+    def _session_rows(conn: sqlite3.Connection, table: str) -> list[tuple]:
+        """``(id, parent_id, title, time_created, tokens_output)`` rows.
+
+        Empty when the table has no ``parent_id`` column (no sub-agents);
+        ``tokens_output`` is NULL when that column is missing.
+        """
+        for tokens in ("tokens_output", "NULL"):
+            try:
+                return conn.execute(
+                    f"SELECT id, parent_id, title, time_created, {tokens}"
+                    f" FROM {table}"
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+        return []
+
+    @staticmethod
+    def _v2_agent_name(conn: sqlite3.Connection, session_id: str) -> str | None:
+        """The agent (e.g. ``general``) that ran a child session.
+
+        Read from the first assistant message rather than ``session_v2.agent``,
+        which not every 2.0 schema carries.
+        """
+        try:
+            row = conn.execute(
+                "SELECT data FROM session_message"
+                " WHERE session_id = ? AND type = 'assistant'"
+                " ORDER BY seq LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        return _agent_from_data(row[0]) if row is not None else None
+
+    @staticmethod
+    def _v1_agent_name(conn: sqlite3.Connection, session_id: str) -> str | None:
+        """The agent that ran a v1 child session, from its first assistant."""
+        try:
+            rows = conn.execute(
+                "SELECT data FROM message WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            )
+            for (data,) in rows:
+                try:
+                    info = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(info, dict) and info.get("role") == "assistant":
+                    return _agent_from_data(data)
+        except sqlite3.Error:
+            pass
+        return None
 
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a session from the SQLite DB or the JSON storage tree."""
@@ -655,16 +832,14 @@ class OpencodeProvider(SessionProvider):
             return []
 
         cutoffs = v2_cutoffs(conn)
-        child_counts: dict[str, int] = {}
+        children = child_map(rows)
         roots = []
         for row in rows:
             sid, parent_id = row[0], row[1]
             if not sid:
                 continue
             seen_ids.add(sid)
-            if parent_id:
-                child_counts[parent_id] = child_counts.get(parent_id, 0) + 1
-            else:
+            if not parent_id:
                 roots.append(row)
 
         sessions: list[SessionMeta] = []
@@ -711,7 +886,9 @@ class OpencodeProvider(SessionProvider):
                 sid, directory, title, t_created, t_updated, model,
                 count_row[0] if count_row else 0, db_str, last_input,
                 tok_in, tok_out, tok_cr, tok_cw,
-                subagent_count=child_counts.get(sid, 0),
+                # Nested descendants count too: load_subagents returns them
+                # flattened under the root.
+                subagent_count=len(descendants(children, sid)),
             ))
         return sessions
 
@@ -769,6 +946,11 @@ class OpencodeProvider(SessionProvider):
                 except sqlite3.Error:
                     return sessions
 
+            # Child (task-tool sub-agent) sessions are counted on their root,
+            # not listed, exactly as in v2.
+            children = child_map(self._session_rows(conn, "session"))
+            child_ids = {cid for kids in children.values() for cid in kids}
+
             reverts = self._db_reverts(cur)
             counts: dict[str, int] = {}
             try:
@@ -785,7 +967,7 @@ class OpencodeProvider(SessionProvider):
                     sid, directory, title, t_created, t_updated,
                     model_json, tok_in, tok_out, tok_cr, tok_cw,
                 ) = row
-                if not sid or not directory:
+                if not sid or not directory or sid in child_ids:
                     continue
 
                 model = _model_id(model_json)
@@ -799,6 +981,7 @@ class OpencodeProvider(SessionProvider):
                     sid, directory, title, t_created, t_updated, model,
                     counts.get(sid, 0), db_str, last_input,
                     tok_in, tok_out, tok_cr, tok_cw,
+                    subagent_count=len(descendants(children, sid)),
                 ))
         except sqlite3.Error:
             pass
@@ -961,15 +1144,8 @@ class OpencodeProvider(SessionProvider):
 
         try:
             tables = db_tables(conn)
-            if has_v2_schema(tables):
-                try:
-                    in_v2 = conn.execute(
-                        "SELECT 1 FROM session_v2 WHERE id = ?", (session_id,)
-                    ).fetchone() is not None
-                except sqlite3.Error:
-                    in_v2 = False
-                if in_v2:
-                    return self._get_messages_db_v2(conn, session_id)
+            if has_v2_schema(tables) and self._in_v2(conn, session_id):
+                return self._get_messages_db_v2(conn, session_id)
             if has_v1_schema(tables):
                 return self._get_messages_db_v1(conn, session_id)
             return []
@@ -1111,14 +1287,23 @@ class OpencodeProvider(SessionProvider):
                     )
                     conn.execute("DELETE FROM session_v2 WHERE id = ?", (target,))
             # A migrated DB keeps the v1 copy too; leaving it would resurface
-            # the session through the v1 fallback.
-            for table, column in (
-                ("part", "session_id"), ("message", "session_id"), ("session", "id"),
-            ):
-                if table in tables:
-                    conn.execute(
-                        f"DELETE FROM {table} WHERE {column} = ?", (session_id,)
-                    )
+            # the session through the v1 fallback. v1 children (task-tool
+            # sub-agents) go with their parent, as in v2.
+            v1_targets = [session_id]
+            if "session" in tables:
+                v1_targets += descendants(
+                    child_map(OpencodeProvider._session_rows(conn, "session")),
+                    session_id,
+                )
+            for target in v1_targets:
+                for table, column in (
+                    ("part", "session_id"), ("message", "session_id"),
+                    ("session", "id"),
+                ):
+                    if table in tables:
+                        conn.execute(
+                            f"DELETE FROM {table} WHERE {column} = ?", (target,)
+                        )
             conn.commit()
         except sqlite3.Error:
             pass
