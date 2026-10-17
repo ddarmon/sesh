@@ -364,7 +364,34 @@ inline in `_parse_sessions`' single directory scan (never re-read per
 session). Active history drives transcript message counts, summaries, and
 final context usage; cumulative token/output totals continue to include
 abandoned API work because that work was actually incurred. The metadata cache
-version must be bumped whenever these reconstruction semantics change.
+version must be bumped whenever these reconstruction semantics change (both
+the per-file and the per-directory cache entries Claude uses are gated on it).
+
+### Claude Code branches
+
+`/branch` (and resume-with-fork) copies the conversation into a new file under
+a new `sessionId`, preserving every record `uuid` and timestamp and stamping
+each copied record with `forkedFrom: {sessionId, messageUuid}`; records
+appended afterward lack it, and the original gets no back-reference. A branch
+and its original therefore share a root user record, yet both are always
+listed: `claude._redundant_copies` never hides a session carrying `forkedFrom`
+or one named by it. Among unmarked sessions sharing a root (the presumed
+legacy resume-copy case, never observed alongside `forkedFrom`), a session is
+hidden only when its uuid set is contained in another's (identical sets keep
+the newer), so a session with content of its own is never dropped.
+`SessionMeta.forked_from` / `forked_at` (parent id, last copied record's
+timestamp) feed the `⎇` tree badge, the TUI/HTML "branched from" header note
+(`export.format_branch_origin`; the TUI names the parent by title or as
+deleted), and `sesh sessions` JSON. A branch's `output_tokens` and
+`cumulative_input_tokens` count only its own records, since copied turns were
+paid for in the original; `input_tokens` and `message_count` describe the whole
+branch. Sub-agents spawned before the branch stay under the original's sidecar
+dir and are not shown in the branch. Deleting an original leaves its branches
+whole.
+
+Claude titles resolve as the latest `custom-title` (`/rename`, `/branch`), then
+a `summary` record, then the latest `ai-title` (Claude Code's generated title),
+then the last user-written prompt.
 
 ### Codex native subagents
 

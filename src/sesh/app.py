@@ -30,6 +30,7 @@ from textual.widgets import (
 from sesh import transcript
 from sesh.bookmarks import load_bookmarks, save_bookmarks
 from sesh.export import (
+    format_branch_origin,
     format_duration as _format_duration,
     format_session_markdown,
     format_time_range,
@@ -117,6 +118,7 @@ def format_session_header(
     message_count: int,
     subagent_count: int = 0,
     resume_cmd: str | None = None,
+    branch_origin: str | None = None,
 ) -> str:
     """Compose the compact per-session details line shown above the transcript.
 
@@ -125,7 +127,8 @@ def format_session_header(
     full session id, start/end + duration, message and sub-agent counts, and
     context/cumulative token totals — and, unlike the HTML header, appends the
     resume command when the session is resumable and its CLI is installed
-    (``resume_cmd`` is precomputed by the caller). Empty fields are omitted.
+    (``resume_cmd`` is precomputed by the caller). ``branch_origin`` is the
+    caller's :func:`export.format_branch_origin` note. Empty fields are omitted.
     """
     parts: list[str] = [session.provider.value]
     if session.model:
@@ -133,6 +136,8 @@ def format_session_header(
     if session.host:
         parts.append(f"[{session.host}]")
     parts.append(session.id)
+    if branch_origin:
+        parts.append(branch_origin)
     parts.append(format_time_range(session))
     parts.append(f"{message_count} msgs")
     if subagent_count:
@@ -1154,6 +1159,8 @@ class SeshApp(App):
         summary = session.summary[:50]
         model = f" [{_short_model_name(session.model)}]" if session.model else ""
         agents = f" ⑂{session.subagent_count}" if session.subagent_count else ""
+        if session.forked_from:
+            agents += " ⎇"
         if session.is_empty:
             summary = f"∅ {summary}"
         if show_project:
@@ -1726,15 +1733,36 @@ class SeshApp(App):
         result = self._resume_command(session)
         if result is not None:
             resume_cmd = " ".join(result[0])
+        branch_origin = None
+        if session.forked_from:
+            parent = self._find_loaded_session(
+                session.provider, session.host, session.forked_from
+            )
+            branch_origin = format_branch_origin(
+                session,
+                parent.summary if parent else None,
+                parent_missing=parent is None,
+            )
         header = format_session_header(
             session,
             message_count=message_count,
             subagent_count=subagent_count,
             resume_cmd=resume_cmd,
+            branch_origin=branch_origin,
         )
         widget = self.query_one("#message-header", Static)
         widget.update(Text(header))
         widget.remove_class("hidden")
+
+    def _find_loaded_session(
+        self, provider: Provider, host: str | None, session_id: str
+    ) -> SessionMeta | None:
+        """Return the discovered session with this provider, host, and id."""
+        for sess_list in self.sessions.values():
+            for s in sess_list:
+                if s.id == session_id and s.provider == provider and s.host == host:
+                    return s
+        return None
 
     def action_copy_focused_message(self) -> None:
         """Copy the complete body of the focused transcript message."""

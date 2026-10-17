@@ -58,6 +58,10 @@ class SessionMeta:
     subagent_count: int = 0  # Provider-native child-agent transcripts
     # No prompt the user wrote and no real model turn (e.g. only ``/model``).
     is_empty: bool = False
+    # A branch of another session (Claude Code ``/branch``): the parent's id and
+    # the timestamp of the last record copied from it.
+    forked_from: str | None = None
+    forked_at: datetime | None = None
 
 
 @dataclass

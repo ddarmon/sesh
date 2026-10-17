@@ -78,6 +78,32 @@ def token_summary_parts(session: SessionMeta) -> list[str]:
     return bits
 
 
+def format_branch_origin(
+    session: SessionMeta,
+    parent_summary: str | None = None,
+    *,
+    parent_missing: bool = False,
+) -> str | None:
+    """Plain-text "branched from" note for a branch session, else ``None``.
+
+    Names the parent by title when the caller found it (``parent_summary``),
+    says it was deleted when the caller looked and did not (``parent_missing``),
+    and otherwise falls back to the parent's short id. Shared by both readers.
+    """
+    if not session.forked_from:
+        return None
+    short = session.forked_from[:8]
+    if parent_summary:
+        text = f"⎇ branched from “{parent_summary}” ({short})"
+    elif parent_missing:
+        text = f"⎇ branched from deleted session {short}"
+    else:
+        text = f"⎇ branched from {short}"
+    if session.forked_at is not None:
+        text += f" at {session.forked_at:%Y-%m-%d %H:%M}"
+    return text
+
+
 def _md_message_lines(m: Message, heading_offset: int = 0) -> list[str]:
     """Render one message as Markdown lines.
 
@@ -874,6 +900,9 @@ def format_meta_header_html(
         f'<button type="button" class="metabtn" id="copy-session-id" '
         f'data-copy="{sid}" title="Copy session ID">Copy ID</button>'
     )
+    origin = format_branch_origin(session)
+    if origin:
+        parts.append(html.escape(origin))
     parts.append(html.escape(format_time_range(session)))
     counts = f"{message_count} msgs"
     if subagent_count:

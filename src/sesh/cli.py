@@ -320,6 +320,8 @@ def cmd_sessions(args: argparse.Namespace) -> None:
             "host": s.get("host"),
             "subagent_count": s.get("subagent_count", 0),
             "empty": s.get("is_empty", False),
+            "forked_from": s.get("forked_from"),
+            "forked_at": s.get("forked_at"),
         })
 
     _json_out(out)
