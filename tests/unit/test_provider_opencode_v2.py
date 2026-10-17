@@ -193,7 +193,7 @@ def test_v2_load_subagents_survives_parent_cycle(tmp_opencode_dir: Path) -> None
     ]
 
 
-def test_load_subagents_ignores_v1_and_storage_sessions(
+def test_load_subagents_needs_a_parent_id_column_and_a_db(
     tmp_opencode_dir: Path,
 ) -> None:
     create_opencode_db(

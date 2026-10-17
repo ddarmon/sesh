@@ -255,11 +255,14 @@ def create_opencode_db(
     """Create a minimal opencode SQLite database.
 
     *sessions* rows need: id, directory, title, time_created,
-    time_updated; optional model (dict), tokens_* ints.
+    time_updated; optional model (dict), tokens_* ints, parent_id. The
+    ``parent_id`` column exists only when some row sets it, so fixtures
+    without it keep exercising schemas that lack the column.
     *messages* rows need: id, session_id, data (dict).
     *parts* rows need: id, message_id, session_id, data (dict).
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    with_parent = any("parent_id" in s for s in sessions)
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
@@ -272,6 +275,8 @@ def create_opencode_db(
             " tokens_cache_read INTEGER DEFAULT 0,"
             " tokens_cache_write INTEGER DEFAULT 0)"
         )
+        if with_parent:
+            conn.execute("ALTER TABLE session ADD COLUMN parent_id TEXT")
         conn.execute(
             "CREATE TABLE message ("
             " id TEXT PRIMARY KEY,"
@@ -305,6 +310,11 @@ def create_opencode_db(
                     s.get("tokens_cache_write", 0),
                 ),
             )
+            if with_parent:
+                conn.execute(
+                    "UPDATE session SET parent_id = ? WHERE id = ?",
+                    (s.get("parent_id"), s["id"]),
+                )
         for m in messages or []:
             conn.execute(
                 "INSERT INTO message (id, session_id, time_created, data)"

@@ -931,11 +931,16 @@ def _search_opencode_db(
                 row[1] for row in cur.execute("PRAGMA table_info(session)").fetchall()
             }
             revert_column = "s.revert" if "revert" in columns else "NULL"
+            # Child (sub-agent) sessions are not listed as sessions, so their
+            # hits are dropped, as in v2.
+            root_filter = (
+                " AND s.parent_id IS NULL" if "parent_id" in columns else ""
+            )
             cur.execute(
                 "SELECT p.session_id, p.message_id, p.id, p.data,"
                 f" s.directory, {revert_column} FROM part p"
                 " LEFT JOIN session s ON s.id = p.session_id"
-                " WHERE p.data LIKE ? ESCAPE '!'"
+                f" WHERE p.data LIKE ? ESCAPE '!'{root_filter}"
                 " ORDER BY p.session_id, p.message_id, p.id",
                 (like_pattern,),
             )

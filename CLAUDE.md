@@ -148,7 +148,9 @@ opencode has three on-disk formats, all supported by the provider
     stale `opencode-next.db` (an earlier v2 DB location) never wins dedup.
 -   **SQLite v1** (2026, pre-2.0): the same files with `session`,
     `message`, and `part` tables. `message.data` / `part.data` are JSON
-    columns holding the V1 message/part payloads.
+    columns holding the V1 message/part payloads. `session.parent_id` marks
+    `task`-tool sub-agent sessions, handled as in v2 (verified against
+    opencode 1.19.3); a schema without that column has no sub-agents.
 -   **Legacy JSON storage** (2025-era):
     `storage/session/{projectID}/{sessionID}.json` (session info),
     `storage/message/{sessionID}/{messageID}.json` (message info), and
@@ -334,7 +336,7 @@ is an alias of `export.format_duration`.
 
 Sesh uses the provider-neutral `SubagentMeta` + `load_subagents(session)` API to
 render child-agent threads in the TUI and exports. Claude, Codex, and opencode
-(2.0 `session_v2` databases only) currently implement this API.
+(SQLite databases only, not legacy JSON storage) currently implement this API.
 
 ### Rewind and rollback history
 
@@ -381,19 +383,23 @@ session id plus child `agent_id`; current `custom_tool_call` /
 
 ### opencode subagents
 
-opencode 2.0 runs each `subagent` tool call in a child `session_v2` row whose
-`parent_id` is the spawning session. `load_subagents` reads every transitive
-descendant of the root from the same database (cycle-safe), converts its
-`session_message` rows with the normal v2 mapping (staged-undo cutoff
-included), and returns them as one flat list sorted by `time_created`, which
-is the spawn timestamp used for splicing. `description` is the child's title
-(the tool call's `description`), `agent_type` is the `agent` field of the
-child's first assistant message (the `session_v2.agent` column is not read),
-and `output_tokens` is the child row's `tokens_output`. The parent's
-`subagent` tool result still carries the child's final reply wrapped in
-`<subagent sessionID=…>`; the child thread adds the prompt and any reasoning.
-Pre-2.0 SQLite and legacy JSON child sessions are not linked to their parent
-yet, so they still list as ordinary sessions.
+opencode runs each sub-agent in a child session row whose `parent_id` is the
+spawning session: a `session_v2` row for 2.0's `subagent` tool, a `session`
+row for 1.x's `task` tool. Child sessions are never listed; the root's
+`subagent_count` covers all transitive descendants, delete removes them with
+the root, and search drops their hits (in both schemas). `load_subagents` reads
+the descendants from the table that holds the root (v2 first, as in
+`get_messages`; cycle-safe), converts them with that schema's normal message
+mapping (staged-undo cutoff included), and returns one flat list sorted by
+`time_created`, the spawn timestamp used for splicing. `description` is the
+child's title with 1.x's ` (@{agent} subagent)` suffix stripped (it then equals
+the tool call's `description`); `agent_type` is the `agent` field of the
+child's first assistant message (the `agent` column is not read); and
+`output_tokens` is the child row's `tokens_output`. The parent's tool result
+still carries the child's final reply (`<subagent sessionID=…>` in 2.0,
+`<task id=…>` in 1.x); the child thread adds the prompt, reasoning, and the
+child's own tool calls. Legacy JSON child sessions are not linked to their
+parent, so they still list as ordinary sessions.
 
 ### Claude Code subagents
 
