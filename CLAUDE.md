@@ -407,7 +407,9 @@ Claude Code writes each sub-agent (Task/Agent tool) run to a separate
     discovery stays lazy, so no agent files are read during index refresh.
 -   **Rendering**: sub-agents are turns, not tool calls. `format_session_html`
     / `format_session_markdown` splice each thread in at its spawn timestamp
-    (`export._compose_thread`); the TUI message pane does the same via the
+    (both via `transcript.compose_transcript`; Markdown cannot collapse, so it
+    closes each section with an `*End of sub-agent: …*` line); the TUI
+    message pane does the same via the
     pure `app.splice_subagent_threads` helper (anchor before the first
     visible main-thread message with a later timestamp, else trailing).
     Loading is single-pass and lazy: the provider's

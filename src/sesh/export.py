@@ -152,6 +152,29 @@ def _md_message_lines(m: Message, heading_offset: int = 0) -> list[str]:
     return lines
 
 
+def _md_subagent_lines(item: transcript.TranscriptItem) -> list[str]:
+    """Markdown for one composed sub-agent container, interior demoted."""
+    meta = item.meta
+    desc = meta.description or meta.agent_id
+    wf = f"[{short_workflow_id(meta.workflow_id)}] " if meta.workflow_id else ""
+    lines = [f"## Sub-agent: {wf}{desc} ({meta.agent_id})", ""]
+    meta_bits = [f"**Type:** {meta.agent_type or 'agent'}"]
+    if meta.workflow_id:
+        meta_bits.append(f"**Workflow:** {meta.workflow_id}")
+    meta_bits.append(f"**Messages:** {meta.message_count}")
+    if meta.output_tokens is not None:
+        meta_bits.append(f"**Output tokens:** {meta.output_tokens:,}")
+    if meta.is_fork:
+        meta_bits.append("**Fork:** yes")
+    lines.append(" · ".join(meta_bits))
+    lines.append("")
+    for inner in item.interior:
+        lines.extend(_md_message_lines(inner.message, heading_offset=1))
+    lines.append(f"*End of sub-agent: {wf}{desc}*")
+    lines.append("")
+    return lines
+
+
 def format_session_markdown(
     session: SessionMeta,
     messages: list[Message],
@@ -159,9 +182,12 @@ def format_session_markdown(
 ) -> str:
     """Render a session + messages as Markdown.
 
-    When ``subagents`` is given (provider-native child-agent threads), each is appended
-    after the main thread as a ``## Sub-agent:`` section with its interior
-    messages demoted one heading level.
+    When ``subagents`` is given (provider-native child-agent threads), each
+    renders as a ``## Sub-agent:`` section at its spawn point, placed by
+    :func:`sesh.transcript.compose_transcript` exactly as in the TUI and HTML
+    viewer, with its interior messages demoted one heading level. Markdown
+    cannot collapse a section, so an italic closing line marks where the main
+    thread resumes.
     """
     lines: list[str] = [
         f"# Session: {session.id}",
@@ -186,26 +212,11 @@ def format_session_markdown(
         )
     lines.append("")
 
-    for m in messages:
-        lines.extend(_md_message_lines(m))
-
-    for meta, interior in subagents or []:
-        desc = meta.description or meta.agent_id
-        wf = f"[{short_workflow_id(meta.workflow_id)}] " if meta.workflow_id else ""
-        lines.append(f"## Sub-agent: {wf}{desc} ({meta.agent_id})")
-        lines.append("")
-        meta_bits = [f"**Type:** {meta.agent_type or 'agent'}"]
-        if meta.workflow_id:
-            meta_bits.append(f"**Workflow:** {meta.workflow_id}")
-        meta_bits.append(f"**Messages:** {meta.message_count}")
-        if meta.output_tokens is not None:
-            meta_bits.append(f"**Output tokens:** {meta.output_tokens:,}")
-        if meta.is_fork:
-            meta_bits.append("**Fork:** yes")
-        lines.append(" · ".join(meta_bits))
-        lines.append("")
-        for m in interior:
-            lines.extend(_md_message_lines(m, heading_offset=1))
+    for item in transcript.compose_transcript(messages, subagents):
+        if item.kind == "agent":
+            lines.extend(_md_subagent_lines(item))
+        else:
+            lines.extend(_md_message_lines(item.message))
 
     return "\n".join(lines)
 

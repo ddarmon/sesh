@@ -355,7 +355,7 @@ def test_format_session_html_no_subagents_matches_baseline() -> None:
     assert all(e.get("kind") != "agent" for e in a["messages"])
 
 
-def test_format_session_markdown_appends_subagent_section() -> None:
+def test_format_session_markdown_subagent_section() -> None:
     """Markdown export gains a '## Sub-agent:' section with demoted interior."""
     session = make_session(id="s-md", provider=Provider.CLAUDE)
     messages = [make_message(role="user", content="main question", timestamp=None)]
@@ -383,6 +383,47 @@ def test_format_session_markdown_appends_subagent_section() -> None:
     assert "### Assistant" in out
     assert "#### Thinking" in out  # sub-agent thinking (H4)
     assert "> nested thought" in out
+    assert "*End of sub-agent: Build the FIRE projection layer*" in out
+
+
+def _at(hour: int) -> datetime:
+    return datetime(2025, 1, 1, hour, 0, tzinfo=timezone.utc)
+
+
+def test_format_session_markdown_places_subagents_at_spawn_point() -> None:
+    """Sub-agents sit at their spawn point, matching the HTML/TUI placement."""
+    session = make_session(id="s-md-inline", provider=Provider.CLAUDE)
+    messages = [
+        make_message(role="user", content="first ask", timestamp=_at(1)),
+        make_message(role="assistant", content="first reply", timestamp=_at(3)),
+        make_message(role="user", content="second ask", timestamp=_at(5)),
+    ]
+    early, _ = _subagent(agent_id="ag-early", description="Early",
+                         first_timestamp=_at(2))
+    late, _ = _subagent(agent_id="ag-late", description="Late",
+                        first_timestamp=_at(4))
+    out = format_session_markdown(
+        session, messages,
+        [(early, [make_message(content="early work", timestamp=None)]),
+         (late, [make_message(content="late work", timestamp=None)])],
+    )
+
+    order = [
+        "first ask", "## Sub-agent: Early", "early work",
+        "*End of sub-agent: Early*", "first reply", "## Sub-agent: Late",
+        "late work", "*End of sub-agent: Late*", "second ask",
+    ]
+    positions = [out.index(marker) for marker in order]
+    assert positions == sorted(positions)
+
+
+def test_format_session_markdown_unanchorable_agent_trails() -> None:
+    """A sub-agent with no timestamp follows the main thread, as in HTML."""
+    session = make_session(id="s-md-trail", provider=Provider.CLAUDE)
+    messages = [make_message(role="user", content="hi", timestamp=_at(1))]
+    meta, interior = _subagent(first_timestamp=None)
+    out = format_session_markdown(session, messages, [(meta, interior)])
+    assert out.index("hi") < out.index("## Sub-agent:")
 
 
 def test_format_session_markdown_no_subagents_unchanged() -> None:
