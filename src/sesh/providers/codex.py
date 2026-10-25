@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sesh.models import Message, MoveReport, Provider, SessionMeta, SubagentMeta
+from sesh.prompt_history import HistoryReport, remove_jsonl_entries
 from sesh.providers import SessionProvider
 
 CODEX_DIR = Path.home() / ".codex" / "sessions"
@@ -517,15 +518,44 @@ class CodexProvider(SessionProvider):
     def discover_subagents(self, session: SessionMeta) -> list[SubagentMeta]:
         return [meta for meta, _ in self.load_subagents(session)]
 
+    @property
+    def _home_dir(self) -> Path:
+        """The ``.codex`` dir holding ``history.jsonl`` and ``session_index.jsonl``."""
+        return self._codex_dir.parent
+
     def delete_session(self, session: SessionMeta) -> None:
-        """Delete a Codex root rollout and its native child rollouts."""
+        """Delete a Codex root rollout, its native child rollouts, and its
+        ``session_index.jsonl`` title entries."""
         self._build_index()
-        for child in self._subagents_by_root.get(session.id, []):
+        children = self._subagents_by_root.get(session.id, [])
+        ids = {session.id} | {child["id"] for child in children}
+        for child in children:
             Path(child["file_path"]).unlink(missing_ok=True)
         if session.source_path:
             Path(session.source_path).unlink(missing_ok=True)
         self._index = None
         self._subagents_by_root = {}
+        remove_jsonl_entries(
+            self._home_dir / "session_index.jsonl",
+            lambda entry: entry.get("id") in ids,
+        )
+
+    def delete_history(
+        self, session: SessionMeta, dry_run: bool = False
+    ) -> HistoryReport:
+        """Remove the session's prompts from ``~/.codex/history.jsonl``.
+
+        Only the root id is matched: the history records what the user typed,
+        and native child threads are prompted by the parent agent.
+        """
+        path = self._home_dir / "history.jsonl"
+        removed = remove_jsonl_entries(
+            path, lambda entry: entry.get("session_id") == session.id, dry_run=dry_run
+        )
+        report = HistoryReport()
+        if removed:
+            report.removed[str(path)] = removed
+        return report
 
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Update Codex metadata when a project path changes."""

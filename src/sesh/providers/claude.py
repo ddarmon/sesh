@@ -20,6 +20,7 @@ from sesh.models import (
     SubagentMeta,
     encode_claude_path,
 )
+from sesh.prompt_history import HistoryReport, remove_jsonl_entries
 from sesh.providers import SessionProvider
 from sesh.providers.history import active_ancestor_ids
 
@@ -478,6 +479,27 @@ def _redundant_copies(sessions: dict[str, dict], roots: dict[str, str]) -> set[s
                     hidden.add(a)
                     break
     return hidden
+
+
+_PASTE_HASH = re.compile(r"[0-9a-f]{8,64}")
+
+
+def _paste_hashes(entry: dict) -> set[str]:
+    """Paste-cache hashes a ``history.jsonl`` entry references.
+
+    Only lowercase hex is accepted, since each hash names a file in
+    ``paste-cache/``.
+    """
+    pasted = entry.get("pastedContents")
+    if not isinstance(pasted, dict):
+        return set()
+    return {
+        value["contentHash"]
+        for value in pasted.values()
+        if isinstance(value, dict)
+        and isinstance(value.get("contentHash"), str)
+        and _PASTE_HASH.fullmatch(value["contentHash"])
+    }
 
 
 def _parse_timestamp(ts) -> datetime:
@@ -1062,6 +1084,10 @@ class ClaudeProvider(SessionProvider):
     def _projects_dir(self) -> Path:
         return PROJECTS_DIR if self._base_dir is None else self._base_dir / ".claude" / "projects"
 
+    @property
+    def _history_file(self) -> Path:
+        return HISTORY_FILE if self._base_dir is None else self._claude_dir / "history.jsonl"
+
     def discover_projects(self) -> Iterator[tuple[str, str]]:
         """Yield (project_path, display_name) for each Claude project."""
         projects_dir = self._projects_dir
@@ -1315,6 +1341,46 @@ class ClaudeProvider(SessionProvider):
         return len(list(subdir.glob("agent-*.jsonl"))) + len(
             list(subdir.glob("workflows/*/agent-*.jsonl"))
         )
+
+    def delete_history(
+        self, session: SessionMeta, dry_run: bool = False
+    ) -> HistoryReport:
+        """Remove the session's prompts from ``~/.claude/history.jsonl``.
+
+        Legacy entries without a ``sessionId`` cannot be attributed and are
+        kept.  Long pastes live out of line in ``paste-cache/{contentHash}.txt``;
+        a paste file goes too once no surviving entry references its hash
+        (hashes are content-addressed, so sessions can share one).
+        """
+        history = self._history_file
+        dropped_hashes: set[str] = set()
+        kept_hashes: set[str] = set()
+
+        # A retry (history appended mid-rewrite) re-runs ``drop`` over the
+        # whole file; letting the sets accumulate only errs toward keeping.
+        def drop(entry: dict) -> bool:
+            hashes = _paste_hashes(entry)
+            if entry.get("sessionId") == session.id:
+                dropped_hashes.update(hashes)
+                return True
+            kept_hashes.update(hashes)
+            return False
+
+        removed = remove_jsonl_entries(history, drop, dry_run=dry_run)
+        report = HistoryReport()
+        if not removed:
+            return report
+        report.removed[str(history)] = removed
+
+        paste_dir = self._claude_dir / "paste-cache"
+        for content_hash in sorted(dropped_hashes - kept_hashes):
+            paste_file = paste_dir / f"{content_hash}.txt"
+            if not paste_file.is_file():
+                continue
+            if not dry_run:
+                paste_file.unlink(missing_ok=True)
+            report.files_removed.append(str(paste_file))
+        return report
 
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a Claude session by removing its lines from JSONL files."""

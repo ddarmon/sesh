@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sesh.models import Message, Provider, SessionMeta
+from sesh.prompt_history import HistoryReport, remove_json_array_entries
 from sesh.providers import SessionProvider
 
 GEMINI_DIR = Path.home() / ".gemini"
@@ -415,6 +416,27 @@ class GeminiProvider(SessionProvider):
         """Delete a Gemini session by removing its JSON file."""
         if session.source_path:
             Path(session.source_path).unlink(missing_ok=True)
+
+    def delete_history(
+        self, session: SessionMeta, dry_run: bool = False
+    ) -> HistoryReport:
+        """Remove the session's prompts from its project's ``logs.json``.
+
+        The log sits beside the ``chats/`` dir that holds the session file.
+        """
+        report = HistoryReport()
+        if not session.source_path:
+            return report
+        chats_dir = Path(session.source_path).parent
+        if chats_dir.name != "chats":
+            return report
+        logs = chats_dir.parent / "logs.json"
+        removed = remove_json_array_entries(
+            logs, lambda entry: entry.get("sessionId") == session.id, dry_run=dry_run
+        )
+        if removed:
+            report.removed[str(logs)] = removed
+        return report
 
     def _find_project_dirs(self, project_path: str) -> list[Path]:
         cached = self._path_to_dirs.get(project_path)

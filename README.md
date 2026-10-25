@@ -197,6 +197,7 @@ sesh bookmarks                            # list bookmarked sessions
 sesh delete <session-id>                  # delete a single session by ID
 sesh delete last                          # delete the most recently active session
 sesh delete last --provider pi            # delete the most recent pi session
+sesh delete <session-id> --history        # also remove its prompt-history entries
 sesh clean "some query" --dry-run         # preview matching sessions to delete
 sesh resume <session-id>                  # resume in provider CLI
 sesh resume last                          # resume the most recent session

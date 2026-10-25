@@ -675,7 +675,9 @@ Pressing `d` on a session node shows a confirmation dialog. On confirm,
 the session is deleted via the provider's `delete_session` method:
 
 -   **Claude**: removes matching `sessionId` lines from JSONL files
--   **Codex**: deletes the session JSONL file
+-   **Codex**: deletes the session JSONL file (and native child rollouts),
+    then drops the root's and children's title entries from
+    `~/.codex/session_index.jsonl` (always, not behind `--history`)
 -   **Cursor**: removes the session directory (parent of `store.db`)
 -   **Copilot**: removes the session directory
 -   **pi**: deletes the session JSONL file
@@ -704,6 +706,45 @@ CLI equivalents:
 Both commands require interactive confirmation by default. In
 non-interactive contexts (piped stdin, LLM agents), they refuse unless
 `--force` is passed. Use `--dry-run` to preview without deleting.
+
+### Prompt history (`--history`, off by default)
+
+`sesh delete --history` / `sesh clean --history` (and the TUI dialog's "Also
+delete prompt history" checkbox, which always starts unchecked and is not a
+saved preference) also remove the session's entries from the provider CLI's
+prompt history, via the optional `SessionProvider.delete_history(session,
+dry_run)` hook returning a `prompt_history.HistoryReport`:
+
+-   **Claude**: `~/.claude/history.jsonl` lines whose `sessionId` matches.
+    Legacy entries with no `sessionId` are kept (they cannot be attributed).
+    Long pastes live in `~/.claude/paste-cache/{contentHash}.txt`; a paste
+    file is deleted once no surviving history entry references its hash.
+-   **Codex**: `~/.codex/history.jsonl` lines whose `session_id` is the root id.
+-   **Gemini**: entries in the project's `~/.gemini/tmp/{dir}/logs.json`
+    (sibling of the session's `chats/` dir) whose `sessionId` matches.
+-   **Copilot / opencode**: unsupported (`"supported": false`). Their prompt
+    histories (`command-history-state.json`, `prompt-history.jsonl`) carry
+    no session id, and matching on prompt text would be a guess. pi and
+    Cline keep no prompt history; Cursor is unverified.
+
+Without `--history`, an interactive run (TTY stdin, no `--force`) asks a
+second `[y/N]` question right after the delete confirmation and before
+anything is deleted, e.g. `Also delete 3 prompt-history entries from
+~/.claude/history.jsonl? [y/N]` (`cli._prompt_for_history`; `clean` asks once
+with totals across all targets). It is skipped when a dry-run preview finds
+nothing to remove or the provider is unsupported; the default is no, and
+Ctrl-C aborts the whole command. `--force` and non-interactive runs never
+ask, so scripts get history removal only with an explicit `--history`.
+
+History is touched only after `delete_session` succeeds. JSON output gains
+`history: {supported, removed: {path: n}, files_removed}` (per session for
+`clean`), or `history_error`; a history error exits non-zero even though the
+session itself was deleted. These files are appended by every live
+`claude`/`codex` process, so `prompt_history._rewrite_guarded` streams the
+filtered copy to a same-directory temp file (original mode preserved),
+re-stats the original before `os.replace`, and starts over if it changed
+(`ATTEMPTS` tries, then `HistoryWriteError`). That narrows the race with
+concurrent appenders but cannot close it; the CLIs take no shared lock.
 
 ## Project move
 
@@ -749,8 +790,8 @@ the index, then query it.
 | `sesh messages <id\|last> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full] [--include-hidden]` | Load messages for a session              |
 | `sesh search <query> [--provider NAME] [--project PATH]`                                                  | Full-text search (Claude, Codex, Cursor) |
 | `sesh bookmarks`                                                                                          | List bookmarked sessions (joined with the index) |
-| `sesh delete <id\|last> [--provider NAME] [--force] [--dry-run]`                                          | Delete a session by ID, or the most recent with `last` |
-| `sesh clean <query>\|--empty [--force] [--dry-run]`                                                       | Delete sessions matching a search query, or all empty sessions |
+| `sesh delete <id\|last> [--provider NAME] [--history] [--force] [--dry-run]`                              | Delete a session by ID, or the most recent with `last` |
+| `sesh clean <query>\|--empty [--history] [--force] [--dry-run]`                                           | Delete sessions matching a search query, or all empty sessions |
 | `sesh resume <id\|last> [--provider NAME]`                                                                | Resume a session in its provider's CLI   |
 | `sesh export <id\|last> [--provider NAME] [--format md/json/html] [-o FILE] [--include-tools] [--include-thinking] [--full] [--include-hidden] [--no-agents]` | Export a session to Markdown, JSON, or HTML |
 | `sesh view <id\|last> [--provider NAME] [--include-tools] [--include-thinking] [--full] [--include-hidden] [--no-agents] [--no-open]` | Render a session as HTML and open it in the browser |

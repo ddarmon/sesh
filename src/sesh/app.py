@@ -238,19 +238,30 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
     }
     """
 
-    def __init__(self, summary: str) -> None:
+    def __init__(self, summary: str, history_option: bool = False) -> None:
         super().__init__()
         self.summary = summary
+        # With ``history_option`` the dialog shows an "also delete prompt
+        # history" checkbox; callers read ``include_history`` after a confirm.
+        # It always starts unchecked (deliberately not a saved preference).
+        self.history_option = history_option
+        self.include_history = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-dialog"):
             yield Label("Delete this session?")
             yield Label(f"[dim]{self.summary[:60]}[/dim]")
+            if self.history_option:
+                yield Checkbox(
+                    "Also delete prompt history", value=False, id="confirm-history"
+                )
             with Horizontal(id="confirm-buttons"):
                 yield Button("Delete", variant="error", id="confirm-yes")
                 yield Button("Cancel", variant="default", id="confirm-no")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        if self.history_option:
+            self.include_history = self.query_one("#confirm-history", Checkbox).value
         self.dismiss(event.button.id == "confirm-yes")
 
 
@@ -2515,12 +2526,17 @@ class SeshApp(App):
         node = tree.cursor_node
         if node is not None and isinstance(node.data, SessionMeta):
             session = node.data
+            screen = ConfirmDeleteScreen(session.summary, history_option=True)
             self.push_screen(
-                ConfirmDeleteScreen(session.summary),
-                lambda confirmed: self._delete_session(session) if confirmed else None,
+                screen,
+                lambda confirmed: (
+                    self._delete_session(session, include_history=screen.include_history)
+                    if confirmed
+                    else None
+                ),
             )
 
-    def _delete_session(self, session: SessionMeta) -> None:
+    def _delete_session(self, session: SessionMeta, include_history: bool = False) -> None:
         """Delete a session via its provider and refresh the tree."""
         from sesh.providers.claude import ClaudeProvider
         from sesh.providers.cline import ClineProvider
@@ -2546,11 +2562,27 @@ class SeshApp(App):
         if provider_cls is None:
             return
 
+        provider = provider_cls()
         try:
-            provider_cls().delete_session(session)
+            provider.delete_session(session)
         except Exception:
             self._set_status("Error deleting session")
             return
+
+        history_note = ""
+        if include_history:
+            try:
+                report = provider.delete_history(session)
+            except Exception as exc:
+                history_note = f"; prompt history NOT removed: {exc}"
+            else:
+                if not report.supported:
+                    history_note = (
+                        f"; {session.provider.value} prompt history has no session ids"
+                    )
+                else:
+                    n = sum(report.removed.values())
+                    history_note = f"; {n} history entr{'y' if n == 1 else 'ies'} removed"
 
         from sesh.viewcache import remove_view
 
@@ -2585,7 +2617,7 @@ class SeshApp(App):
         search_text = self.query_one("#search-input", Input).value
         self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
 
-        self._set_status("Session deleted")
+        self._set_status(f"Session deleted{history_note}")
 
 
 def tui_main(aggregation_root: Path | None = None) -> None:

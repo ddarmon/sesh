@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from sesh.models import Message, MoveReport, Project, SessionMeta
+from sesh.prompt_history import HistoryReport
 
 
 class SessionProvider(ABC):
@@ -65,6 +66,16 @@ class SessionProvider(ABC):
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a session's stored data. Override per provider."""
         raise NotImplementedError
+
+    def delete_history(
+        self, session: SessionMeta, dry_run: bool = False
+    ) -> HistoryReport:
+        """Remove a session's entries from the provider CLI's prompt history.
+
+        Non-abstract: providers whose history carries no session id (or that
+        keep no history) report ``supported=False``.
+        """
+        return HistoryReport(supported=False)
 
     def move_project(self, old_path: str, new_path: str) -> MoveReport:
         """Update metadata when a project moves. Override per provider."""

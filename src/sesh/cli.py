@@ -675,6 +675,56 @@ def cmd_bookmarks(args: argparse.Namespace) -> None:
     _json_out(out)
 
 
+def _delete_history(provider, session, dry_run: bool) -> dict:
+    """Run ``provider.delete_history`` and return its JSON fields for one session."""
+    try:
+        report = provider.delete_history(session, dry_run=dry_run)
+    except Exception as exc:
+        return {"history_error": str(exc)}
+    return {"history": report.to_dict()}
+
+
+def _prompt_for_history(pairs, *, force: bool) -> bool:
+    """Ask whether to also remove prompt history for ``(provider, session)`` pairs.
+
+    Asked after the delete confirmation and before anything is deleted, and
+    only in interactive runs without ``--force`` that have something to
+    remove. The answer defaults to no; Ctrl-C aborts the whole command.
+    """
+    if force or not sys.stdin.isatty():
+        return False
+    entries = 0
+    paste_files = 0
+    paths: set[str] = set()
+    for provider, session in pairs:
+        try:
+            report = provider.delete_history(session, dry_run=True)
+        except Exception:
+            continue
+        entries += sum(report.removed.values())
+        paste_files += len(report.files_removed)
+        paths.update(report.removed)
+    if not entries:
+        return False
+
+    home = str(Path.home())
+    where = ", ".join(
+        sorted("~" + p[len(home):] if p.startswith(home + os.sep) else p for p in paths)
+    )
+    noun = "entry" if entries == 1 else "entries"
+    extra = ""
+    if paste_files:
+        extra = f" and {paste_files} paste-cache file{'' if paste_files == 1 else 's'}"
+    try:
+        answer = input(
+            f"Also delete {entries} prompt-history {noun}{extra} from {where}? [y/N] "
+        )
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.", file=sys.stderr)
+        raise SystemExit(1)
+    return answer.strip().lower() in ("y", "yes")
+
+
 def _clean_empty(args: argparse.Namespace) -> None:
     """Delete sessions with no conversation (e.g. only ``/model`` was run)."""
     from sesh.cache import _dict_to_session
@@ -682,16 +732,26 @@ def _clean_empty(args: argparse.Namespace) -> None:
 
     index = _refresh_index(args)
     targets = [s for s in index["sessions"] if s.get("is_empty")]
+    with_history = getattr(args, "history", False)
+
+    work = []
+    for data in targets:
+        session = _dict_to_session(data)
+        work.append((data, session, _provider_for_session(session, None)))
 
     if targets and not args.dry_run:
         _confirm_destructive(
             f"Delete {len(targets)} empty session(s)?",
             force=args.force,
         )
+        if not with_history:
+            with_history = _prompt_for_history(
+                [(p, s) for _, s, p in work if p is not None], force=args.force
+            )
 
     deleted = []
     errors = []
-    for data in targets:
+    for data, session, provider in work:
         out_entry = {
             "session_id": data["id"],
             "provider": data["provider"],
@@ -699,24 +759,29 @@ def _clean_empty(args: argparse.Namespace) -> None:
             "summary": data["summary"],
         }
         if args.dry_run:
+            if with_history and provider is not None:
+                out_entry.update(_delete_history(provider, session, dry_run=True))
             deleted.append(out_entry)
             continue
-        session = _dict_to_session(data)
-        provider = _provider_for_session(session, None)
         if provider is None:
             continue
         try:
             provider.delete_session(session)
             remove_view(session.id)
-            deleted.append(out_entry)
         except Exception as exc:
             out_entry["error"] = str(exc)
             errors.append(out_entry)
+            continue
+        if with_history:
+            out_entry.update(_delete_history(provider, session, dry_run=False))
+        deleted.append(out_entry)
 
     out: dict = {"deleted": deleted, "total": len(deleted), "dry_run": args.dry_run}
     if errors:
         out["errors"] = errors
     _json_out(out)
+    if any("history_error" in d for d in deleted):
+        raise SystemExit(1)
 
 
 def cmd_clean(args: argparse.Namespace) -> None:
@@ -735,6 +800,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
 
     from sesh.models import Provider, SessionMeta
     from sesh.search import ripgrep_search
+
+    with_history = getattr(args, "history", False)
 
     results = ripgrep_search(args.query, cwd_lookup=_build_cwd_lookup())
 
@@ -813,21 +880,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
         Provider.CLINE: ClineProvider(),
     }
 
-    deleted = []
-    errors = []
-
+    work = []
     for entry, source_path in targets:
-        out_entry = {
-            "session_id": entry["session_id"],
-            "provider": entry["provider"],
-            "file_path": entry["file_path"],
-            "matched_line": entry["matched_line"],
-        }
-
-        if args.dry_run:
-            deleted.append(out_entry)
-            continue
-
         provider_enum = Provider(entry["provider"])
         session = SessionMeta(
             id=entry["session_id"],
@@ -837,18 +891,43 @@ def cmd_clean(args: argparse.Namespace) -> None:
             timestamp=datetime.now(tz=timezone.utc),
             source_path=source_path,
         )
+        work.append((entry, session, providers_map.get(provider_enum)))
 
-        provider = providers_map.get(provider_enum)
+    if not args.dry_run and not with_history:
+        with_history = _prompt_for_history(
+            [(p, s) for _, s, p in work if p is not None], force=args.force
+        )
+
+    deleted = []
+    errors = []
+
+    for entry, session, provider in work:
+        out_entry = {
+            "session_id": entry["session_id"],
+            "provider": entry["provider"],
+            "file_path": entry["file_path"],
+            "matched_line": entry["matched_line"],
+        }
+
+        if args.dry_run:
+            if with_history and provider is not None:
+                out_entry.update(_delete_history(provider, session, dry_run=True))
+            deleted.append(out_entry)
+            continue
+
         if provider is None:
             continue
 
         try:
             provider.delete_session(session)
             remove_view(session.id)
-            deleted.append(out_entry)
         except Exception as exc:
             out_entry["error"] = str(exc)
             errors.append(out_entry)
+            continue
+        if with_history:
+            out_entry.update(_delete_history(provider, session, dry_run=False))
+        deleted.append(out_entry)
 
     out: dict = {
         "deleted": deleted,
@@ -859,6 +938,8 @@ def cmd_clean(args: argparse.Namespace) -> None:
         out["errors"] = errors
 
     _json_out(out)
+    if any("history_error" in d for d in deleted):
+        raise SystemExit(1)
 
 
 def _timestamp_sort_key(session: dict) -> datetime:
@@ -958,6 +1039,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
     session_data = matches[0]
+    with_history = getattr(args, "history", False)
 
     info = {
         "session_id": session_data["id"],
@@ -966,20 +1048,6 @@ def cmd_delete(args: argparse.Namespace) -> None:
         "summary": session_data["summary"],
         "timestamp": session_data["timestamp"],
     }
-
-    if args.dry_run:
-        _json_out({"would_delete": info, "dry_run": True})
-        return
-
-    _confirm_destructive(
-        f"About to delete session:\n"
-        f"  Provider:  {session_data['provider']}\n"
-        f"  Project:   {session_data['project_path']}\n"
-        f"  Summary:   {session_data['summary']}\n"
-        f"  Timestamp: {session_data['timestamp']}\n"
-        f"Delete this session?",
-        force=args.force,
-    )
 
     from sesh.cache import _dict_to_session
     from sesh.models import Provider
@@ -1013,6 +1081,27 @@ def cmd_delete(args: argparse.Namespace) -> None:
         )
         raise SystemExit(1)
 
+    if not args.dry_run:
+        _confirm_destructive(
+            f"About to delete session:\n"
+            f"  Provider:  {session_data['provider']}\n"
+            f"  Project:   {session_data['project_path']}\n"
+            f"  Summary:   {session_data['summary']}\n"
+            f"  Timestamp: {session_data['timestamp']}\n"
+            + ("  History:   prompt history will also be removed\n" if with_history else "")
+            + "Delete this session?",
+            force=args.force,
+        )
+        if not with_history:
+            with_history = _prompt_for_history([(provider, session)], force=args.force)
+
+    if args.dry_run:
+        out = {"would_delete": info, "dry_run": True}
+        if with_history:
+            out.update(_delete_history(provider, session, dry_run=True))
+        _json_out(out)
+        return
+
     try:
         provider.delete_session(session)
     except Exception as exc:
@@ -1023,7 +1112,12 @@ def cmd_delete(args: argparse.Namespace) -> None:
 
     remove_view(session.id)
 
-    _json_out({"deleted": info})
+    out = {"deleted": info}
+    if with_history:
+        out.update(_delete_history(provider, session, dry_run=False))
+    _json_out(out)
+    if "history_error" in out:
+        raise SystemExit(1)
 
 
 def cmd_resume(args: argparse.Namespace) -> None:
@@ -1717,6 +1811,15 @@ def main() -> None:
         help="Show what would be deleted without actually deleting",
     )
     p_clean.add_argument(
+        "--history",
+        action="store_true",
+        help=(
+            "Also remove the session's entries from the provider CLI's prompt "
+            "history (Claude, Codex, Gemini; Claude paste-cache files no other "
+            "entry references go too). Off by default"
+        ),
+    )
+    p_clean.add_argument(
         "--force",
         action="store_true",
         help="Skip confirmation prompt (required for non-interactive use)",
@@ -1748,6 +1851,15 @@ def main() -> None:
         "--force",
         action="store_true",
         help="Skip confirmation prompt (required for non-interactive use)",
+    )
+    p_delete.add_argument(
+        "--history",
+        action="store_true",
+        help=(
+            "Also remove the session's entries from the provider CLI's prompt "
+            "history (Claude, Codex, Gemini; Claude paste-cache files no other "
+            "entry references go too). Off by default"
+        ),
     )
     p_delete.add_argument(
         "--dry-run",
