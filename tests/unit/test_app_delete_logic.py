@@ -186,3 +186,53 @@ def test_id_collision_regression_only_removes_matching_provider(monkeypatch) -> 
     assert len(remaining) == 1
     assert remaining[0].provider is Provider.CODEX
     assert remaining[0].id == "same"
+
+
+def _app_with_one_session(monkeypatch, report_fn):
+    import sesh.providers.claude as claude_mod
+
+    class Fake:
+        def delete_session(self, session):
+            return None
+
+        def delete_history(self, session, dry_run=False):
+            return report_fn(session)
+
+    monkeypatch.setattr(claude_mod, "ClaudeProvider", Fake)
+    monkeypatch.setattr("sesh.app.save_bookmarks", lambda bookmarks: None)
+    app, calls = _make_app_for_delete()
+    target = make_session(id="s1", provider=Provider.CLAUDE, project_path="/repo")
+    app.sessions = {"/repo": [target]}
+    app.projects = {
+        "/repo": Project(path="/repo", display_name="repo", providers={Provider.CLAUDE}, session_count=1)
+    }
+    return app, calls, target
+
+
+def test_include_history_reports_entries_removed(monkeypatch) -> None:
+    from sesh.prompt_history import HistoryReport
+
+    app, calls, target = _app_with_one_session(
+        monkeypatch, lambda s: HistoryReport(removed={"/h": 2, "/g": 1})
+    )
+    app._delete_session(target, include_history=True)
+    assert calls["status"][-1] == "Session deleted; 3 history entries removed"
+
+
+def test_history_not_touched_by_default(monkeypatch) -> None:
+    def boom(session):
+        raise AssertionError("delete_history must not run")
+
+    app, calls, target = _app_with_one_session(monkeypatch, boom)
+    app._delete_session(target)
+    assert calls["status"][-1] == "Session deleted"
+
+
+def test_include_history_failure_is_reported(monkeypatch) -> None:
+    def fail(session):
+        raise OSError("disk full")
+
+    app, calls, target = _app_with_one_session(monkeypatch, fail)
+    app._delete_session(target, include_history=True)
+    assert app.sessions == {}
+    assert calls["status"][-1] == "Session deleted; prompt history NOT removed: disk full"
