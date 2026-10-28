@@ -956,6 +956,15 @@ field. The local-mode JSON output also includes `host` (always `null`).
 -   Cline is a plain top-level dotdir (`{host}/.cline/data/`), so it needs
     no Cursor-style `Library/` caveat.
 
+## Agent skill
+
+`skills/sesh/` (`SKILL.md` + `references/recipes.md`) is an Agent Skills
+skill for agents driving the CLI. It ships in the repo but not in the wheel;
+users symlink it into their agent's skills directory. When a PR adds, renames,
+or changes the default of a CLI subcommand or flag (especially the content
+visibility flags), update the skill in the same PR. Keep it user-agnostic: no
+machine-specific paths and no dependencies on skills sesh does not ship.
+
 ## Plans
 
 Lightweight execution plans live in `.plans/` to capture the logic of
