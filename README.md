@@ -440,6 +440,24 @@ Search returns the provider for each match, so the agent can group
 results by provider to compare how different tools were used for the
 same topic.
 
+#### Agent skill
+
+`skills/sesh/` is an [Agent Skills](https://agentskills.io) skill that
+teaches an agent to use the CLI well: narrow before loading transcripts,
+page through messages rather than trusting a partial read, choose the
+content visibility flags (`--include-tools`, `--include-thinking`,
+`--full`, `--include-hidden`, `--no-agents`) that match the request and
+say which content an export contains, and preview destructive commands
+with `--dry-run`. It is not part of the installed package; link it from
+a clone into your agent's skills directory, e.g. for Claude Code:
+
+```
+ln -s /path/to/this/repo/skills/sesh ~/.claude/skills/sesh
+```
+
+Other agents that read the same `SKILL.md` format take the same directory
+in their own skills location.
+
 ## Providers
 
 ### Claude Code
@@ -588,4 +606,5 @@ src/sesh/
     opencode.py      # opencode SQLite + legacy JSON parser
     cline.py         # Cline (next bundle) JSON parser
   snapshots/         # Terminal.app snapshot core and backend
+skills/sesh/         # agent skill for driving the CLI (not packaged)
 ```
