@@ -253,6 +253,56 @@ def test_claude_retains_parallel_tool_results(tmp_path: Path) -> None:
     assert "result Y body" in outputs
 
 
+def test_claude_retains_parallel_tool_use_stranded_by_result_order(tmp_path: Path) -> None:
+    """When parallel results are written out of order, the next turn hangs off
+    a middle tool_result, leaving the tail tool_use record (and its result) on
+    a dead-end branch. It shares message.id with the active response, so it is
+    live and must be kept; a rewound response has a new id and stays dropped."""
+    path = tmp_path / "claude.jsonl"
+    sid = "session"
+
+    def tool_use(uuid: str, parent: str, tool_id: str, second: int, msg_id: str = "msg-1") -> dict:
+        return {"type": "assistant", "uuid": uuid, "parentUuid": parent, "sessionId": sid,
+                "timestamp": f"2026-01-01T00:00:0{second}Z",
+                "message": {"id": msg_id, "role": "assistant", "content": [
+                    {"type": "tool_use", "id": tool_id, "name": "Read", "input": {}}]}}
+
+    def tool_result(uuid: str, parent: str, tool_id: str, second: int) -> dict:
+        return {"type": "user", "uuid": uuid, "parentUuid": parent, "sessionId": sid,
+                "timestamp": f"2026-01-01T00:00:0{second}Z",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": tool_id,
+                     "content": f"result {tool_id} body"}]}}
+
+    write_jsonl(path, [
+        {"type": "user", "uuid": "u1", "parentUuid": None, "sessionId": sid,
+         "timestamp": "2026-01-01T00:00:01Z",
+         "message": {"role": "user", "content": "read three pages"}},
+        tool_use("a1", "u1", "X", 2),
+        tool_use("a2", "a1", "Y", 2),
+        tool_use("a3", "a2", "Z", 2),
+        # A rewound response from the same point: new message.id, abandoned.
+        tool_use("old", "a2", "W", 2, msg_id="msg-old"),
+        tool_result("rx", "a1", "X", 3),
+        tool_result("rz", "a3", "Z", 3),
+        tool_result("ry", "a2", "Y", 4),  # written last; next turn hangs here
+        {"type": "assistant", "uuid": "a4", "parentUuid": "ry", "sessionId": sid,
+         "timestamp": "2026-01-01T00:00:05Z",
+         "message": {"id": "msg-2", "role": "assistant", "content": "done"}},
+        {"type": "last-prompt", "sessionId": sid, "leafUuid": "a4"},
+    ])
+    session = make_session(id=sid, provider=Provider.CLAUDE, source_path=str(path))
+    messages = claude.ClaudeProvider().get_messages(session)
+    uses = [m for m in messages if m.content_type == "tool_use"]
+    outputs = [m.tool_output for m in messages if m.content_type == "tool_result"]
+    assert len(uses) == 3
+    assert sorted(outputs) == ["result X body", "result Y body", "result Z body"]
+
+    data = claude.ClaudeProvider()._parse_sessions(tmp_path, "/repo")
+    assert len(data) == 1
+    assert data[0].message_count == 8  # prompt, 3 uses, 3 results, answer
+
+
 def test_parse_sessions_bounded_opens_independent_of_session_count(
     tmp_path: Path, monkeypatch
 ) -> None:

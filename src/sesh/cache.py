@@ -18,7 +18,9 @@ INDEX_FILE = CACHE_DIR / "index.json"
 # ``is_empty``.
 # v8 lists Claude ``/branch`` sessions separately (``forked_from``/``forked_at``),
 # excludes their copied usage, and titles from ``custom-title``/``ai-title``.
-CACHE_VERSION = 8
+# v9 keeps Claude parallel tool calls stranded off the leaf chain when their
+# results are written out of order.
+CACHE_VERSION = 9
 
 
 def _session_to_dict(s: SessionMeta) -> dict:

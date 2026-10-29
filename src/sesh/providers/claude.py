@@ -257,6 +257,18 @@ def _content_tool_ids(msg) -> tuple[set[str], set[str]]:
     return uses, results
 
 
+def _response_id(msg) -> str | None:
+    """Return the API response id (``message.id``) of an assistant message.
+
+    Claude writes each content block of one model response as its own record,
+    all carrying the same ``message.id``.
+    """
+    if not isinstance(msg, dict) or msg.get("role") != "assistant":
+        return None
+    rid = msg.get("id")
+    return rid if isinstance(rid, str) and rid else None
+
+
 def _resolve_leaf(
     parents: dict[str, str | None],
     explicit_leaf: str | None,
@@ -279,6 +291,31 @@ def _resolve_leaf(
     parent_ids = {parent for parent in parents.values() if parent is not None}
     leaves = [entry_id for entry_id in parents if entry_id not in parent_ids]
     return leaves[0] if len(leaves) == 1 else None
+
+
+def _expand_active_responses(
+    active: set[str],
+    response_id_by_uuid: dict[str, str],
+) -> set[str]:
+    """Admit off-chain records belonging to a response that is active.
+
+    Parallel ``tool_use`` blocks are written as a linear run of assistant
+    records, but the next turn hangs off whichever ``tool_result`` was written
+    last. When results return out of order, the tail of that run is a dead-end
+    branch. Such records share ``message.id`` with an active record, so they
+    are part of an active response; a rewound response has a new id. Admitted
+    records all carry an already-active id, so one pass is complete.
+    """
+    active_responses = {
+        response_id_by_uuid[uid] for uid in active if uid in response_id_by_uuid
+    }
+    if not active_responses:
+        return active
+    expanded = set(active)
+    for uid, rid in response_id_by_uuid.items():
+        if rid in active_responses:
+            expanded.add(uid)
+    return expanded
 
 
 def _expand_active_tool_results(
@@ -312,6 +349,7 @@ def _active_ids_from_maps(
     unlinked_message: bool,
     tool_use_by_uuid: dict[str, set[str]],
     tool_result_by_uuid: dict[str, set[str]],
+    response_id_by_uuid: dict[str, str],
 ) -> set[str] | None:
     """Project the active id set from pre-collected lineage/tool maps (pure).
 
@@ -325,6 +363,7 @@ def _active_ids_from_maps(
     active = active_ancestor_ids(parents, leaf)
     if active is None:
         return None
+    active = _expand_active_responses(active, response_id_by_uuid)
     return _expand_active_tool_results(active, tool_use_by_uuid, tool_result_by_uuid)
 
 
@@ -348,6 +387,7 @@ def _collected_active_fields(s: dict) -> dict | None:
         s["_unlinked"],
         {uid: rec["uses"] for uid, rec in records.items() if "uses" in rec},
         {uid: rec["results"] for uid, rec in records.items() if "results" in rec},
+        {uid: rec["response"] for uid, rec in records.items() if "response" in rec},
     )
     if active is None:
         return None
@@ -393,8 +433,9 @@ def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
     before Claude necessarily writes another marker. Older linear files are
     projected only when they have one unambiguous leaf; otherwise callers retain
     the legacy linear transcript. Compaction boundaries are bridged via
-    ``logicalParentUuid`` and off-chain parallel ``tool_result`` records
-    answering active ``tool_use``s are re-admitted.
+    ``logicalParentUuid``; off-chain records of an active response and
+    off-chain parallel ``tool_result`` records answering active ``tool_use``s
+    are re-admitted.
     """
     parents: dict[str, str | None] = {}
     explicit_leaf: str | None = None
@@ -402,6 +443,7 @@ def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
     unlinked_message = False
     tool_use_by_uuid: dict[str, set[str]] = {}
     tool_result_by_uuid: dict[str, set[str]] = {}
+    response_id_by_uuid: dict[str, str] = {}
     try:
         for file_path in files:
             with open(file_path) as f:
@@ -425,11 +467,15 @@ def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
                             and entry.get("isSidechain") is not True
                         ):
                             post_checkpoint_leaf = entry_id
-                        uses, results = _content_tool_ids(_transcript_message(entry))
+                        entry_msg = _transcript_message(entry)
+                        uses, results = _content_tool_ids(entry_msg)
                         if uses:
                             tool_use_by_uuid[entry_id] = uses
                         if results:
                             tool_result_by_uuid[entry_id] = results
+                        response_id = _response_id(entry_msg)
+                        if response_id:
+                            response_id_by_uuid[entry_id] = response_id
                     elif _transcript_message(entry) is not None:
                         unlinked_message = True
     except OSError:
@@ -442,6 +488,7 @@ def _claude_active_ids(files: list[Path], session_id: str) -> set[str] | None:
         unlinked_message,
         tool_use_by_uuid,
         tool_result_by_uuid,
+        response_id_by_uuid,
     )
 
 
@@ -1688,6 +1735,9 @@ class ClaudeProvider(SessionProvider):
                                     rec["uses"] = uses
                                 if results:
                                     rec["results"] = results
+                                response_id = _response_id(entry_msg)
+                                if response_id:
+                                    rec["response"] = response_id
                             s["_records"][entry_id] = rec
                         elif isinstance(entry_msg, dict):
                             s["_unlinked"] = True

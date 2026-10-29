@@ -350,8 +350,13 @@ opencode projects the message/part cutoff in a staged session `revert`. Two
 Claude records are live despite sitting off the single leaf chain
 and are handled explicitly: a compaction boundary (`parentUuid: null`) is
 bridged via its `logicalParentUuid` so pre-compaction history is retained, and
-sibling `tool_result` records answering an active `tool_use` (parallel tool
-calls) are re-admitted. Codex turn replay treats a `task_started` arriving
+parallel tool calls are re-admitted in two steps. First, off-chain records
+sharing `message.id` with an active record (the same model response) are
+admitted: parallel `tool_use` blocks are written as a linear run of records,
+but the next turn hangs off whichever result was written last, so out-of-order
+results strand the tail of the run. Then sibling `tool_result` records
+answering an active `tool_use` are admitted. A rewound response has a new
+`message.id`, so abandoned branches stay dropped. Codex turn replay treats a `task_started` arriving
 mid-turn as closing the open turn (aborted/nested turns keep their dialogue),
 and only records the transcript actually renders count as turn dialogue.
 Only Claude records whose `type` is `user` / `assistant` (or absent) are
