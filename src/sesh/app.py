@@ -210,6 +210,16 @@ class SessionTree(Tree):
 
     BORDER_TITLE = "Sessions"
 
+    BINDINGS = [Binding("space", "toggle_select", "Select", show=False)]
+
+    def action_toggle_select(self) -> None:
+        node = self.cursor_node
+        if node is None or not isinstance(node.data, SessionMeta):
+            self.action_toggle_node()
+            return
+        if self.app.toggle_selected(node.data):
+            self.action_cursor_down()
+
 
 class ConfirmDeleteScreen(ModalScreen[bool]):
     """Modal dialog to confirm session deletion."""
@@ -238,9 +248,17 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
     }
     """
 
-    def __init__(self, summary: str, history_option: bool = False) -> None:
+    MAX_LISTED = 10
+
+    def __init__(
+        self,
+        summary: str,
+        history_option: bool = False,
+        summaries: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.summary = summary
+        self.summaries = summaries
         # With ``history_option`` the dialog shows an "also delete prompt
         # history" checkbox; callers read ``include_history`` after a confirm.
         # It always starts unchecked (deliberately not a saved preference).
@@ -249,8 +267,16 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-dialog"):
-            yield Label("Delete this session?")
-            yield Label(f"[dim]{self.summary[:60]}[/dim]")
+            if self.summaries is None:
+                yield Label("Delete this session?")
+                yield Label(f"[dim]{self.summary[:60]}[/dim]")
+            else:
+                yield Label(f"Delete {len(self.summaries)} sessions?")
+                for s in self.summaries[: self.MAX_LISTED]:
+                    yield Label(f"[dim]• {s[:40]}[/dim]")
+                extra = len(self.summaries) - self.MAX_LISTED
+                if extra > 0:
+                    yield Label(f"[dim]… and {extra} more[/dim]")
             if self.history_option:
                 yield Checkbox(
                     "Also delete prompt history", value=False, id="confirm-history"
@@ -431,8 +457,11 @@ class HelpScreen(ModalScreen[None]):
                     ("b", "Toggle bookmark"),
                     ("e", "Export session to clipboard"),
                     ("y", "Copy resume command"),
-                    ("d", "Delete session"),
-                    ("m", "Move project"),
+                    ("d", "Delete session (or selection)"),
+                    ("m", "Move project (or selection's project)"),
+                    ("Spc", "Select session and move down"),
+                    ("V", "Brush: mark (or unmark) rows the cursor passes"),
+                    ("*", "Invert marks of all sessions in the tree"),
                     ("r", "Refresh discovery"),
                 ],
             ),
@@ -907,11 +936,22 @@ class SeshApp(App):
         display: none;
     }
 
-    #status-bar {
+    #footer-bar {
         height: 1;
         dock: bottom;
         background: $surface;
+    }
+
+    #status-bar {
+        width: 1fr;
         color: $text-muted;
+        padding: 0 1;
+    }
+
+    #selection-indicator {
+        width: auto;
+        color: $warning;
+        text-style: bold;
         padding: 0 1;
     }
     """
@@ -927,6 +967,8 @@ class SeshApp(App):
         Binding("e", "export_session", "Export"),
         Binding("d", "delete_session", "Delete"),
         Binding("m", "move_project", "Move"),
+        Binding("V", "toggle_brush", "Brush", key_display="V"),
+        Binding("asterisk", "invert_selection", "Invert", key_display="*", show=False),
         Binding("r", "refresh", "Refresh"),
         Binding("y", "copy_session_id", "Copy ID"),
         Binding("s", "cycle_sort", "Sort"),
@@ -979,6 +1021,10 @@ class SeshApp(App):
         self._live_session_key: tuple[str, str] | None = None
         self._live_starting_key: tuple[str, str] | None = None
         self._live_generation = 0
+        self._selected: set[tuple[str, str]] = set()
+        # None = brush off; True/False = brush marks/unmarks.
+        self._brush: bool | None = None
+        self._brush_line: int = 0
 
         prefs = load_preferences()
         provider_pref = prefs.get("provider_filter")
@@ -1012,7 +1058,9 @@ class SeshApp(App):
                     yield Static("", id="message-find-count")
                 yield Static("", id="message-header", classes="hidden")
                 yield TranscriptView(id="message-view")
-        yield Static("Loading...", id="status-bar")
+        with Horizontal(id="footer-bar"):
+            yield Static("Loading...", id="status-bar")
+            yield Static("", id="selection-indicator")
 
     def on_mount(self) -> None:
         self._bookmarks = load_bookmarks()
@@ -1160,7 +1208,10 @@ class SeshApp(App):
 
     def _session_label(self, session: SessionMeta, show_project: bool = False) -> str:
         """Build a display label for a session tree node."""
-        star = "\u2605 " if (session.provider.value, session.id) in self._bookmarks else ""
+        key = (session.provider.value, session.id)
+        star = "\u2605 " if key in self._bookmarks else ""
+        if key in self._selected:
+            star = "\u25cf " + star
         ts = _relative_time(session.timestamp)
         count = f"({session.message_count}) " if session.message_count else ""
         duration = _format_duration(session.start_timestamp, session.timestamp)
@@ -1183,6 +1234,9 @@ class SeshApp(App):
     def _populate_tree(self, filter_text: str = "", provider_filter: Provider | None = None) -> None:
         """Populate tree with projects and sessions."""
         sort_name = self.sort_options[self.sort_index]
+        # Tree lines shift on rebuild, so the brush's last line would be stale.
+        self._brush = None
+        self._update_selection_indicator()
 
         if sort_name == "timeline":
             self._populate_tree_timeline(filter_text, provider_filter)
@@ -1940,6 +1994,13 @@ class SeshApp(App):
             self._update_find_count()
             view.focus()
             return
+        if self._brush is not None:
+            self._brush = None
+            self._update_selection_indicator()
+            return
+        if self._selected:
+            self._set_selected(set())
+            return
         search = self.query_one("#search-input", Input)
         search.value = ""
         search.blur()
@@ -2406,6 +2467,94 @@ class SeshApp(App):
             return None
         return resume_argv(session.provider, session.id), session.project_path
 
+    def toggle_selected(self, session: SessionMeta) -> bool:
+        if self._aggregation_root is not None:
+            self._set_status("Selection is disabled in aggregation mode")
+            return False
+        self._set_selected(self._selected ^ {(session.provider.value, session.id)})
+        return True
+
+    def action_toggle_brush(self) -> None:
+        if self._aggregation_root is not None:
+            self._set_status("Selection is disabled in aggregation mode")
+            return
+        if self._brush is not None:
+            self._brush = None
+            self._update_selection_indicator()
+            return
+        tree = self.query_one("#session-tree", SessionTree)
+        node = tree.cursor_node
+        data = node.data if node is not None else None
+        on_marked = isinstance(data, SessionMeta) and self._key(data) in self._selected
+        self._brush = not on_marked
+        self._brush_line = tree.cursor_line
+        self._paint(tree.cursor_line, tree.cursor_line)
+
+    def on_tree_node_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        if self._brush is not None:
+            tree = self.query_one("#session-tree", SessionTree)
+            self._paint(self._brush_line, tree.cursor_line)
+            self._brush_line = tree.cursor_line
+
+    def _paint(self, a: int, b: int) -> None:
+        tree = self.query_one("#session-tree", SessionTree)
+        lo, hi = sorted((a, b))
+        keys = set()
+        for line in range(lo, hi + 1):
+            node = tree.get_node_at_line(line)
+            if node is not None and isinstance(node.data, SessionMeta):
+                keys.add(self._key(node.data))
+        self._set_selected(self._selected | keys if self._brush else self._selected - keys)
+
+    def action_invert_selection(self) -> None:
+        if self._aggregation_root is not None:
+            self._set_status("Selection is disabled in aggregation mode")
+            return
+        tree = self.query_one("#session-tree", SessionTree)
+        shown = set()
+        stack = list(tree.root.children)
+        while stack:
+            node = stack.pop()
+            stack.extend(node.children)
+            if isinstance(node.data, SessionMeta):
+                shown.add(self._key(node.data))
+        self._set_selected(self._selected ^ shown)
+
+    @staticmethod
+    def _key(session: SessionMeta) -> tuple[str, str]:
+        return (session.provider.value, session.id)
+
+    def _set_selected(self, new: set[tuple[str, str]]) -> None:
+        changed = self._selected ^ new
+        self._selected = new
+        if changed:
+            tree = self.query_one("#session-tree", SessionTree)
+            stack = list(tree.root.children)
+            while stack:
+                node = stack.pop()
+                stack.extend(node.children)
+                data = node.data
+                if isinstance(data, SessionMeta) and (data.provider.value, data.id) in changed:
+                    show_project = not isinstance(node.parent.data, Project)
+                    node.set_label(self._session_label(data, show_project=show_project))
+        self._update_selection_indicator()
+
+    def _update_selection_indicator(self) -> None:
+        parts = []
+        if self._selected:
+            parts.append(f"Sel:{len(self._selected)}")
+        if self._brush is not None:
+            parts.append("BRUSH+" if self._brush else "BRUSH-")
+        self.query_one("#selection-indicator", Static).update(" ".join(parts))
+
+    def _selected_sessions(self) -> list[SessionMeta]:
+        return [
+            s
+            for sess_list in self.sessions.values()
+            for s in sess_list
+            if (s.provider.value, s.id) in self._selected
+        ]
+
     def action_move_project(self) -> None:
         """Prompt to move the selected project and rewrite metadata."""
         if self._aggregation_root is not None:
@@ -2414,6 +2563,20 @@ class SeshApp(App):
         tree = self.query_one("#session-tree", SessionTree)
         node = tree.cursor_node
         if node is None:
+            return
+
+        if self._selected:
+            paths = {s.project_path for s in self._selected_sessions()}
+            if len(paths) != 1:
+                self._set_status(
+                    f"Selection spans {len(paths)} projects; move works on one project"
+                )
+                return
+            project_path = paths.pop()
+            self.push_screen(
+                MoveProjectScreen(project_path),
+                lambda result: self._handle_move_result(project_path, result),
+            )
             return
 
         project_path = self._project_path_from_node(node)
@@ -2481,6 +2644,8 @@ class SeshApp(App):
             self.call_from_thread(self._set_status, f"Move failed: {exc}")
             return
 
+        # Cleared before the rebuild so the new labels carry no stale marks.
+        self._selected.clear()
         # Rebuild in-memory state and tree after metadata updates.
         self._discover_all()
 
@@ -2522,6 +2687,20 @@ class SeshApp(App):
         if self._aggregation_root is not None:
             self._set_status("Delete is disabled in aggregation mode")
             return
+        if self._selected:
+            targets = self._selected_sessions()
+            screen = ConfirmDeleteScreen(
+                "", history_option=True, summaries=[s.summary for s in targets]
+            )
+            self.push_screen(
+                screen,
+                lambda confirmed: (
+                    self._delete_sessions(targets, include_history=screen.include_history)
+                    if confirmed
+                    else None
+                ),
+            )
+            return
         tree = self.query_one("#session-tree", SessionTree)
         node = tree.cursor_node
         if node is not None and isinstance(node.data, SessionMeta):
@@ -2538,6 +2717,39 @@ class SeshApp(App):
 
     def _delete_session(self, session: SessionMeta, include_history: bool = False) -> None:
         """Delete a session via its provider and refresh the tree."""
+        try:
+            history_note = self._remove_session(session, include_history)
+        except Exception:
+            self._set_status("Error deleting session")
+            return
+        self._repopulate()
+        self._set_status(f"Session deleted{history_note}")
+
+    def _delete_sessions(self, sessions: list[SessionMeta], include_history: bool = False) -> None:
+        failed = 0
+        history_errors = 0
+        for session in sessions:
+            try:
+                note = self._remove_session(session, include_history)
+            except Exception:
+                failed += 1
+                continue
+            if "NOT removed" in note:
+                history_errors += 1
+        self._selected.clear()
+        self._repopulate()
+        status = f"{len(sessions) - failed} sessions deleted"
+        if failed:
+            status += f"; {failed} failed"
+        if history_errors:
+            status += f"; prompt history NOT removed for {history_errors}"
+        self._set_status(status)
+
+    def _repopulate(self) -> None:
+        search_text = self.query_one("#search-input", Input).value
+        self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
+
+    def _remove_session(self, session: SessionMeta, include_history: bool) -> str:
         from sesh.providers.claude import ClaudeProvider
         from sesh.providers.cline import ClineProvider
         from sesh.providers.codex import CodexProvider
@@ -2560,14 +2772,10 @@ class SeshApp(App):
 
         provider_cls = providers_map.get(session.provider)
         if provider_cls is None:
-            return
+            raise ValueError(f"No provider for {session.provider}")
 
         provider = provider_cls()
-        try:
-            provider.delete_session(session)
-        except Exception:
-            self._set_status("Error deleting session")
-            return
+        provider.delete_session(session)
 
         history_note = ""
         if include_history:
@@ -2614,10 +2822,8 @@ class SeshApp(App):
                 proj.providers = {s.provider for s in remaining}
                 proj.latest_activity = max(s.timestamp for s in remaining)
 
-        search_text = self.query_one("#search-input", Input).value
-        self._populate_tree(filter_text=search_text, provider_filter=self.current_filter)
-
-        self._set_status(f"Session deleted{history_note}")
+        self._selected.discard(bm_key)
+        return history_note
 
 
 def tui_main(aggregation_root: Path | None = None) -> None:

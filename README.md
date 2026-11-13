@@ -103,14 +103,17 @@ and live updates.
 | Key      | Action                                                     |
 | -------- | ---------------------------------------------------------- |
 | `/`      | Focus the search bar                                       |
-| `Escape` | Clear search and return to full tree                       |
+| `Escape` | Leave brush, then clear marks, then clear search           |
 | `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi/Gemini/opencode/Cline) |
 | `o`      | Open/resume the selected session in its CLI                |
 | `v`      | Open the selected session in the browser viewer             |
 | `L`      | Toggle a live-updating browser view                         |
 | `e`      | Export session to clipboard as Markdown                    |
-| `d`      | Delete the selected session (with confirmation)            |
-| `m`      | Move selected project path (full or metadata-only)         |
+| `d`      | Delete the selected session, or all marked sessions (with confirmation) |
+| `m`      | Move selected project path (full or metadata-only); with marked sessions, their project |
+| `Space`  | Mark/unmark a session and move down (on a project: expand/collapse) |
+| `V`      | Brush: mark every session the cursor passes (unmark if started on a marked one); `V`/`Escape` to stop |
+| `*`      | Invert the marks of all sessions shown in the tree          |
 | `Tab`    | Move focus between the session tree and the transcript      |
 | `↑`/`↓`  | Move the message selection (also `j`/`k`; `Home`/`End` jump) |
 | `Enter`  | Expand / collapse the selected message or sub-agent block   |
