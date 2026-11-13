@@ -677,7 +677,27 @@ mode (like the TUI's `b` binding).
 ## Session deletion
 
 Pressing `d` on a session node shows a confirmation dialog. On confirm,
-the session is deleted via the provider's `delete_session` method:
+the session is deleted via the provider's `delete_session` method.
+
+Sessions can be marked first (`SeshApp._selected`, `(provider, id)` keys
+that survive tree rebuilds): `Space` toggles the session under the cursor
+and moves down (`SessionTree.action_toggle_select`; on a project node it
+keeps Tree's expand/collapse). `V` toggles a brush (`SeshApp._brush`) whose
+mark comes from the row it starts on (unmarked row -> mark, marked -> unmark);
+every row the cursor passes gets it, moving back undoes nothing, and jumps
+paint the rows in between, so gaps are made by stopping the brush, moving,
+and starting it again. `*` inverts the marks of every session in the tree
+(filtered-out sessions keep theirs). A tree rebuild stops the brush. `Escape`
+leaves the brush, then clears marks, then the search. Marked rows get a `●`
+prefix; the right end of the footer shows `Sel:N` and `BRUSH+`/`BRUSH-`.
+With marks, `d` opens `ConfirmDeleteScreen(summaries=...)` listing them
+(first 10, then "… and N more") with the same history checkbox, and
+`_delete_sessions` deletes each one through `_remove_session`, continuing
+past failures and reporting `N sessions deleted; M failed`. With marks, `m`
+moves their project; it refuses when they span more than one project, since
+providers only move whole projects. Marking is disabled in aggregation mode.
+
+Per provider:
 
 -   **Claude**: removes matching `sessionId` lines from JSONL files
 -   **Codex**: deletes the session JSONL file (and native child rollouts),
