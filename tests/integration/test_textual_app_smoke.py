@@ -118,6 +118,9 @@ async def test_provider_filter_cycles_on_f(app):
     assert sesh_app.current_filter == Provider.CLINE
 
     await pilot.press("f")
+    assert sesh_app.current_filter == Provider.AGY
+
+    await pilot.press("f")
     assert sesh_app.current_filter is None
 
 

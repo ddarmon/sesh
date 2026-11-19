@@ -321,6 +321,15 @@ _RESUME_PATTERNS: list[tuple[Provider, re.Pattern[str]]] = [
         Provider.OPENCODE,
         re.compile(r"\bopencode\s+--session\s+([A-Za-z0-9_-]+)"),
     ),
+    (
+        Provider.AGY,
+        # agy --conversation <uuid>. Conversation ids are always UUIDs.
+        re.compile(
+            r"\bagy\s+--conversation[\s=]+\"?"
+            r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+            r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\"?"
+        ),
+    ),
 ]
 
 

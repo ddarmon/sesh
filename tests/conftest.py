@@ -256,6 +256,23 @@ def tmp_cline_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return data_dir
 
 
+@pytest.fixture(autouse=True)
+def tmp_agy_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the agy provider and agy search at an empty tmp store.
+
+    Autouse: discovery, move and search construct every provider, so without
+    this a test that does not stub AgyProvider would read (or rewrite) the
+    real ``~/.gemini/antigravity-cli``.
+    """
+    from sesh import search
+    from sesh.providers import agy
+
+    data_dir = tmp_path / ".gemini" / "antigravity-cli"
+    monkeypatch.setattr(agy, "AGY_DATA_DIR", data_dir)
+    monkeypatch.setattr(search, "AGY_DATA", data_dir)
+    return data_dir
+
+
 @pytest.fixture()
 def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     from sesh import search
@@ -289,6 +306,7 @@ def tmp_search_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         "gemini_tmp": gemini_tmp,
         "opencode_data": opencode_data,
         "cline_sessions": cline_sessions,
+        "agy_data": tmp_path / ".gemini" / "antigravity-cli",
     }
 
 
@@ -325,6 +343,7 @@ def tmp_aggregation_search_dirs(tmp_path: Path) -> dict[str, object]:
             "gemini_tmp": base / ".gemini" / "tmp",
             "opencode_data": base / ".local" / "share" / "opencode",
             "cline_sessions": base / ".cline" / "data" / "sessions",
+            "agy_data": base / ".gemini" / "antigravity-cli",
         }
         for p in paths.values():
             p.mkdir(parents=True, exist_ok=True)
@@ -444,5 +463,6 @@ def tmp_move_dirs(
         "pi_sessions": pi_sessions,
         "opencode_data": opencode_data,
         "cline_data": cline_data,
+        "agy_data": tmp_path / ".gemini" / "antigravity-cli",
         "cache_dir": cache_dir,
     }

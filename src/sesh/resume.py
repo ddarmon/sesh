@@ -30,6 +30,9 @@ RESUME_COMMANDS: dict[Provider, list[str]] = {
     Provider.PI: ["pi", "--session", "{id}"],
     Provider.GEMINI: ["gemini", "--resume", "{id}"],
     Provider.OPENCODE: ["opencode", "--session", "{id}"],
+    # agy resumes by id from any cwd; sesh still launches it in the project
+    # directory so the conversation keeps its workspace.
+    Provider.AGY: ["agy", "--conversation", "{id}"],
 }
 
 

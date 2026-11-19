@@ -108,6 +108,7 @@ The app has three layers:
 | Gemini   | `~/.gemini/tmp/{dir}/chats/`       | JSON       |
 | opencode | `~/.local/share/opencode/`         | SQLite+JSON |
 | Cline    | `~/.cline/data/sessions/`          | JSON+SQLite |
+| agy      | `~/.gemini/antigravity-cli/`       | JSONL+SQLite+protobuf |
 
 The pi encoded directory wraps the cwd with leading and trailing `--`
 (e.g. `/Users/me/proj` -\> `--Users-me-proj--`). Each session is one
@@ -193,6 +194,62 @@ model, timestamps, and token totals are rebuilt from the record on every scan �
 Cline rewrites the record alone when it backfills a generated title, which a
 transcript-keyed cache entry would otherwise never pick up.
 
+Antigravity CLI (`agy`, provider id `agy`; verified against 1.5.12) keeps one
+conversation per UUID under `~/.gemini/antigravity-cli/`
+(`{base_dir}/.gemini/antigravity-cli` in aggregation mode):
+
+-   `brain/{id}/.system_generated/logs/transcript_full.jsonl` — the transcript
+    sesh parses, one record per step (`transcript.jsonl` is the same with long
+    tool output truncated, and `logs/chunks/` repeats both; only
+    `transcript_full.jsonl` is read and searched, falling back to
+    `transcript.jsonl` when it is absent).
+-   `conversation_summaries.db` — agy's index (`conversation_summaries`:
+    `title`, `preview`, `workspace_uris` JSON, `parent_conversation_id`,
+    `agent_name`, a protobuf `raw_summary`; plus the FTS5 `conversations_fts`).
+    Read with `agy._open_readonly`: `mode=ro` first, then `immutable=1`, because
+    a WAL-mode database agy closed cleanly has no `-shm` and a read-only open
+    may not create one (`SQLITE_CANTOPEN`).
+-   `conversations/{id}.db` — agy's real state: protobuf blobs, including
+    `trajectory_metadata_blob.data`, whose field `(1, 1)` and field `7` hold the
+    workspace URI. agy **regenerates the index row from this blob**, so the
+    index is not the source of truth for the workspace.
+-   `jetbox_summaries_proto.pb` (repeated top-level entries: field 1 the id,
+    field 2 the summary), `cache/last_conversations.json` (`{path: id}`, what
+    `agy -c` continues), `cache/conversation_metadata.json` (stale-prone),
+    `presence/{id}.lock`, `annotations/{id}.pbtxt`, `history.jsonl`.
+
+Record types: `USER_INPUT` (the prompt wrapped in `<USER_REQUEST>`, followed by
+injected `<ADDITIONAL_METADATA>` / `<USER_SETTINGS_CHANGE>` blocks that become
+hidden records; the *last* closing tag delimits the prompt),
+`PLANNER_RESPONSE` (`content`, `thinking`, `tool_calls`, per-call `model` and
+token counts), `GENERIC` (a tool result with no tool name or call id, paired
+with the pending calls in order), and `SYSTEM_MESSAGE` (hidden, except that in
+a sub-agent thread the parent's `[Message] … sender={parent} … content=…` is
+that thread's prompt and renders as the user turn). Unknown types with content
+are kept as hidden records. `input_tokens` excludes cached tokens, so context is
+`input_tokens + cache_read_tokens`.
+
+The transcript is append-only. `/rewind` leaves the abandoned records in place
+and continues from an earlier `step_index`; `agy.read_transcript` therefore
+drops every active record whose index is not below an incoming record's. Token
+totals are summed over all records, abandoned ones included.
+
+Workspace URIs are percent-encoded with `/@+,&=;:$` left unescaped
+(`agy.path_to_uri`, measured against a directory named with every ASCII
+punctuation character); matching always happens on the decoded path. Project
+paths come from the index row's first URI, else the conversation's own blob,
+else the `agy:unknown` pseudo-project (the `brain` directory). The sessions
+cache is keyed on the transcript, so it stands in only for transcript-derived
+fields; summary, project path, and sub-agent count are rebuilt from the index
+and sidecars on every scan.
+
+The protobuf blobs have no schema available, so `agy.pb_rewrite` edits them
+schema-less: it walks the wire format, offers each length-delimited value to a
+replacer, recurses into values that parse as messages, and re-encodes only the
+fields on the path to a change, leaving every other byte (and any non-canonical
+encoding) untouched. The move replacer accepts only a value that is entirely a
+`file://` URI under the old path.
+
 The opencode project path comes from the session's `directory` field,
 never from project IDs or folder names. A staged `/undo` keeps physical
 messages/parts available for `/redo` and stores its logical cutoff in the
@@ -245,6 +302,8 @@ stable HTML browser viewer; `L` toggles a private live-updating browser view
     not be resolved (`gemini:{hash8}` fallback) are not resumable ---
     there is no real cwd to run the command in
 -   **opencode**: `opencode --session <session-id>`
+-   **agy**: `agy --conversation <session-id>` (resumable from any cwd;
+    sesh still runs it in the project directory)
 -   **Cline**: not resumable — Cline has no resume-by-id CLI, so it is
     absent from `RESUME_COMMANDS` and falls into the ordinary "cannot be
     resumed" path
@@ -335,8 +394,9 @@ is an alias of `export.format_duration`.
 ## Native sub-agent transcripts
 
 Sesh uses the provider-neutral `SubagentMeta` + `load_subagents(session)` API to
-render child-agent threads in the TUI and exports. Claude, Codex, and opencode
-(SQLite databases only, not legacy JSON storage) currently implement this API.
+render child-agent threads in the TUI and exports. Claude, Codex, opencode
+(SQLite databases only, not legacy JSON storage), and agy currently implement
+this API.
 
 ### Rewind and rollback history
 
@@ -432,6 +492,21 @@ still carries the child's final reply (`<subagent sessionID=…>` in 2.0,
 `<task id=…>` in 1.x); the child thread adds the prompt, reasoning, and the
 child's own tool calls. Legacy JSON child sessions are not linked to their
 parent, so they still list as ordinary sessions.
+
+### agy subagents
+
+An agy sub-agent is an ordinary conversation with its own `brain/{id}/`
+transcript and `conversations/{id}.db`. Two records link it to its parent: the
+index row's `parent_conversation_id`, and a sidecar the parent keeps at
+`brain/{parent}/.system_generated/subagents/{child}.json` (`subagentDescriptor`
+`typeName` / `role`, `spawnStepIndex`). The provider unions both, so links
+survive a missing or unreadable index. Children are never listed; the root's
+`subagent_count` covers transitive descendants, `load_subagents` returns them
+as one flat list ordered by first activity (`agent_type` = `typeName`,
+`description` = `role`), delete removes them with the root, and
+`AgyProvider.locate` maps a search hit in a child transcript to the root
+session with the child as `agent_id` (and the root transcript as
+`root_file_path`, so `sesh clean` deletes the root).
 
 ### Claude Code subagents
 
@@ -534,6 +609,10 @@ discovery and cached alongside other metadata. Per-provider sources:
     `output` across turns. In both SQLite formats the session row's
     cumulative `tokens_*` columns provide `output_tokens` and
     `cumulative_input_tokens` directly
+-   **agy**: per-`PLANNER_RESPONSE` `input_tokens` / `cache_read_tokens` /
+    `output_tokens`. `input_tokens` is the LAST active response's
+    `input_tokens + cache_read_tokens`; `output_tokens` and
+    `cumulative_input_tokens` sum every response, rewound ones included
 -   **Cursor**: no token data available
 
 The `sesh sessions` CLI output includes three token fields:
@@ -698,6 +777,18 @@ the session is deleted via the provider's `delete_session` method:
     unopenable or locked one raises after the files are gone rather than
     failing silently
 
+-   **agy**: mirrors agy's own delete (F4 in `/resume`, verified by diffing the
+    store around a real delete) for the conversation and its sub-agents:
+    `brain/{id}/`, `conversations/{id}.db` (+ `-wal`/`-shm`), the
+    `conversation_summaries` row and its `conversations_fts` rows, and the
+    entry in `jetbox_summaries_proto.pb`. It additionally clears what agy
+    leaves behind (`presence/{id}.lock`, `annotations/{id}.pbtxt`, and the
+    conversation's entries in both `cache/` files). `brain` directories are
+    removed first and a failure propagates, so a partial delete never edits
+    the index; an unopenable index raises after the files are gone. SQLite
+    does not zero freed pages, so deleted text can remain in the index file's
+    free space, exactly as after agy's own delete
+
 CLI equivalents:
 
 -   `sesh delete <session-id>` --- delete a single session by ID
@@ -727,6 +818,10 @@ dry_run)` hook returning a `prompt_history.HistoryReport`:
 -   **Codex**: `~/.codex/history.jsonl` lines whose `session_id` is the root id.
 -   **Gemini**: entries in the project's `~/.gemini/tmp/{dir}/logs.json`
     (sibling of the session's `chats/` dir) whose `sessionId` matches.
+-   **agy**: `~/.gemini/antigravity-cli/history.jsonl` lines whose
+    `conversationId` is the root id. The prompt that *starts* a conversation
+    is written before the id exists, and `agy -p` prompts are not recorded at
+    all, so those entries cannot be attributed and are kept.
 -   **Copilot / opencode**: unsupported (`"supported": false`). Their prompt
     histories (`command-history-state.json`, `prompt-history.jsonl`) carry
     no session id, and matching on prompt text would be a guess. pi and
@@ -775,6 +870,20 @@ pass correctly skipped. The old path also appears inside
 `system_prompt` and inside tool output; those are left alone, as the Claude
 provider already tolerates embedded stale paths.
 
+agy's `move_project` rewrites only the conversation's *workspace*, in every
+place agy keeps it: `trajectory_metadata_blob` in each `conversations/{id}.db`,
+the index row (`workspace_uris` and `raw_summary`), `jetbox_summaries_proto.pb`,
+sub-agent sidecars (`workspaceUris`), `cache/last_conversations.json` (re-keyed;
+an entry already present for the new path wins), `cache/conversation_metadata.json`,
+and the `workspace` of `history.jsonl` entries (through the guarded rewrite).
+Rewriting the index alone does not survive: agy rebuilds the row from the blob
+on the next resume (verified both ways with real conversations). Paths in
+recorded tool calls, tool output, and system prompts are left alone, and
+`settings.json`'s `trustedWorkspaces` is deliberately not edited, so agy asks
+once whether to trust the new location. Index rows are matched in Python on the
+decoded path, never with SQL `LIKE`. `sesh move --dry-run` counts conversations
+via `AgyProvider.move_candidates`.
+
 Gemini sessions are not covered by project move: the format stores the
 cwd only as a SHA-256 `projectHash` inside every session file, so a move
 would require rewriting whole JSON documents plus `projects.json`.
@@ -793,7 +902,7 @@ the index, then query it.
 | `sesh sessions [--project PATH] [--provider NAME] [--since DATE] [--until DATE] [--limit N] [--bookmarked]` | List sessions with optional filters      |
 | `sesh stats [--project PATH] [--provider NAME]`                                                           | Aggregate session statistics from the index |
 | `sesh messages <id\|last> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full] [--include-hidden]` | Load messages for a session              |
-| `sesh search <query> [--provider NAME] [--project PATH]`                                                  | Full-text search (Claude, Codex, Cursor) |
+| `sesh search <query> [--provider NAME] [--project PATH]`                                                  | Full-text search across providers        |
 | `sesh bookmarks`                                                                                          | List bookmarked sessions (joined with the index) |
 | `sesh delete <id\|last> [--provider NAME] [--history] [--force] [--dry-run]`                              | Delete a session by ID, or the most recent with `last` |
 | `sesh clean <query>\|--empty [--history] [--force] [--dry-run]`                                           | Delete sessions matching a search query, or all empty sessions |
@@ -859,6 +968,7 @@ Resume metadata is resolved at **save time**, not at restore time:
 
 1.  Scrollback is scanned for the LAST explicit `claude --resume <id>`,
     `codex resume <id>`, `agent --resume=<id>`, `copilot --resume=<id>`,
+    `agy --conversation <uuid>`,
     `gemini --resume <uuid>` (full UUIDs only --- `latest` and index
     numbers are not session ids), or `pi --session <id>` line
     (`_parse_explicit_resume`).
@@ -904,6 +1014,7 @@ rsync -a --delete laptop:.codex/   $SESH_AGGREGATION_ROOT/laptop/.codex/
 rsync -a --delete laptop:.pi/      $SESH_AGGREGATION_ROOT/laptop/.pi/
 rsync -a --delete laptop:.local/share/opencode/  $SESH_AGGREGATION_ROOT/laptop/.local/share/opencode/
 rsync -a --delete laptop:.cline/   $SESH_AGGREGATION_ROOT/laptop/.cline/
+rsync -a --delete laptop:.gemini/  $SESH_AGGREGATION_ROOT/laptop/.gemini/
 ```
 
 Activate aggregation mode with either:
@@ -960,6 +1071,10 @@ field. The local-mode JSON output also includes `host` (always `null`).
     (`{host}/.local/share/opencode/`).
 -   Cline is a plain top-level dotdir (`{host}/.cline/data/`), so it needs
     no Cursor-style `Library/` caveat.
+-   agy lives inside the Gemini dotdir (`{host}/.gemini/antigravity-cli/`),
+    so mirroring `.gemini/` covers both. A mirrored index copied while agy
+    was running may carry a `-wal` without its `-shm`; it is then read at its
+    last checkpoint.
 
 ## Agent skill
 
@@ -1034,6 +1149,10 @@ environment.
     `tmp_cursor_dirs`, `tmp_gemini_dir`, `tmp_search_dirs`,
     `tmp_move_dirs`). Always use these instead of touching real
     home-directory paths.
+-   An autouse `tmp_agy_dir` fixture points the agy provider and agy search
+    at an empty tmp store, because discovery, move, and search construct every
+    provider; without it a test that does not stub `AgyProvider` would read or
+    rewrite the real `~/.gemini/antigravity-cli`.
 -   An autouse `isolate_app_preferences` fixture stubs
     `load_preferences`/`save_preferences` on the app module so tests
     never read or write real preference files.
