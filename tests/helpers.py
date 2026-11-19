@@ -582,3 +582,220 @@ def create_cline_db(data_dir: Path, records: list[dict]) -> Path:
     finally:
         conn.close()
     return db_path
+
+
+# ----------------------------------------------------------------------
+# Antigravity CLI (agy) fixtures
+# ----------------------------------------------------------------------
+
+
+def pb_varint(value: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def pb_bytes(field: int, value: bytes | str) -> bytes:
+    """Encode one length-delimited protobuf field."""
+    if isinstance(value, str):
+        value = value.encode("utf-8")
+    return pb_varint((field << 3) | 2) + pb_varint(len(value)) + value
+
+
+def pb_int(field: int, value: int) -> bytes:
+    """Encode one varint protobuf field."""
+    return pb_varint(field << 3) + pb_varint(value)
+
+
+def agy_workspace_uri(path: str) -> str:
+    from sesh.providers.agy import path_to_uri
+
+    return path_to_uri(path)
+
+
+def agy_trajectory_blob(
+    conversation_id: str, workspace: str, embedded: str | None = None
+) -> bytes:
+    """Mimic agy's ``trajectory_metadata_blob``: the workspace URI appears
+    nested at (1, 1) and again at top-level field 7, around other fields.
+    *embedded* is the path quoted inside free text (defaults to *workspace*)."""
+    uri = agy_workspace_uri(workspace)
+    embedded = workspace if embedded is None else embedded
+    return (
+        pb_bytes(1, pb_bytes(1, uri) + pb_bytes(3, b""))
+        + pb_bytes(2, pb_int(1, 1795053000) + pb_int(2, 42))
+        + pb_bytes(3, "631bebe4-253c-4df6-b0ec-faab9108dbdf")
+        + pb_bytes(6, conversation_id)
+        + pb_bytes(7, uri)
+        + pb_bytes(10, pb_bytes(1, f"read_file({embedded})"))
+    )
+
+
+def agy_raw_summary(title: str, workspace: str) -> bytes:
+    uri = agy_workspace_uri(workspace)
+    return (
+        pb_bytes(1, title)
+        + pb_int(2, 2)
+        + pb_bytes(9, pb_bytes(1, uri) + pb_bytes(3, b""))
+        + pb_bytes(17, pb_bytes(1, pb_bytes(1, uri)) + pb_bytes(7, uri))
+    )
+
+
+_AGY_INDEX_SCHEMA = """
+CREATE TABLE IF NOT EXISTS conversation_summaries (
+    conversation_id text PRIMARY KEY,
+    title text NOT NULL DEFAULT '',
+    preview text NOT NULL DEFAULT '',
+    step_count integer NOT NULL DEFAULT 0,
+    workspace_uris text NOT NULL,
+    parent_conversation_id text NOT NULL DEFAULT '',
+    agent_name text NOT NULL DEFAULT '',
+    raw_summary blob
+);
+CREATE TABLE IF NOT EXISTS conversations_fts (
+    conversation_id text,
+    user_body text
+);
+"""
+
+
+def agy_step(step_index: int, rtype: str, **fields) -> dict:
+    """Build one transcript record the way agy writes it."""
+    record = {
+        "step_index": step_index,
+        "source": {
+            "USER_INPUT": "USER_EXPLICIT",
+            "SYSTEM_MESSAGE": "SYSTEM",
+        }.get(rtype, "MODEL"),
+        "type": rtype,
+        "status": "DONE",
+        "created_at": fields.pop(
+            "created_at", f"2026-11-19T02:00:{step_index % 60:02d}Z"
+        ),
+    }
+    record.update(fields)
+    return record
+
+
+def agy_user(step_index: int, prompt: str, **fields) -> dict:
+    content = (
+        f"<USER_REQUEST>\n{prompt}\n</USER_REQUEST>\n"
+        "<ADDITIONAL_METADATA>\nThe current local time is: "
+        "2026-11-18T21:00:00-05:00.\n</ADDITIONAL_METADATA>"
+    )
+    return agy_step(step_index, "USER_INPUT", content=content, **fields)
+
+
+def agy_reply(step_index: int, text: str | None = None, **fields) -> dict:
+    fields.setdefault("model", "gemini-4-neon-high")
+    fields.setdefault("input_tokens", 100)
+    fields.setdefault("cache_read_tokens", 0)
+    fields.setdefault("output_tokens", 10)
+    if text is not None:
+        fields["content"] = text
+    return agy_step(step_index, "PLANNER_RESPONSE", **fields)
+
+
+def write_agy_conversation(
+    data_dir: Path,
+    *,
+    conversation_id: str = "11111111-1111-4111-8111-111111111111",
+    workspace: str = "/Users/me/repo",
+    title: str = "Fix The Parser",
+    preview: str = "Fix the parser",
+    records: list[dict] | None = None,
+    parent_id: str | None = None,
+    agent_name: str = "",
+    role: str = "Helper",
+    with_index_row: bool = True,
+    with_conversation_db: bool = True,
+    with_jetbox_entry: bool = True,
+) -> Path:
+    """Create one agy conversation under *data_dir*.
+
+    Writes the ``brain`` transcript, the conversation database, the index row
+    and the ``jetbox`` entry; with *parent_id*, also the parent's sub-agent
+    sidecar. Returns the transcript path (the provider's ``source_path``).
+    """
+    if records is None:
+        records = [agy_user(0, "Fix the parser"), agy_reply(1, "Done.")]
+
+    logs = data_dir / "brain" / conversation_id / ".system_generated" / "logs"
+    transcript = logs / "transcript_full.jsonl"
+    write_jsonl(transcript, records)
+    write_jsonl(logs / "transcript.jsonl", records)
+
+    if with_conversation_db:
+        db_path = data_dir / "conversations" / f"{conversation_id}.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE trajectory_metadata_blob "
+                "(id text DEFAULT 'main' PRIMARY KEY, data blob)"
+            )
+            conn.execute(
+                "INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?)",
+                (agy_trajectory_blob(conversation_id, workspace),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    if with_index_row:
+        index_path = data_dir / "conversation_summaries.db"
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(index_path)
+        try:
+            conn.executescript(_AGY_INDEX_SCHEMA)
+            conn.execute(
+                "INSERT INTO conversation_summaries (conversation_id, title, "
+                "preview, step_count, workspace_uris, parent_conversation_id, "
+                "agent_name, raw_summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    conversation_id, title, preview, len(records),
+                    json.dumps([agy_workspace_uri(workspace)]),
+                    parent_id or "", agent_name,
+                    agy_raw_summary(title, workspace),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO conversations_fts (conversation_id, user_body) "
+                "VALUES (?, ?)",
+                (conversation_id, preview),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    if with_jetbox_entry:
+        jetbox = data_dir / "jetbox_summaries_proto.pb"
+        entry = pb_bytes(
+            1,
+            pb_bytes(1, conversation_id)
+            + pb_bytes(2, agy_raw_summary(title, workspace)),
+        )
+        with open(jetbox, "ab") as f:
+            f.write(entry)
+
+    if parent_id:
+        sidecar = (
+            data_dir / "brain" / parent_id / ".system_generated" / "subagents"
+            / f"{conversation_id}.json"
+        )
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps({
+            "conversationId": conversation_id,
+            "subagentDescriptor": {"typeName": agent_name or "research", "role": role},
+            "state": "SUBAGENT_STATE_ALIVE",
+            "spawnStepIndex": 1,
+            "workspaceUris": [agy_workspace_uri(workspace)],
+        }))
+
+    return transcript

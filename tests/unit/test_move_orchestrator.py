@@ -200,6 +200,7 @@ def test_move_project_dry_run_does_not_move_files(tmp_path: Path, monkeypatch) -
         Provider.PI,
         Provider.OPENCODE,
         Provider.CLINE,
+        Provider.AGY,
     ]
     assert all(isinstance(r, MoveReport) for r in reports)
     assert old_path.exists()
@@ -255,7 +256,12 @@ def test_move_project_orchestrates_providers_and_invalidates_caches(
     monkeypatch.setattr(move, "CopilotProvider", FakeCopilot)
     monkeypatch.setattr(move, "PiProvider", FakePi)
     monkeypatch.setattr(move, "OpencodeProvider", FakeOpencode)
+    class FakeAgy:
+        def move_project(self, old: str, new: str) -> MoveReport:
+            return MoveReport(provider=Provider.AGY, success=True)
+
     monkeypatch.setattr(move, "ClineProvider", FakeCline)
+    monkeypatch.setattr(move, "AgyProvider", FakeAgy)
 
     reports = move.move_project(str(old_path), str(new_path), full_move=True, dry_run=False)
 
@@ -268,6 +274,7 @@ def test_move_project_orchestrates_providers_and_invalidates_caches(
         Provider.PI,
         Provider.OPENCODE,
         Provider.CLINE,
+        Provider.AGY,
     ]
     assert all(r.success for r in reports)
     assert not move.CACHE_FILE.exists()

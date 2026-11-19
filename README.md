@@ -1,7 +1,7 @@
 # sesh
 
 Browse and search Claude Code, Codex, Cursor, Copilot, pi, Gemini CLI,
-opencode, and Cline sessions in the terminal.
+opencode, Cline, and Antigravity CLI sessions in the terminal.
 
 `sesh` is a TUI that discovers session logs from multiple LLM coding
 assistants, lets you browse them by project, read message threads, and
@@ -49,9 +49,10 @@ Developed and tested on macOS. The codebase uses `pathlib.Path` and
 `shutil.which()` throughout, so most of it is platform-agnostic.
 
 **Linux** -- Should work out of the box. The Claude Code, Codex, Cursor,
-Copilot, pi, Gemini, opencode, and Cline data directories use the same
-paths as macOS (`~/.claude`, `~/.codex`, `~/.cursor`, `~/.copilot`,
-`~/.pi`, `~/.gemini`, `~/.local/share/opencode`, `~/.cline/data`).
+Copilot, pi, Gemini, opencode, Cline, and Antigravity CLI data directories
+use the same paths as macOS (`~/.claude`, `~/.codex`, `~/.cursor`,
+`~/.copilot`, `~/.pi`, `~/.gemini`, `~/.local/share/opencode`,
+`~/.cline/data`, `~/.gemini/antigravity-cli`).
 Textual and ripgrep both support Linux.
 
 **Windows** -- Partially supported. The core TUI and CLI will run, but
@@ -104,7 +105,7 @@ and live updates.
 | -------- | ---------------------------------------------------------- |
 | `/`      | Focus the search bar                                       |
 | `Escape` | Clear search and return to full tree                       |
-| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi/Gemini/opencode/Cline) |
+| `f`      | Cycle provider filter (All/Claude/Codex/Cursor/Copilot/pi/Gemini/opencode/Cline/Agy) |
 | `o`      | Open/resume the selected session in its CLI                |
 | `v`      | Open the selected session in the browser viewer             |
 | `L`      | Toggle a live-updating browser view                         |
@@ -158,6 +159,7 @@ Each project in the tree shows which providers have sessions for it:
 -   `G` -- Gemini CLI
 -   `O` -- opencode
 -   `L` -- Cline
+-   `A` -- Antigravity CLI (`agy`)
 
 Example: `myproject [C,X:12]` means 12 sessions from Claude and Codex.
 
@@ -320,7 +322,7 @@ sesh move <old-path> <new-path> --dry-run
 Press `Shift+S` in the TUI (or use `sesh snapshot save`) to capture
 every open Terminal.app tab --- its working directory and the resume
 command for any coding-agent session running inside it (Claude Code,
-Codex, Cursor, Copilot, Gemini, pi, or opencode). Reopen the snapshot
+Codex, Cursor, Copilot, Gemini, pi, opencode, or agy). Reopen the snapshot
 later to restore the same set of tabs, each one resumed against the
 same session.
 
@@ -357,6 +359,7 @@ $SESH_AGGREGATION_ROOT/
     .codex/sessions/...
     .pi/agent/sessions/...
     .gemini/tmp/...
+    .gemini/antigravity-cli/...
     .cline/data/...
   desktop/
     .claude/projects/...
@@ -566,6 +569,59 @@ read: the formats share nothing, and legacy discards reasoning traces
 before they reach disk. A user still on that bundle sees no Cline
 sessions in sesh.
 
+### Antigravity CLI (`agy`)
+
+Reads the Antigravity CLI store under `~/.gemini/antigravity-cli/`
+(verified against agy 1.5.12; the provider id is `agy`). Each
+conversation has a `brain/{id}/.system_generated/logs/transcript_full.jsonl`
+transcript, one JSON record per step, which is what sesh parses. Titles,
+workspaces and sub-agent links come from agy's own
+`conversation_summaries.db` index (read-only); a conversation agy has not
+indexed falls back to the workspace recorded in its own
+`conversations/{id}.db`, and one with no recoverable workspace is grouped
+under an `agy:unknown` pseudo-project.
+
+-   **Messages.** `USER_INPUT` records are unwrapped from
+    `<USER_REQUEST>`; the metadata blocks agy appends are hidden records.
+    `PLANNER_RESPONSE` records carry text, thinking and tool calls;
+    `GENERIC` records are tool results, paired with their calls in order
+    (agy stores no call id on them).
+-   **Rewind.** The transcript is append-only: after `/rewind` the
+    conversation continues from an earlier `step_index`, and sesh shows
+    only the active branch. Token totals still count the abandoned steps.
+-   **Sub-agents.** Each sub-agent is its own conversation; it is not
+    listed, is counted on its root (`⑂N`), and renders as a thread with the
+    `a` toggle. Search hits inside one are attributed to the root.
+-   **Tokens.** Context is the last response's
+    `input_tokens + cache_read_tokens`; output and cumulative input are
+    summed over every response.
+-   **Resume** uses `agy --conversation <id>`.
+-   **Delete** mirrors agy's own delete (F4 in `/resume`): the `brain`
+    directory, the conversation database, the index row and its search
+    entries, and the entry in `jetbox_summaries_proto.pb`, for the
+    conversation and its sub-agents. It also clears the `presence` lock,
+    `annotations` file and `cache/` entries agy leaves behind. `--history`
+    removes the `history.jsonl` entries that carry the conversation's
+    `conversationId`; the prompt that started a conversation and prompts
+    from `agy -p` runs are written without one and are kept.
+-   **Move** rewrites the conversation's workspace URI everywhere agy
+    keeps it: the protobuf metadata blob in `conversations/{id}.db` (agy
+    rebuilds its index from this, so editing the index alone would revert
+    on the next resume), the index row, `jetbox_summaries_proto.pb`,
+    sub-agent sidecars, the `cache/` files, and the `workspace` of
+    prompt-history entries. Paths inside recorded tool calls and tool
+    output are left as they were. `settings.json`'s `trustedWorkspaces` is
+    not edited, so agy asks once whether to trust the new location.
+
+The protobuf blobs have no published schema. sesh edits them without one:
+it walks the wire format and replaces only a field whose entire value is a
+`file://` URI under the old path, copying every other byte through. If a
+future agy release changes where the workspace is recorded, a move may no
+longer stick; `sesh doctor` reports an index it cannot read.
+
+Conversations of the Antigravity desktop app (a separate store) are not
+read.
+
 ## Cache
 
 Parsed session metadata is cached at `~/.cache/sesh/sessions.json`,
@@ -605,6 +661,7 @@ src/sesh/
     gemini.py        # Gemini CLI JSON parser
     opencode.py      # opencode SQLite + legacy JSON parser
     cline.py         # Cline (next bundle) JSON parser
+    agy.py           # Antigravity CLI JSONL parser + protobuf move/delete
   snapshots/         # Terminal.app snapshot core and backend
 skills/sesh/         # agent skill for driving the CLI (not packaged)
 ```
