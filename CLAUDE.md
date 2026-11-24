@@ -679,7 +679,10 @@ mode (like the TUI's `b` binding).
 Pressing `d` on a session node shows a confirmation dialog. On confirm,
 the session is deleted via the provider's `delete_session` method:
 
--   **Claude**: removes matching `sessionId` lines from JSONL files
+-   **Claude**: removes matching `sessionId` lines from JSONL files, and
+    unlinks a file left holding no other session's records (records
+    without a `sessionId`, i.e. `file-history-snapshot`, do not keep a
+    file alive: they would survive as a transcript-less stub)
 -   **Codex**: deletes the session JSONL file (and native child rollouts),
     then drops the root's and children's title entries from
     `~/.codex/session_index.jsonl` (always, not behind `--history`)
