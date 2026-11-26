@@ -22,7 +22,13 @@ from typing import Literal
 from sesh.models import Provider
 from sesh.paths import SNAPSHOTS_DIR
 from sesh.resume import RESUME_COMMANDS, resume_argv
-from sesh.snapshots.backend import RestoreOutcome, TerminalBackendError, get_backend
+from sesh.snapshots import live
+from sesh.snapshots.backend import (
+    CapturedTab,
+    RestoreOutcome,
+    TerminalBackendError,
+    get_backend,
+)
 
 
 SCHEMA_VERSION = 1
@@ -63,13 +69,29 @@ class SnapshotsSchemaError(SnapshotsError):
 # ----- dataclasses ---------------------------------------------------------
 
 
+ResumeSource = Literal["process", "argv", "explicit", "activity", "search"]
+RESUME_SOURCES: tuple[str, ...] = ("process", "argv", "explicit", "activity", "search")
+GUESS_SOURCES: tuple[str, ...] = ("activity", "search")
+
+
 @dataclass
 class SnapshotResume:
     provider: Provider
     session_id: str
     cmd_args: list[str]
-    source: Literal["explicit", "search"]
+    # Which evidence named the session, strongest first:
+    #   process   the provider's own record for the running process
+    #   argv      a session id on the running process's command line
+    #   explicit  a resume command in the scrollback of a tab with no agent
+    #   activity  the only session active in the cwd since the process started
+    #   search    a scrollback phrase found in a transcript
+    source: ResumeSource
     matched_phrase: str | None = None
+
+    @property
+    def is_guess(self) -> bool:
+        """True when the session was inferred rather than read off the process."""
+        return self.source in GUESS_SOURCES
 
     def to_dict(self) -> dict:
         return {
@@ -77,13 +99,14 @@ class SnapshotResume:
             "session_id": self.session_id,
             "cmd_args": list(self.cmd_args),
             "source": self.source,
+            "guess": self.is_guess,
             "matched_phrase": self.matched_phrase,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "SnapshotResume":
         source = d.get("source", "explicit")
-        if source not in ("explicit", "search"):
+        if source not in RESUME_SOURCES:
             source = "explicit"
         return cls(
             provider=Provider(d["provider"]),
@@ -190,6 +213,8 @@ class RestoreItem:
     cmd_args: list[str] | None
     label: str
     reason_skipped: str | None = None
+    # The resume command names a session that was inferred, not confirmed.
+    guess: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -199,6 +224,7 @@ class RestoreItem:
             "cmd_args": list(self.cmd_args) if self.cmd_args else None,
             "label": self.label,
             "reason_skipped": self.reason_skipped,
+            "guess": self.guess,
         }
 
 
@@ -373,6 +399,27 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0E-\x1F]")
 _LEADING_CLAUDE_MARKER = "⏺ "  # "⏺ "
 
 
+def _longest_literal_run(words: list[str]) -> list[str]:
+    """The longest run of consecutive words that search treats as literal.
+
+    A phrase is searched as a regex as soon as it holds one regex
+    metacharacter, so "the departing teammate. (turn" is an invalid pattern
+    and "what now?" matches "what no". Only metacharacter-free runs are used.
+    """
+    from sesh.search import _is_literal
+
+    best: list[str] = []
+    current: list[str] = []
+    for word in words:
+        if _is_literal(word) and not any(c in word for c in '"`'):
+            current.append(word)
+            if len(current) > len(best):
+                best = list(current)
+        else:
+            current = []
+    return best
+
+
 def _candidate_phrases(text: str) -> list[str]:
     """Generate distinctive scrollback phrases (newest first)."""
     seen: set[str] = set()
@@ -397,9 +444,10 @@ def _candidate_phrases(text: str) -> list[str]:
             continue
         if len(words) < 5:
             continue
-        phrase = " ".join(words[:7])
-        if any(c in phrase for c in '"\\$`'):
+        run = _longest_literal_run(words)
+        if len(run) < 5:
             continue
+        phrase = " ".join(run[:7])
         if phrase in seen:
             continue
         seen.add(phrase)
@@ -441,8 +489,14 @@ def _search_recover(
     cwd: str,
     *,
     index_mtimes: dict[str, float] | None = None,
+    provider: Provider | None = None,
+    candidate_ids: set[str] | None = None,
 ) -> SnapshotResume | None:
-    """Recover a session via ripgrep search over scrollback phrases."""
+    """Recover a session via ripgrep search over scrollback phrases.
+
+    *provider* limits hits to one provider (the agent running in the tab);
+    *candidate_ids* limits them to known candidate sessions.
+    """
     if not scrollback or not cwd:
         return None
 
@@ -462,6 +516,8 @@ def _search_recover(
             r for r in results
             if r.session_id
             and r.provider in RESUME_COMMANDS  # skip providers with no resume-by-id CLI
+            and (provider is None or r.provider == provider)
+            and (candidate_ids is None or r.session_id in candidate_ids)
             and _normalize_path(r.project_path) == cwd_norm
         ]
         if not candidates:
@@ -488,6 +544,128 @@ def _search_recover(
     return None
 
 
+# ----- process-based resolution ---------------------------------------------
+
+
+def _discover_sessions() -> list:
+    """Every local session, discovered fresh (the on-disk index can be stale)."""
+    from sesh.cache import SessionCache
+    from sesh.discovery import discover_all
+
+    cache = SessionCache()
+    _projects, sessions = discover_all(cache=cache)
+    cache.save()
+    return [s for group in sessions.values() for s in group]
+
+
+class _ResolveContext:
+    """Per-capture state shared across tabs; everything is loaded on demand."""
+
+    def __init__(self, index_mtimes: dict[str, float] | None) -> None:
+        self.index_mtimes = index_mtimes
+        self._sessions: list | None = None
+        self._providers: dict[Provider, object | None] = {}
+
+    def sessions(self) -> list:
+        if self._sessions is None:
+            try:
+                self._sessions = _discover_sessions()
+            except Exception:
+                self._sessions = []
+        return self._sessions
+
+    def provider(self, provider: Provider):
+        if provider not in self._providers:
+            from sesh.discovery import construct_provider
+
+            try:
+                self._providers[provider] = construct_provider(provider.value)
+            except Exception:
+                self._providers[provider] = None
+        return self._providers[provider]
+
+
+def _resume(provider: Provider, session_id: str, source: str, phrase: str | None = None):
+    return SnapshotResume(
+        provider=provider,
+        session_id=session_id,
+        cmd_args=resume_argv(provider, session_id),
+        source=source,  # type: ignore[arg-type]
+        matched_phrase=phrase,
+    )
+
+
+def _argv_resume(provider: Provider, argv: list[str]) -> SnapshotResume | None:
+    """A session id on the agent's own command line.
+
+    A fork (``--fork-session``, ``codex fork``, ``--fork``) names the session
+    it copied from, not the one it is in, so it yields nothing.
+    """
+    if any(a == "fork" or a.startswith("--fork") for a in argv[1:]):
+        return None
+    command = " ".join(argv)
+    for pattern_provider, pattern in _RESUME_PATTERNS:
+        if pattern_provider != provider:
+            continue
+        m = pattern.search(command)
+        if m:
+            session_id = next((g for g in m.groups() if g), "")
+            if session_id:
+                return _resume(provider, session_id, "argv")
+    return None
+
+
+def _resolve_resume(
+    raw: CapturedTab,
+    scrollback: str,
+    cwd: str | None,
+    ctx: _ResolveContext,
+) -> SnapshotResume | None:
+    """Name the session a tab should resume. See ``sesh.snapshots.live``."""
+    agent = live.find_agent(raw.processes)
+    if agent is None:
+        # No agent is running in the tab (or its processes are unknown):
+        # the scrollback is the only evidence there is.
+        resume = _parse_explicit_resume(scrollback)
+        if resume is None and cwd:
+            resume = _search_recover(scrollback, cwd, index_mtimes=ctx.index_mtimes)
+        return resume
+
+    provider, process = agent
+    instance = ctx.provider(provider)
+    if instance is not None:
+        try:
+            session_id = instance.live_session_id(
+                live.live_process(process, raw.processes, live.list_open_files)
+            )
+        except Exception:
+            session_id = None
+        if session_id:
+            return _resume(provider, session_id, "process")
+
+    resume = _argv_resume(provider, process.argv)
+    if resume is not None:
+        return resume
+    if not cwd:
+        return None
+
+    candidates = live.active_candidates(
+        provider, cwd, process.start, ctx.sessions(), _normalize_path
+    )
+    if len(candidates) == 1:
+        return _resume(provider, candidates[0].id, "activity")
+    # Several sessions were active under this process's lifetime (other tabs
+    # in the same directory), or none was (a session reopened in-app and not
+    # yet continued): let the scrollback choose, within this provider only.
+    return _search_recover(
+        scrollback,
+        cwd,
+        index_mtimes=ctx.index_mtimes,
+        provider=provider,
+        candidate_ids={s.id for s in candidates} if candidates else None,
+    )
+
+
 # ----- public API ----------------------------------------------------------
 
 
@@ -504,15 +682,13 @@ def capture() -> Snapshot:
         captured = backend.capture()
     except TerminalBackendError as exc:
         raise SnapshotsBackendError(f"Could not capture terminal tabs: {exc}") from exc
-    index_mtimes = _index_mtime_lookup()
+    ctx = _ResolveContext(_index_mtime_lookup())
 
     tabs: list[SnapshotTab] = []
     for raw in captured:
         scrollback = _clamp_scrollback(raw.scrollback_tail or "")
         cwd = _normalize_path(raw.cwd)
-        resume = _parse_explicit_resume(scrollback)
-        if resume is None and cwd:
-            resume = _search_recover(scrollback, cwd, index_mtimes=index_mtimes)
+        resume = _resolve_resume(raw, scrollback, cwd, ctx)
         tabs.append(
             SnapshotTab(
                 window=raw.window,
@@ -603,11 +779,13 @@ def _build_label(
     tab: int,
     cwd: str | None,
     cmd_args: list[str] | None,
+    guess: bool = False,
 ) -> str:
     cwd_str = cwd or "(no cwd)"
     if cmd_args:
         cmd_str = shlex.join(cmd_args)
-        return f"Window {window}, Tab {tab}  {cwd_str}  [{cmd_str}]"
+        mark = "  (guessed session)" if guess else ""
+        return f"Window {window}, Tab {tab}  {cwd_str}  [{cmd_str}]{mark}"
     return f"Window {window}, Tab {tab}  {cwd_str}  [shell]"
 
 
@@ -621,6 +799,7 @@ def build_restore_plan(
     for tab in snapshot.tabs:
         cmd_args: list[str] | None = None
         reason: str | None = None
+        guess = tab.resume is not None and tab.resume.is_guess
 
         if tab.resume is not None:
             cmd_args = list(tab.resume.cmd_args)
@@ -647,8 +826,10 @@ def build_restore_plan(
                     tab=tab.tab,
                     cwd=tab.cwd,
                     cmd_args=cmd_args,
+                    guess=guess,
                 ),
                 reason_skipped=reason,
+                guess=guess,
             )
         )
 

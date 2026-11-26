@@ -9,12 +9,19 @@ that permission.
 
 from __future__ import annotations
 
+import os
 import platform
 import shlex
 import subprocess
+from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sesh.snapshots.backend import CapturedTab, RestoreOutcome, TerminalBackendError
+from sesh.snapshots.backend import (
+    CapturedTab,
+    RestoreOutcome,
+    TerminalBackendError,
+    TtyProcess,
+)
 
 if TYPE_CHECKING:
     from sesh.snapshots.core import RestoreItem
@@ -167,6 +174,7 @@ class TerminalAppBackend:
 
             scrollback = "\n".join(history_lines).rstrip()
             cwd = TerminalAppBackend._resolve_cwd(tty) if tty else None
+            processes = TerminalAppBackend._tty_processes(tty) if tty else []
 
             tabs.append(
                 CapturedTab(
@@ -175,10 +183,32 @@ class TerminalAppBackend:
                     tty=tty,
                     cwd=cwd,
                     scrollback_tail=_tail_lines(scrollback, 40),
+                    processes=processes,
                 )
             )
 
         return tabs
+
+    @staticmethod
+    def _tty_processes(tty_path: str) -> list[TtyProcess]:
+        """List every process on the given tty. Empty on any failure."""
+        if not tty_path:
+            return []
+        tty_short = tty_path[5:] if tty_path.startswith("/dev/") else tty_path
+        try:
+            proc = subprocess.run(
+                ["ps", "-t", tty_short, "-o", "pid=,ppid=,lstart=,command="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                # lstart is locale-formatted; pin it so it parses.
+                env={**os.environ, "LC_ALL": "C"},
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if proc.returncode != 0:
+            return []
+        return _parse_ps_processes(proc.stdout)
 
     @staticmethod
     def _resolve_cwd(tty_path: str) -> str | None:
@@ -288,6 +318,37 @@ class TerminalAppBackend:
             detail = proc.stderr.strip() or f"exit code {proc.returncode}"
             raise TerminalBackendError(f"osascript failed: {detail}")
         return proc.stdout
+
+
+def _parse_ps_processes(output: str) -> list[TtyProcess]:
+    """Parse ``ps -o pid=,ppid=,lstart=,command=`` output.
+
+    ``lstart`` is five whitespace-separated tokens in the C locale
+    (``Thu Nov 26 11:38:13 2026``), in local time.
+    """
+    out: list[TtyProcess] = []
+    for line in output.splitlines():
+        parts = line.split(None, 7)
+        if len(parts) < 8:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        try:
+            start: float | None = datetime.strptime(
+                " ".join(parts[2:7]), "%a %b %d %H:%M:%S %Y"
+            ).timestamp()
+        except (ValueError, OverflowError, OSError):
+            start = None
+        command = parts[7].strip()
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            argv = command.split()
+        if argv:
+            out.append(TtyProcess(pid=pid, ppid=ppid, start=start, argv=argv))
+    return out
 
 
 def _tail_lines(text: str, max_lines: int) -> str:

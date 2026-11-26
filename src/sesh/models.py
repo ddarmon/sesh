@@ -66,6 +66,22 @@ class SessionMeta:
 
 
 @dataclass
+class LiveProcess:
+    """A running agent CLI process, as offered to ``live_session_id``.
+
+    ``pids`` is the process and its descendants (some CLIs keep their session
+    lock under a child). ``start`` is epoch seconds, None when unknown.
+    ``open_files`` are paths the process itself holds open.
+    """
+
+    pid: int
+    pids: tuple[int, ...] = ()
+    start: float | None = None
+    argv: list[str] = field(default_factory=list)
+    open_files: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SubagentMeta:
     """Metadata for a provider-native sub-agent transcript.
 

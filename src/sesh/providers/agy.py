@@ -44,7 +44,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-from sesh.models import Message, MoveReport, Provider, SessionMeta, SubagentMeta
+from sesh.models import (
+    LiveProcess,
+    Message,
+    MoveReport,
+    Provider,
+    SessionMeta,
+    SubagentMeta,
+)
 from sesh.prompt_history import HistoryReport, _rewrite_guarded, remove_jsonl_entries
 from sesh.providers import SessionProvider
 
@@ -692,6 +699,25 @@ class AgyProvider(SessionProvider):
     # ------------------------------------------------------------------
     # Delete
     # ------------------------------------------------------------------
+
+    def live_session_id(self, process: LiveProcess) -> str | None:
+        """Find the conversation a running ``agy`` process holds open.
+
+        agy keeps ``presence/{id}.lock`` open for the conversation it is
+        in. The files themselves are empty and are left behind when agy
+        exits, so only a lock in the process's open files counts. A process
+        running sub-agents holds their locks too; those map to the same
+        root conversation.
+        """
+        presence = str(self._data_dir / "presence") + os.sep
+        roots: set[str] = set()
+        for path in process.open_files:
+            if not path.startswith(presence) or not path.endswith(".lock"):
+                continue
+            conv_id = path[len(presence):-len(".lock")]
+            if is_valid_session_id(conv_id):
+                roots.add(self._root_of(conv_id))
+        return roots.pop() if len(roots) == 1 else None
 
     def delete_session(self, session: SessionMeta) -> None:
         """Remove a conversation and its sub-agents the way agy's delete does.

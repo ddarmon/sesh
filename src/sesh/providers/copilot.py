@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sesh.models import Message, MoveReport, Provider, SessionMeta
+from sesh.models import LiveProcess, Message, MoveReport, Provider, SessionMeta
 from sesh.providers import SessionProvider
 
 COPILOT_DIR = Path.home() / ".copilot" / "session-state"
@@ -218,6 +218,24 @@ class CopilotProvider(SessionProvider):
             pass
 
         return messages
+
+    def live_session_id(self, process: LiveProcess) -> str | None:
+        """Find the session whose directory a running ``copilot`` has locked.
+
+        Copilot CLI writes ``session-state/{id}/inuse.{pid}.lock`` while a
+        session is open and removes it on exit. The pid is that of the
+        native binary, a child of the ``node`` launcher on the tty, so every
+        pid in the process tree is tried. A lock left by a dead process
+        names a pid that is not in the tree and so never matches.
+        """
+        root = self._copilot_dir
+        if not root.is_dir():
+            return None
+        found: set[str] = set()
+        for pid in process.pids or (process.pid,):
+            for lock in root.glob(f"*/inuse.{int(pid)}.lock"):
+                found.add(lock.parent.name)
+        return found.pop() if len(found) == 1 else None
 
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a Copilot session by removing its directory."""

@@ -10,11 +10,21 @@ agnostic and only ever talks to a backend through this Protocol.
 from __future__ import annotations
 
 import platform
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from sesh.snapshots.core import RestoreItem
+
+
+@dataclass
+class TtyProcess:
+    """One process attached to a tab's tty at capture time."""
+
+    pid: int
+    ppid: int
+    start: float | None  # epoch seconds
+    argv: list[str]
 
 
 @dataclass
@@ -26,6 +36,9 @@ class CapturedTab:
     tty: str | None
     cwd: str | None
     scrollback_tail: str  # truncated to SCROLLBACK_MAX_LINES by the backend
+    # Every process on the tab's tty. Empty when the backend cannot list
+    # them, which makes resume resolution fall back to scrollback alone.
+    processes: list[TtyProcess] = field(default_factory=list)
 
 
 @dataclass

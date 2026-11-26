@@ -391,6 +391,21 @@ def tmp_snapshots_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return snap_dir
 
 
+@pytest.fixture(autouse=True)
+def isolate_live_processes(monkeypatch: pytest.MonkeyPatch):
+    """Keep snapshot tests from running real ``ps`` / ``lsof``.
+
+    Capture lists the processes on each tab's tty and the files an agent
+    process holds open; a test that forgot to stub those would inspect
+    whatever happens to be running on this machine.
+    """
+    from sesh.snapshots import live
+    from sesh.snapshots.terminal_app import TerminalAppBackend
+
+    monkeypatch.setattr(TerminalAppBackend, "_tty_processes", staticmethod(lambda tty: []))
+    monkeypatch.setattr(live, "list_open_files", lambda pid: [])
+
+
 @pytest.fixture()
 def fake_backend(monkeypatch: pytest.MonkeyPatch):
     """Replace get_backend() with a controllable in-memory backend."""

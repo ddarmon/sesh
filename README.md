@@ -331,9 +331,14 @@ Codex, Cursor, Copilot, Gemini, pi, opencode, or agy). Reopen the snapshot
 later to restore the same set of tabs, each one resumed against the
 same session.
 
-Resume metadata is resolved at capture time — from explicit resume
-commands in the scrollback, or a search fallback when they have scrolled
-off — so reopens are deterministic and fast.
+Resume metadata is resolved at capture time, starting from the agent
+process running in each tab: the CLI's own record of the session that
+process has open (Claude Code, Copilot, agy), then a session id on its
+command line. When neither exists, sesh infers the session from which one
+was active in that directory since the process started, or from the
+scrollback, and marks the result as a guess (`"guess": true` in the
+snapshot, `(guessed session)` in the reopen preview). A tab it cannot
+resolve is saved without a resume command.
 
 ```
 sesh snapshot save                  # capture; prints id and counts
