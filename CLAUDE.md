@@ -1064,8 +1064,13 @@ multiplexing layer is in `discovery._discover_aggregated()`.
 
 `sesh search` (and the TUI's `Enter` full-text search) is implemented in
 `search.py`. `ripgrep_search` finds transcript hits; `search_sessions` joins
-them to the session index, adds title matches, and ranks. The TUI still calls
-`ripgrep_search` directly and shows its results unranked.
+them to the session index, adds title matches, and ranks. The TUI's `Enter`
+search calls `search_sessions` too, so its rows are in the same order; each
+reads `[badge] age  project — title · snippet` (no snippet for a title-only
+match). A selected row resolves to the discovered session
+(`app._session_for_search_result`), so the details header, resume, bookmark,
+and delete act on the real session; a hit in a session discovery does not know
+falls back to a minimal session rebuilt from the matched file.
 
 -   **One matcher.** `search._Matcher` is the single definition of "this text
     matches the query" for every provider: case-insensitive, a literal string

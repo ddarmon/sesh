@@ -143,8 +143,9 @@ bar](assets/fullscreen-view.png)
 -   **Full-text search**: Press `Enter` to search transcript text across
     all providers. Only text the transcript shows is matched (messages,
     tool calls and results, thinking), so encoded payloads and record
-    metadata never produce a hit. Results appear in the tree with
-    provider badges and matched context.
+    metadata never produce a hit. Sessions whose title matches come
+    first, then the most recently active; each row shows the provider
+    badge, age, project, session title, and the matched text.
 
 ![Search results for "authentication" across
 providers](assets/search-results.png)
