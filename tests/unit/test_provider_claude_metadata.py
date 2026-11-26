@@ -382,3 +382,36 @@ def test_delete_session_unlinks_empty_file(tmp_path: Path) -> None:
     session = make_session(id="drop", provider=Provider.CLAUDE, source_path=str(project_dir))
     claude.ClaudeProvider().delete_session(session)
     assert not (project_dir / "a.jsonl").exists()
+
+
+def test_delete_session_unlinks_file_left_with_only_file_history(tmp_path: Path) -> None:
+    """file-history-snapshot records carry no sessionId; they must not survive as a stub."""
+    project_dir = tmp_path / "claude-project"
+    write_jsonl(
+        project_dir / "drop.jsonl",
+        [
+            {"type": "file-history-snapshot", "messageId": "m1", "snapshot": {}, "isSnapshotUpdate": False},
+            {"sessionId": "drop", "message": {"role": "user", "content": "x"}},
+            {"type": "file-history-snapshot", "messageId": "m2", "snapshot": {}, "isSnapshotUpdate": True},
+        ],
+    )
+    session = make_session(id="drop", provider=Provider.CLAUDE, source_path=str(project_dir))
+    claude.ClaudeProvider().delete_session(session)
+    assert not (project_dir / "drop.jsonl").exists()
+
+
+def test_delete_session_keeps_file_history_beside_another_session(tmp_path: Path) -> None:
+    """A file still holding another session keeps its sessionId-less records."""
+    project_dir = tmp_path / "claude-project"
+    write_jsonl(
+        project_dir / "a.jsonl",
+        [
+            {"type": "file-history-snapshot", "messageId": "m1", "snapshot": {}, "isSnapshotUpdate": False},
+            {"sessionId": "drop", "message": {"role": "user", "content": "x"}},
+            {"sessionId": "keep", "message": {"role": "user", "content": "y"}},
+        ],
+    )
+    session = make_session(id="drop", provider=Provider.CLAUDE, source_path=str(project_dir))
+    claude.ClaudeProvider().delete_session(session)
+    text = (project_dir / "a.jsonl").read_text()
+    assert '"keep"' in text and "file-history-snapshot" in text and '"drop"' not in text

@@ -1441,6 +1441,9 @@ class ClaudeProvider(SessionProvider):
             try:
                 kept: list[str] = []
                 removed_any = False
+                # True once a kept line could belong to another session: a
+                # record with its own sessionId, or one we cannot parse.
+                keeps_other_content = False
                 with open(jsonl_file) as f:
                     for line in f:
                         stripped = line.strip()
@@ -1449,17 +1452,26 @@ class ClaudeProvider(SessionProvider):
                             continue
                         try:
                             entry = json.loads(stripped)
+                        except json.JSONDecodeError:
+                            entry = None
+                        if isinstance(entry, dict):
                             if entry.get("sessionId") == session.id:
                                 removed_any = True
                                 continue
-                        except json.JSONDecodeError:
-                            pass
+                            if entry.get("sessionId"):
+                                keeps_other_content = True
+                        else:
+                            keeps_other_content = True
                         kept.append(line)
 
                 if not removed_any:
                     continue
 
-                if not any(l.strip() for l in kept):
+                # Records without a sessionId (file-history-snapshot) are
+                # bookkeeping for the session being deleted. Left behind, they
+                # form a transcript-less stub that sesh never lists and that
+                # backups copy over the real transcript.
+                if not keeps_other_content:
                     jsonl_file.unlink()
                 else:
                     fd, tmp = tempfile.mkstemp(
