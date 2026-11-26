@@ -8,7 +8,7 @@ are uncertain; do not infer support from another command's flags.
 ```bash
 sesh refresh
 sesh sessions --project /path/to/project --limit 10
-sesh search 'decision keyword' --project /path/to/project
+sesh search 'decision keyword' --project /path/to/project --limit 10
 sesh messages SESSION_ID --summary --limit 20
 sesh messages SESSION_ID --limit 30
 sesh messages SESSION_ID --offset 30 --limit 30 --include-tools

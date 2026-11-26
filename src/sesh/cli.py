@@ -601,18 +601,34 @@ def _build_cwd_lookup() -> dict[tuple[str, str], str] | None:
 
 
 def cmd_search(args: argparse.Namespace) -> None:
-    """Full-text search via ripgrep."""
-    from sesh.search import ripgrep_search
+    """Search session titles and transcript text; ranked JSON results."""
+    from sesh.cache import _dict_to_session
+    from sesh.search import search_sessions
 
-    cwd_lookup = _build_cwd_lookup()
-    results = ripgrep_search(
+    # Discover fresh (incremental) so titles and timestamps are current and a
+    # just-created session is searchable without a manual ``sesh refresh``.
+    index = _refresh_index(args)
+    sessions = [_dict_to_session(s) for s in index.get("sessions", [])]
+    cwd_lookup = {
+        (s.id, s.provider.value): s.project_path
+        for s in sessions
+        if s.id and s.project_path
+    }
+
+    results = search_sessions(
         args.query,
+        sessions,
         aggregation_root=_aggregation_root(args),
-        cwd_lookup=cwd_lookup,
+        cwd_lookup=cwd_lookup or None,
+        titles_only=getattr(args, "titles_only", False),
     )
 
     provider_filter = getattr(args, "provider", None)
     project_filter = getattr(args, "project", None)
+    since = getattr(args, "since", None)
+    since_dt = _parse_cli_timestamp(since, "--since") if since else None
+    until = getattr(args, "until", None)
+    until_dt = _parse_cli_timestamp(until, "--until") if until else None
 
     out = []
     for r in results:
@@ -620,15 +636,30 @@ def cmd_search(args: argparse.Namespace) -> None:
             continue
         if project_filter and r.project_path != project_filter:
             continue
+        # A date bound cannot be judged for a result with no timestamp.
+        if since_dt and (r.timestamp is None or r.timestamp < since_dt):
+            continue
+        if until_dt and (r.timestamp is None or r.timestamp > until_dt):
+            continue
         out.append({
+            # ``id`` matches the field name ``sesh sessions`` uses;
+            # ``session_id`` is kept for existing consumers.
+            "id": r.session_id,
             "session_id": r.session_id,
             "provider": r.provider.value,
             "project_path": r.project_path,
+            "title": r.title,
+            "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+            "matched_in": list(r.matched_in),
             "matched_line": r.matched_line,
             "file_path": r.file_path,
             "host": r.host,
             "agent_id": r.agent_id,
         })
+
+    limit = getattr(args, "limit", None)
+    if limit is not None:
+        out = out[: max(limit, 0)]
 
     _json_out(out)
 
@@ -1756,15 +1787,51 @@ def main() -> None:
     # search
     p_search = sub.add_parser(
         "search",
-        help="Full-text search across session files via ripgrep",
+        help="Search session titles and transcript text",
         description=(
-            "Search session files using ripgrep (rg must be on PATH). "
-            "Returns matching lines with session and file metadata as JSON."
+            "Search session titles and transcript text (case-insensitive; a "
+            "literal string unless the query contains regex metacharacters). "
+            "Prints one JSON object per matching session with its id, title, "
+            "timestamp, where the query matched (matched_in: title and/or "
+            "content), and a snippet (matched_line). Title matches come first, "
+            "then the most recently active. Only text the transcript shows is "
+            "searched (messages, tool calls and results, thinking), never "
+            "encoded payloads or record metadata. Transcript search needs "
+            "ripgrep (rg) on PATH; --titles-only does not. Discovers fresh, so "
+            "no prior 'sesh refresh' is needed."
         ),
     )
     p_search.add_argument(
         "query",
         help="The search term or regex pattern",
+    )
+    p_search.add_argument(
+        "--titles-only",
+        dest="titles_only",
+        action="store_true",
+        help="Match session titles only; do not search transcript text",
+    )
+    p_search.add_argument(
+        "--since",
+        metavar="DATE",
+        help=(
+            "Only sessions last active at or after this ISO date/datetime "
+            "(e.g. 2026-06-01; naive values are treated as UTC)"
+        ),
+    )
+    p_search.add_argument(
+        "--until",
+        metavar="DATE",
+        help=(
+            "Only sessions last active at or before this ISO date/datetime "
+            "(e.g. 2026-06-01; naive values are treated as UTC)"
+        ),
+    )
+    p_search.add_argument(
+        "--limit",
+        metavar="N",
+        type=int,
+        help="Return at most N results, after ranking and filtering",
     )
     p_search.add_argument(
         "--provider",

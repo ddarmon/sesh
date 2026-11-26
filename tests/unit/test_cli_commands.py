@@ -11,7 +11,7 @@ import pytest
 from sesh import cli
 from sesh.cache import _session_to_dict
 from sesh.models import Message, Provider, SearchResult
-from tests.helpers import make_message, make_session
+from tests.helpers import make_index, make_message, make_session
 
 
 def _ns(**kwargs):
@@ -119,6 +119,12 @@ def test_cmd_messages_summary_and_pagination(monkeypatch, capsys) -> None:
     assert [m["content"] for m in out["messages"]] == ["u2"]
 
 
+def _stub_search_index(monkeypatch, sessions: list | None = None) -> None:
+    """Give cmd_search a fixed index instead of running discovery."""
+    index = make_index([], sessions or [])
+    monkeypatch.setattr(cli, "_refresh_index", lambda *a, **k: index)
+
+
 def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
     """'sesh search' outputs SearchResult objects as JSON with all expected fields."""
     import sesh.search as search_mod
@@ -137,13 +143,18 @@ def test_cmd_search_outputs_json(monkeypatch, capsys) -> None:
             )
         ],
     )
+    _stub_search_index(monkeypatch)
     cli.cmd_search(_ns(query="needle"))
     out = json.loads(capsys.readouterr().out)
     assert out == [
         {
+            "id": "s1",
             "session_id": "s1",
             "provider": "codex",
             "project_path": "/repo",
+            "title": None,
+            "timestamp": None,
+            "matched_in": ["content"],
             "matched_line": "needle",
             "file_path": "/tmp/x.jsonl",
             "host": None,
@@ -170,6 +181,7 @@ def test_cmd_search_emits_agent_id(monkeypatch, capsys) -> None:
             )
         ],
     )
+    _stub_search_index(monkeypatch)
     cli.cmd_search(_ns(query="needle"))
     out = json.loads(capsys.readouterr().out)
     assert out[0]["session_id"] == "parent-1"
@@ -197,23 +209,17 @@ def test_cmd_search_passes_aggregation_root(monkeypatch, capsys, tmp_path) -> No
         ]
 
     monkeypatch.setattr(search_mod, "ripgrep_search", _fake)
+    _stub_search_index(monkeypatch)
     cli.cmd_search(_ns(query="needle", aggregation_root=tmp_path))
 
     assert captured["query"] == "needle"
     assert captured["aggregation_root"] == tmp_path
 
     out = json.loads(capsys.readouterr().out)
-    assert out == [
-        {
-            "session_id": "s1",
-            "provider": "claude",
-            "project_path": "/repo",
-            "matched_line": "needle",
-            "file_path": str(tmp_path / "laptop" / ".claude" / "a.jsonl"),
-            "host": "laptop",
-            "agent_id": None,
-        }
-    ]
+    assert len(out) == 1
+    assert out[0]["session_id"] == "s1"
+    assert out[0]["host"] == "laptop"
+    assert out[0]["file_path"] == str(tmp_path / "laptop" / ".claude" / "a.jsonl")
 
 
 def test_cmd_clean_empty_results(monkeypatch, capsys) -> None:
@@ -1790,6 +1796,7 @@ def test_cmd_search_provider_and_project_filters(monkeypatch, capsys) -> None:
         ),
     ]
     monkeypatch.setattr(search_mod, "ripgrep_search", lambda q, **_kw: results)
+    _stub_search_index(monkeypatch)
 
     cli.cmd_search(_ns(query="needle", provider="claude", project="/repo-a"))
     out = json.loads(capsys.readouterr().out)
@@ -2384,3 +2391,83 @@ def test_cmd_clean_requires_exactly_one_target(capsys, query, empty, message) ->
         cli.cmd_clean(_ns(query=query, empty=empty, dry_run=True, force=False))
     assert exc.value.code == 2
     assert message in capsys.readouterr().err
+
+
+def _search_fixture(monkeypatch) -> None:
+    """Three indexed sessions; ripgrep hits two of them and one unindexed file."""
+    import sesh.search as search_mod
+
+    sessions = [
+        make_session(id="wiz-cards", summary="Wiz IDAM flashcards",
+                     timestamp=datetime(2026, 11, 24, tzinfo=timezone.utc),
+                     source_path="/tmp/wiz-cards.jsonl"),
+        make_session(id="recent", summary="Search usability",
+                     timestamp=datetime(2026, 11, 26, tzinfo=timezone.utc)),
+        make_session(id="older", summary="Credit research",
+                     timestamp=datetime(2026, 10, 16, tzinfo=timezone.utc)),
+    ]
+    hits = [
+        SearchResult(session_id=sid, provider=Provider.CLAUDE, project_path="/repo",
+                     matched_line=f"... wiz in {sid} ...", file_path=f"/tmp/{sid}.jsonl")
+        for sid in ("older", "recent")
+    ]
+    monkeypatch.setattr(search_mod, "ripgrep_search", lambda q, **_kw: list(hits))
+    _stub_search_index(monkeypatch, sessions)
+
+
+def test_cmd_search_ranks_and_reports_titles(monkeypatch, capsys) -> None:
+    """Title matches lead; every row carries id, title, timestamp, matched_in."""
+    _search_fixture(monkeypatch)
+    cli.cmd_search(_ns(query="wiz"))
+    out = json.loads(capsys.readouterr().out)
+
+    assert [r["id"] for r in out] == ["wiz-cards", "recent", "older"]
+    assert all(r["id"] == r["session_id"] for r in out)
+    assert out[0] == {
+        "id": "wiz-cards",
+        "session_id": "wiz-cards",
+        "provider": "claude",
+        "project_path": "/tmp/project",
+        "title": "Wiz IDAM flashcards",
+        "timestamp": "2026-11-24T00:00:00+00:00",
+        "matched_in": ["title"],
+        "matched_line": "",
+        "file_path": "/tmp/wiz-cards.jsonl",
+        "host": None,
+        "agent_id": None,
+    }
+    assert out[1]["title"] == "Search usability"
+    assert out[1]["matched_in"] == ["content"]
+
+
+def test_cmd_search_limit_applies_after_ranking(monkeypatch, capsys) -> None:
+    _search_fixture(monkeypatch)
+    cli.cmd_search(_ns(query="wiz", limit=2))
+    out = json.loads(capsys.readouterr().out)
+    assert [r["id"] for r in out] == ["wiz-cards", "recent"]
+
+
+def test_cmd_search_since_until(monkeypatch, capsys) -> None:
+    _search_fixture(monkeypatch)
+    cli.cmd_search(_ns(query="wiz", since="2026-11-01"))
+    assert [r["id"] for r in json.loads(capsys.readouterr().out)] == [
+        "wiz-cards", "recent",
+    ]
+    cli.cmd_search(_ns(query="wiz", until="2026-11-25"))
+    assert [r["id"] for r in json.loads(capsys.readouterr().out)] == [
+        "wiz-cards", "older",
+    ]
+
+
+def test_cmd_search_titles_only(monkeypatch, capsys) -> None:
+    import sesh.search as search_mod
+
+    _search_fixture(monkeypatch)
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("--titles-only must not search transcripts")
+
+    monkeypatch.setattr(search_mod, "ripgrep_search", _boom)
+    cli.cmd_search(_ns(query="wiz", titles_only=True))
+    out = json.loads(capsys.readouterr().out)
+    assert [r["id"] for r in out] == ["wiz-cards"]

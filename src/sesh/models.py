@@ -113,6 +113,12 @@ class SearchResult:
     # is internal provenance; the search CLI intentionally keeps its existing
     # JSON shape and reports file_path as the file that actually matched.
     root_file_path: str | None = None
+    # Filled by ``search.search_sessions`` from the session index: the
+    # session's title and last-activity time (file mtime when the session is
+    # not in the index), and where the query matched ("title", "content").
+    title: str | None = None
+    timestamp: datetime | None = None
+    matched_in: tuple[str, ...] = ("content",)
 
 
 def filter_messages(

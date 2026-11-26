@@ -91,23 +91,36 @@ def test_sessions_filter_flags_parsed(monkeypatch) -> None:
 
 
 def test_search_filter_flags_parsed(monkeypatch) -> None:
-    """--provider and --project are parsed and passed to cmd_search."""
+    """Every search flag is parsed and passed to cmd_search."""
     seen = {}
 
     def fake_cmd_search(args):
-        seen["query"] = args.query
-        seen["provider"] = args.provider
-        seen["project"] = args.project
+        seen.update(vars(args))
 
     monkeypatch.setattr(cli, "cmd_search", fake_cmd_search)
     monkeypatch.setattr(
         sys,
         "argv",
-        ["sesh", "search", "needle", "--provider", "claude", "--project", "/repo"],
+        [
+            "sesh", "search", "needle", "--provider", "claude",
+            "--project", "/repo", "--since", "2026-06-01",
+            "--until", "2026-06-10", "--limit", "5", "--titles-only",
+        ],
     )
 
     cli.main()
-    assert seen == {"query": "needle", "provider": "claude", "project": "/repo"}
+    assert {k: seen[k] for k in (
+        "query", "provider", "project", "since", "until", "limit", "titles_only",
+    )} == {
+        "query": "needle", "provider": "claude", "project": "/repo",
+        "since": "2026-06-01", "until": "2026-06-10", "limit": 5,
+        "titles_only": True,
+    }
+
+    # Defaults: no limit, transcripts searched.
+    monkeypatch.setattr(sys, "argv", ["sesh", "search", "needle"])
+    cli.main()
+    assert seen["limit"] is None and seen["titles_only"] is False
 
 
 def test_export_output_flag_and_last_parsed(monkeypatch) -> None:

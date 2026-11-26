@@ -743,3 +743,185 @@ def test_aggregated_search_includes_agy_host(tmp_aggregation_search_dirs) -> Non
     assert {r.project_path for r in hits} == {
         "/Users/me/laptop", "/Users/me/desktop",
     }
+
+
+# ---------------------------------------------------------------------------
+# Text-only matching: opaque payloads and metadata never produce a hit
+# ---------------------------------------------------------------------------
+
+# A base64-looking run that happens to contain "wiz" (case-insensitively).
+_BLOB = "gAAAAABpD2iHCox57CKV64orXrGHWSUQzvXZv2NlJVS7TftDKwiZ9xcSlTwqV" * 4
+
+
+def _claude_blob_record(session_id: str) -> dict:
+    return {
+        "type": "assistant",
+        "sessionId": session_id,
+        "cwd": "/Users/me/repo",
+        "message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "considering", "signature": _BLOB},
+        ]},
+    }
+
+
+def test_ripgrep_search_drops_blob_only_matches(tmp_search_dirs) -> None:
+    """A query that appears only inside a thinking signature is not a hit."""
+    _require_rg()
+    project = tmp_search_dirs["claude_projects"] / "-Users-me-repo"
+    write_jsonl(project / "blob-only.jsonl", [_claude_blob_record("blob-only")])
+
+    assert search.ripgrep_search("wiz") == []
+
+
+def test_ripgrep_search_reads_past_a_blob_first_match(tmp_search_dirs) -> None:
+    """ripgrep's first matching line is a blob; the real hit is further down."""
+    _require_rg()
+    project = tmp_search_dirs["claude_projects"] / "-Users-me-repo"
+    write_jsonl(project / "mixed.jsonl", [
+        _claude_blob_record("mixed"),
+        {"type": "user", "sessionId": "mixed", "cwd": "/Users/me/repo",
+         "message": {"role": "user", "content": "Make Anki cards about Wiz."}},
+    ])
+
+    results = search.ripgrep_search("wiz")
+    assert [r.session_id for r in results] == ["mixed"]
+    assert results[0].matched_line == "Make Anki cards about Wiz."
+    assert results[0].project_path == "/Users/me/repo"
+
+
+def test_ripgrep_search_drops_metadata_only_matches(tmp_search_dirs) -> None:
+    """A query found only in the record envelope (cwd) is not a hit."""
+    _require_rg()
+    project = tmp_search_dirs["claude_projects"] / "-Users-me-needlerepo"
+    write_jsonl(project / "meta.jsonl", [
+        {"type": "user", "sessionId": "meta", "cwd": "/Users/me/needlerepo",
+         "message": {"role": "user", "content": "hello"}},
+    ])
+
+    assert search.ripgrep_search("needlerepo") == []
+
+
+def test_ripgrep_search_regex_snippet_shows_the_match(tmp_search_dirs) -> None:
+    _require_rg()
+    project = tmp_search_dirs["claude_projects"] / "-Users-me-repo"
+    text = ("filler " * 80) + "we use Wiz daily " + ("filler " * 80)
+    write_jsonl(project / "rx.jsonl", [
+        {"type": "user", "sessionId": "wizard", "cwd": "/Users/me/repo",
+         "message": {"role": "user", "content": "run the setup wizard"}},
+    ])
+    write_jsonl(project / "rx2.jsonl", [
+        {"type": "user", "sessionId": "rx", "cwd": "/Users/me/repo",
+         "message": {"role": "user", "content": text}},
+    ])
+
+    results = search.ripgrep_search(r"\bwiz\b")
+    assert [r.session_id for r in results] == ["rx"]
+    assert "Wiz" in results[0].matched_line
+
+
+def test_ripgrep_search_codex_ignores_encrypted_reasoning(tmp_search_dirs) -> None:
+    _require_rg()
+    rollout = (
+        tmp_search_dirs["codex_sessions"] / "2026" / "01" / "01"
+        / "rollout-2026-01-01T00-00-00-11111111-2222-4333-8444-555555555555.jsonl"
+    )
+    write_jsonl(rollout, [
+        {"type": "session_meta",
+         "payload": {"id": "11111111-2222-4333-8444-555555555555", "cwd": "/Users/me/repo"}},
+        {"type": "response_item",
+         "payload": {"type": "reasoning", "summary": [], "encrypted_content": _BLOB}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "hello"}},
+    ])
+
+    assert search.ripgrep_search("wiz") == []
+    assert [r.session_id for r in search.ripgrep_search("hello")] == [
+        "11111111-2222-4333-8444-555555555555"
+    ]
+
+
+def test_ripgrep_search_gemini_ignores_non_message_fields(tmp_search_dirs) -> None:
+    """A Gemini file is one JSON document; only its messages are searched."""
+    _require_rg()
+    from tests.helpers import write_gemini_projects, write_gemini_session
+
+    gemini_tmp = tmp_search_dirs["gemini_tmp"]
+    write_gemini_projects(gemini_tmp.parent, {"/Users/me/gem": "gem"})
+    write_gemini_session(
+        gemini_tmp / "gem" / "chats" / "session-2026-01-01T00-00-gem1.json",
+        session_id="needle-in-the-id",
+        messages=[{
+            "id": "u1", "timestamp": "2026-01-01T00:00:01.000Z",
+            "type": "user", "content": [{"text": "hello there"}],
+        }],
+    )
+
+    assert [r for r in search.ripgrep_search("needle-in-the-id")
+            if r.provider is Provider.GEMINI] == []
+    hits = [r for r in search.ripgrep_search("hello there")
+            if r.provider is Provider.GEMINI]
+    assert len(hits) == 1
+    assert hits[0].matched_line == "hello there"
+
+
+def test_ripgrep_search_cline_ignores_non_message_fields(tmp_search_dirs) -> None:
+    _require_rg()
+    from tests.helpers import write_cline_session
+
+    write_cline_session(
+        tmp_search_dirs["cline_sessions"].parent,
+        session_id="1788435477952_eibi9",
+        workspace_root="/Users/me/cline-repo",
+        messages=[{
+            "id": "needle-message-id", "role": "user", "ts": 1788435478090,
+            "content": [{"type": "text", "text": "plain words"}],
+        }],
+    )
+
+    assert [r for r in search.ripgrep_search("needle-message-id")
+            if r.provider is Provider.CLINE] == []
+    assert len([r for r in search.ripgrep_search("plain words")
+                if r.provider is Provider.CLINE]) == 1
+
+
+def test_ripgrep_search_agy_ignores_rewound_steps(tmp_search_dirs) -> None:
+    """Steps a /rewind abandoned stay in the file but not in the transcript."""
+    _require_rg()
+    from tests.helpers import agy_reply, agy_user, write_agy_conversation
+
+    write_agy_conversation(
+        tmp_search_dirs["agy_data"],
+        records=[
+            agy_user(0, "abandoned needle prompt"),
+            agy_reply(1, "old reply"),
+            agy_user(0, "the prompt that was kept"),
+            agy_reply(1, "new reply"),
+        ],
+    )
+
+    assert [r for r in search.ripgrep_search("abandoned needle")
+            if r.provider is Provider.AGY] == []
+    assert len([r for r in search.ripgrep_search("prompt that was kept")
+                if r.provider is Provider.AGY]) == 1
+
+
+def test_ripgrep_search_opencode_storage_ignores_ids(tmp_search_dirs) -> None:
+    """A legacy opencode part matching only in an id does not claim the session."""
+    _require_rg()
+    from tests.helpers import write_opencode_storage_session
+
+    write_opencode_storage_session(
+        tmp_search_dirs["opencode_data"],
+        session_id="ses_needleid",
+        title="Fix the bug",
+        messages=[{"id": "msg_1", "role": "user"}],
+        parts={"msg_1": [{
+            "id": "prt_1", "type": "text", "text": "plain words",
+            "sessionID": "ses_needleid", "messageID": "msg_1",
+        }]},
+    )
+
+    assert [r for r in search.ripgrep_search("ses_needleid")
+            if r.provider is Provider.OPENCODE] == []
+    hits = [r for r in search.ripgrep_search("plain words")
+            if r.provider is Provider.OPENCODE]
+    assert [r.session_id for r in hits] == ["ses_needleid"]
