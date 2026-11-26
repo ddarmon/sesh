@@ -1347,6 +1347,23 @@ class SeshApp(App):
             f"q:Quit /:Search f:Filter o:Open ?:Help"
         )
 
+    def _session_for_search_result(self, result: SearchResult) -> SessionMeta | None:
+        """The session a search result refers to.
+
+        Prefers the discovered session (real title, timestamps, and source
+        path); a hit in a session discovery does not know falls back to a
+        minimal one reconstructed from the matched file.
+        """
+        for sess_list in self.sessions.values():
+            for s in sess_list:
+                if (
+                    s.id == result.session_id
+                    and s.provider == result.provider
+                    and s.host == result.host
+                ):
+                    return s
+        return self._session_from_search_result(result)
+
     @staticmethod
     def _session_from_search_result(result: SearchResult) -> SessionMeta | None:
         """Convert a SearchResult into a SessionMeta for message loading."""
@@ -1537,7 +1554,7 @@ class SeshApp(App):
                 group="messages",
             )
         elif isinstance(data, SearchResult):
-            session = self._session_from_search_result(data)
+            session = self._session_for_search_result(data)
             if session:
                 self.run_worker(
                     lambda: self._load_messages(session),
@@ -1892,14 +1909,17 @@ class SeshApp(App):
         return lookup or None
 
     def _fulltext_search(self, query: str) -> None:
-        """Run ripgrep full-text search in a thread."""
-        from sesh.search import ripgrep_search
+        """Search titles and transcript text in a thread; results are ranked."""
+        from sesh.search import search_sessions
         cwd_lookup = self._build_cwd_lookup()
-        results = ripgrep_search(
+        sessions = [s for sess_list in self.sessions.values() for s in sess_list]
+        results = search_sessions(
             query,
+            sessions,
             aggregation_root=self._aggregation_root,
             cwd_lookup=cwd_lookup,
         )
+
         if results:
             self.call_from_thread(self._show_search_results, results, query)
         else:
@@ -1918,8 +1938,18 @@ class SeshApp(App):
             proj_name = proj.display_name if proj else r.project_path.rsplit("/", 1)[-1]
             host_prefix = f"[{r.host}] " if r.host else ""
             agent_marker = "⑂ " if r.agent_id else ""
+            # Rows arrive ranked (title matches, then most recently active),
+            # so each shows its age, then the title (what the session is),
+            # then the matched text. A title-only match has no snippet; a hit
+            # in a session discovery does not know has no title.
+            age = f"{_relative_time(r.timestamp)}  " if r.timestamp else ""
+            # Titles can be a whole multi-line prompt; cap like _session_label.
+            title = " ".join((r.title or "").split())[:50]
             snippet = r.matched_line.replace("\n", " ")[:80]
-            label = f"[{badge}] {agent_marker}{host_prefix}{proj_name} — {snippet}"
+            detail = " · ".join(part for part in (title, snippet) if part)
+            label = (
+                f"[{badge}] {agent_marker}{age}{host_prefix}{proj_name} — {detail}"
+            )
             child = node.add_leaf(label)
             child.data = r
 
@@ -1979,7 +2009,7 @@ class SeshApp(App):
             return
         data = node.data
         if isinstance(data, SearchResult):
-            session = self._session_from_search_result(data)
+            session = self._session_for_search_result(data)
         elif isinstance(data, SessionMeta):
             session = data
         else:
@@ -2004,7 +2034,7 @@ class SeshApp(App):
         if isinstance(node.data, SessionMeta):
             return node.data
         if isinstance(node.data, SearchResult):
-            return self._session_from_search_result(node.data)
+            return self._session_for_search_result(node.data)
         return None
 
     def _browser_snapshot(
@@ -2285,7 +2315,7 @@ class SeshApp(App):
             return
         data = node.data
         if isinstance(data, SearchResult):
-            session = self._session_from_search_result(data)
+            session = self._session_for_search_result(data)
         elif isinstance(data, SessionMeta):
             session = data
         else:
@@ -2373,7 +2403,7 @@ class SeshApp(App):
         if isinstance(node.data, SessionMeta):
             self._open_session(node.data)
         elif isinstance(node.data, SearchResult):
-            session = self._session_from_search_result(node.data)
+            session = self._session_for_search_result(node.data)
             if session:
                 self._open_session(session)
 

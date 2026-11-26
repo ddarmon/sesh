@@ -748,3 +748,55 @@ async def test_aggregation_startup_skips_local_index(monkeypatch, tmp_path):
     assert calls == [], "load_index must not be called during aggregation startup"
     assert app.projects == {}
     assert app.sessions == {}
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_fulltext_search_rows_are_ranked_and_titled(app, monkeypatch):
+    """Enter-search shows title matches first, then newest, with titles in rows,
+    and a selected hit resolves to the discovered session (real timestamp)."""
+    from datetime import datetime, timezone
+
+    from sesh import search
+    from sesh.models import Provider, SearchResult
+    from tests.helpers import make_session
+
+    sesh_app, _pilot = app
+    sessions = [
+        make_session(id="old", summary="Credit\nresearch " + "x" * 80,
+                     timestamp=datetime(2026, 10, 1, tzinfo=timezone.utc)),
+        make_session(id="new", summary="Search usability",
+                     timestamp=datetime(2026, 11, 26, tzinfo=timezone.utc)),
+        make_session(id="titled", summary="Wiz IDAM flashcards",
+                     timestamp=datetime(2026, 11, 24, tzinfo=timezone.utc)),
+    ]
+    sesh_app.sessions = {"/tmp/project": sessions}
+
+    def _hit(sid: str) -> SearchResult:
+        return SearchResult(
+            session_id=sid, project_path="/tmp/project", provider=Provider.CLAUDE,
+            matched_line=f"wiz text in {sid}",
+            file_path=f"/tmp/.claude/projects/-tmp-project/{sid}.jsonl",
+        )
+
+    monkeypatch.setattr(search, "ripgrep_search", lambda q, **_kw: [_hit("old"), _hit("new")])
+    monkeypatch.setattr(sesh_app, "call_from_thread", lambda fn, *a: fn(*a))
+    sesh_app._fulltext_search("wiz")
+
+    tree = sesh_app.query_one("#session-tree")
+    leaves = list(tree.root.children[0].children)
+    assert [leaf.data.session_id for leaf in leaves] == ["titled", "new", "old"]
+    labels = [str(leaf.label) for leaf in leaves]
+    assert "Wiz IDAM flashcards" in labels[0]
+    assert "Search usability · wiz text in new" in labels[1]
+    # Age leads the row; a long multi-line title is flattened and capped.
+    from sesh.app import _relative_time
+
+    assert labels[0].startswith(f"[C] {_relative_time(sessions[2].timestamp)}  ")
+    assert "\n" not in labels[2]
+    assert ("Credit research " + "x" * 34 + " · wiz text in old") in labels[2]
+
+    resolved = sesh_app._session_for_search_result(leaves[1].data)
+    assert resolved is sessions[1]
+    # A hit discovery does not know still yields a loadable session.
+    assert sesh_app._session_for_search_result(_hit("unknown")).id == "unknown"
