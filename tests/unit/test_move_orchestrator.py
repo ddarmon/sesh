@@ -282,8 +282,14 @@ def test_move_project_orchestrates_providers_and_invalidates_caches(
     assert not move.PROJECT_PATHS_FILE.exists()
 
 
-def test_move_project_captures_provider_exception(tmp_path: Path, monkeypatch) -> None:
-    """A provider exception is captured in the MoveReport rather than aborting the whole move."""
+def test_move_project_captures_provider_exception(
+    tmp_path: Path, monkeypatch, tmp_move_dirs
+) -> None:
+    """A provider exception is captured in the MoveReport rather than aborting the whole move.
+
+    ``tmp_move_dirs`` keeps the providers this test does not stub, and the
+    cache invalidation at the end of a move, off the real home directory.
+    """
     old_path = tmp_path / "old"
     new_path = tmp_path / "new"
     old_path.mkdir()
