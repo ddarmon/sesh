@@ -145,6 +145,28 @@ def tmp_cache_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def isolate_cache_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every test away from the real sessions cache and index.
+
+    Autouse: ``move.move_project`` deletes these files and discovery rewrites
+    them, so a test that reaches either without ``tmp_cache_dir`` /
+    ``tmp_move_dirs`` would otherwise touch the user's ``~/.cache/sesh``.
+    ``move`` copies the constants at import, so it is patched as well. The
+    paths match the ones those two fixtures use.
+    """
+    from sesh import cache, move
+
+    cache_dir = tmp_path / "cache" / "sesh"
+    monkeypatch.setattr(cache, "CACHE_DIR", cache_dir)
+    for module in (cache, move):
+        monkeypatch.setattr(module, "CACHE_FILE", cache_dir / "sessions.json")
+        monkeypatch.setattr(module, "INDEX_FILE", cache_dir / "index.json")
+        monkeypatch.setattr(
+            module, "PROJECT_PATHS_FILE", cache_dir / "project_paths.json"
+        )
+
+
+@pytest.fixture(autouse=True)
 def isolate_app_preferences(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep SeshApp tests independent of any real user preference file."""
     import sesh.app as app_mod
