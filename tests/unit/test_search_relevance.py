@@ -7,9 +7,17 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from sesh import search
 from sesh.models import Provider, SearchResult
-from tests.helpers import create_opencode_db, make_session, write_jsonl
+from tests.helpers import (
+    create_opencode_db,
+    create_opencode_v2_db,
+    create_store_db,
+    make_session,
+    write_jsonl,
+)
 
 # A long base64-looking run that happens to contain the query "wiz".
 BLOB = "gAAAAABpD2iHCox57CKV64orXrGHWSUQzvXZv2NlJVS7TftDKwiZ9xcSlTwqV" * 4
@@ -64,6 +72,14 @@ def test_like_filter_only_narrows_literal_queries() -> None:
         "data LIKE ? ESCAPE '!'", ("%50!%%",),
     )
     assert search._like_filter("data", search._Matcher(r"\bwiz\b")) == ("1", ())
+
+
+@pytest.mark.parametrize("query", ["teammate. (turn", r"\p{L}+needle"])
+def test_like_filter_selects_nothing_for_an_unverifiable_query(query) -> None:
+    """No ripgrep prefilter ran, so an accept-anything matcher must see no rows."""
+    m = search._Matcher(query)
+    assert not m.verified
+    assert search._like_filter("data", m) == ("0", ())
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +191,50 @@ def test_search_opencode_db_regex_query(tmp_search_dirs) -> None:
     results = search._search_opencode_db(r"\bwiz\b", data_dir, None)
     assert [r.session_id for r in results] == ["ses_db"]
     assert results[0].matched_line == "we use Wiz daily"
+
+
+@pytest.mark.parametrize("query", ["teammate. (turn", r"\p{L}+needle"])
+def test_search_opencode_db_unverifiable_query_matches_nothing(
+    tmp_search_dirs, query,
+) -> None:
+    """An uncompilable regex used to report every opencode session as a hit."""
+    data_dir = tmp_search_dirs["opencode_data"]
+    create_opencode_db(
+        data_dir / "opencode.db",
+        sessions=[{"id": "ses_db", "directory": "/Users/me/repo", "title": "t",
+                   "time_created": 1, "time_updated": 2}],
+        messages=[{"id": "msg_1", "session_id": "ses_db", "data": {"role": "user"}}],
+        parts=[{"id": "prt_1", "message_id": "msg_1", "session_id": "ses_db",
+                "data": {"type": "text", "text": "Hi there!"}}],
+    )
+    assert search._search_opencode_db(query, data_dir, None) == []
+
+
+def test_search_opencode_v2_unverifiable_query_matches_nothing(tmp_search_dirs) -> None:
+    data_dir = tmp_search_dirs["opencode_data"]
+    create_opencode_v2_db(
+        data_dir / "opencode.db",
+        sessions=[{"id": "ses_v2", "directory": "/Users/me/repo"}],
+        messages=[{"id": "msg_1", "session_id": "ses_v2", "type": "user", "seq": 1,
+                   "data": {"time": {"created": 1}, "text": "Hi there!", "files": []}}],
+    )
+    assert search._search_opencode_db("teammate. (turn", data_dir, None) == []
+
+
+def test_search_cursor_stores_unverifiable_query_matches_nothing(tmp_search_dirs) -> None:
+    store_db = tmp_search_dirs["cursor_chats"] / "hash1" / "sess1" / "store.db"
+    create_store_db(
+        store_db,
+        blobs=[
+            {"content": "Workspace Path: /Users/me/repo\nmeta"},
+            {"role": "user", "content": "Hi there!"},
+        ],
+    )
+    # Control: the fixture is searchable, so the empty result below is the fix.
+    assert search._search_cursor_stores("hi there", tmp_search_dirs["cursor_chats"], None)
+    assert search._search_cursor_stores(
+        "teammate. (turn", tmp_search_dirs["cursor_chats"], None,
+    ) == []
 
 
 # ---------------------------------------------------------------------------
