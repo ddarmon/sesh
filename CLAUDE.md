@@ -905,7 +905,7 @@ the index, then query it.
 | `sesh sessions [--project PATH] [--provider NAME] [--since DATE] [--until DATE] [--limit N] [--bookmarked]` | List sessions with optional filters      |
 | `sesh stats [--project PATH] [--provider NAME]`                                                           | Aggregate session statistics from the index |
 | `sesh messages <id\|last> [--limit N] [--offset N] [--summary] [--include-tools] [--include-thinking] [--full] [--include-hidden]` | Load messages for a session              |
-| `sesh search <query> [--provider NAME] [--project PATH]`                                                  | Full-text search across providers        |
+| `sesh search <query> [--titles-only] [--provider NAME] [--project PATH] [--since DATE] [--until DATE] [--limit N]` | Search session titles and transcript text, ranked |
 | `sesh bookmarks`                                                                                          | List bookmarked sessions (joined with the index) |
 | `sesh delete <id\|last> [--provider NAME] [--history] [--force] [--dry-run]`                              | Delete a session by ID, or the most recent with `last` |
 | `sesh clean <query>\|--empty [--history] [--force] [--dry-run]`                                           | Delete sessions matching a search query, or all empty sessions |
@@ -929,7 +929,8 @@ session (the newest `timestamp` in the index); `--provider` scopes
 `last` to one provider. `view`, `messages`, `export`, `delete`, and
 `clean` discover fresh via `_refresh_index` before resolving (so a
 just-created session — including `last` — needs no manual `sesh
-refresh`); discovery is incremental via the on-disk cache. The remaining
+refresh`); discovery is incremental via the on-disk cache. `search` does the
+same, for current titles and timestamps. The remaining
 read commands (`projects`, `sessions`, `stats`, `bookmarks`) read the
 on-disk index via `_require_index` and still require a prior `refresh`. `sesh sessions --since/--until` accept ISO
 dates or datetimes (e.g. `2026-06-01`); timezone-naive values are
@@ -1058,6 +1059,55 @@ local CLI state anyway):
 Provider entry-points respect aggregation mode via the new constructor
 parameters `base_dir` and `host` (see `src/sesh/providers/*.py`). The
 multiplexing layer is in `discovery._discover_aggregated()`.
+
+## Search
+
+`sesh search` (and the TUI's `Enter` full-text search) is implemented in
+`search.py`. `ripgrep_search` finds transcript hits; `search_sessions` joins
+them to the session index, adds title matches, and ranks. The TUI still calls
+`ripgrep_search` directly and shows its results unranked.
+
+-   **One matcher.** `search._Matcher` is the single definition of "this text
+    matches the query" for every provider: case-insensitive, a literal string
+    unless the query contains regex metacharacters (the same rule that decides
+    ripgrep's `-F`). ripgrep and SQLite `LIKE` are only prefilters; the
+    matcher always decides, on extracted text. `LIKE` cannot narrow a regex
+    query, so the SQLite paths then scan every row (`_like_filter`). A regex
+    ripgrep accepts but Python's `re` cannot compile (e.g. `\p{L}`) leaves
+    the matcher *unverified*: raw ripgrep hits are kept and no title matches.
+-   **Text-only matching.** A hit counts only if the query appears in text the
+    transcript renders (message text, tool input/output, thinking). Raw
+    transcript lines also hold base64 payloads (Codex `encrypted_content`,
+    Claude thinking `signature`s, inline images) that a short query matches by
+    chance, plus envelope metadata (ids, `cwd`). Per provider:
+    -   Claude, Codex, Copilot, pi (JSONL): `_entry_texts` extracts one
+        record's text. ripgrep runs with `-m 1`, so it reports only a file's
+        first raw match; when that record's text does not match,
+        `_first_text_match` continues down the same file. Claude records whose
+        `type` is not `user`/`assistant`/absent are skipped (an
+        `api-request-blob` holds the raw request, skill listings included), as
+        are Codex `user`/`developer`/`system` response items (injected
+        instructions; a typed prompt is the `user_message` event).
+    -   Gemini, Cline, Antigravity: a matched line cannot be judged alone
+        (pretty-printed JSON; rewound agy steps), so each candidate file is
+        loaded through the provider's own message loader
+        (`_document_snippet`).
+    -   opencode (SQLite and legacy JSON) and Cursor `store.db`: matched on the
+        extracted part/blob text. Cursor `.txt` transcripts are plain text.
+-   **Not projected:** JSONL hits are per record, so a hit inside a rewound
+    Claude/Codex/pi branch still counts. Flat-format Codex rollouts from 2025
+    (no `payload` wrapper) are searchable although the Codex provider renders
+    no messages for them.
+-   **Titles and ranking.** `search_sessions` gives each hit its session's
+    `title` and `timestamp` (file mtime when the session is not in the index),
+    adds sessions whose title matches but whose transcript did not as
+    title-only results (`matched_line` empty), and sets `matched_in`
+    (`title` / `content`). `rank_results` orders title matches first, then
+    most recently active. `sesh search` discovers fresh via `_refresh_index`,
+    emits `id` alongside the older `session_id`, and applies
+    `--provider`/`--project`/`--since`/`--until`, then `--limit`.
+    `--titles-only` skips ripgrep entirely. `sesh clean <query>` uses
+    `ripgrep_search` alone: transcript text only, never titles.
 
 `sesh search` is aggregation-aware: in aggregation mode it runs one
 ripgrep per host subtree and every `SearchResult` carries a `host`

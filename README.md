@@ -140,9 +140,11 @@ bar](assets/fullscreen-view.png)
 
 -   **Filter-as-you-type**: Typing in the search bar instantly filters
     the tree by project name and session summary.
--   **Full-text search**: Press `Enter` to run a ripgrep search across
-    all session JSONL files. Results appear in the tree with provider
-    badges and matched context.
+-   **Full-text search**: Press `Enter` to search transcript text across
+    all providers. Only text the transcript shows is matched (messages,
+    tool calls and results, thinking), so encoded payloads and record
+    metadata never produce a hit. Results appear in the tree with
+    provider badges and matched context.
 
 ![Search results for "authentication" across
 providers](assets/search-results.png)
@@ -193,8 +195,10 @@ sesh messages <session-id> --summary      # user messages only
 sesh messages <session-id> --limit 10     # first 10 messages
 sesh messages <session-id> --include-tools  # include tool calls/results
 sesh messages <session-id> --full         # include tools + thinking
-sesh search "some query"                  # full-text search via ripgrep
+sesh search "some query"                  # search titles + transcript text, ranked
+sesh search "some query" --titles-only    # session titles only
 sesh search "some query" --provider claude --project /path  # filter results
+sesh search "some query" --since 2026-06-01 --limit 10      # newest 10 since a date
 sesh bookmarks                            # list bookmarked sessions
 sesh delete <session-id>                  # delete a single session by ID
 sesh delete last                          # delete the most recently active session
@@ -421,10 +425,13 @@ sesh messages last --summary                  # or any <session-id>
 
 **"Find all sessions where I worked on authentication"**
 
-Full-text search returns matching sessions with context:
+Search covers session titles and transcript text. Each result carries
+the session `id`, `title`, `timestamp`, where the query matched
+(`matched_in`), and a snippet; title matches come first, then the most
+recently active:
 
 ```
-sesh search "authentication"
+sesh search "authentication" --limit 10
 sesh messages <session-id> --limit 20
 ```
 
