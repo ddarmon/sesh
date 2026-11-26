@@ -110,3 +110,9 @@ step. `sesh resume SESSION_ID` launches an interactive provider CLI: offer the
 command rather than nesting it inside an agent's tool execution unless the user
 has requested that behavior. `sesh follow SESSION_ID` stays running until stopped;
 agree on how it will be launched and stopped before using it.
+
+Each tab's `resume.source` in a snapshot says how its session was identified.
+`process` and `argv` come from the running agent process; `activity` and
+`search` are inferences and carry `"guess": true` (also on the matching
+`reopen --dry-run` plan item). Confirm a guessed session with the user before
+reopening it.

@@ -1429,11 +1429,13 @@ def cmd_snapshot_save(args: argparse.Namespace) -> None:
 
     path = snapshots.save(snap)
     resumable = sum(1 for t in snap.tabs if t.resume is not None)
+    guessed = sum(1 for t in snap.tabs if t.resume is not None and t.resume.is_guess)
     _json_out({
         "id": snap.id,
         "path": str(path),
         "tab_count": len(snap.tabs),
         "resumable": resumable,
+        "guessed": guessed,
     })
 
 

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sesh.models import (
+    LiveProcess,
     Message,
     MoveReport,
     Provider,
@@ -25,6 +26,10 @@ from sesh.providers import SessionProvider
 from sesh.providers.history import active_ancestor_ids
 
 CLAUDE_DIR = Path.home() / ".claude"
+
+# How far a ``sessions/{pid}.json`` record's ``startedAt`` may sit from the
+# process's own start time and still describe that process (seconds).
+_LIVE_RECORD_START_TOLERANCE = 300
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 HISTORY_FILE = CLAUDE_DIR / "history.jsonl"
 
@@ -1428,6 +1433,33 @@ class ClaudeProvider(SessionProvider):
                 paste_file.unlink(missing_ok=True)
             report.files_removed.append(str(paste_file))
         return report
+
+    def live_session_id(self, process: LiveProcess) -> str | None:
+        """Read the session a running ``claude`` process holds.
+
+        Claude Code keeps ``~/.claude/sessions/{pid}.json`` for each live
+        process and rewrites its ``sessionId`` when the session changes
+        inside the app, so this stays right after ``/clear`` or ``/resume``.
+        The file can outlive its process, and pids are reused: a record
+        whose ``startedAt`` is not near this process's start time belongs to
+        an earlier process and is ignored.
+        """
+        path = self._claude_dir / "sessions" / f"{process.pid}.json"
+        try:
+            with open(path) as f:
+                record = json.load(f)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict) or record.get("pid") != process.pid:
+            return None
+        session_id = record.get("sessionId")
+        if not isinstance(session_id, str) or not _is_safe_session_id(session_id):
+            return None
+        started_at = record.get("startedAt")
+        if process.start is not None and isinstance(started_at, (int, float)):
+            if abs(started_at / 1000 - process.start) > _LIVE_RECORD_START_TOLERANCE:
+                return None
+        return session_id
 
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a Claude session by removing its lines from JSONL files."""

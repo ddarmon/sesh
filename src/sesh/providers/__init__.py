@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from pathlib import Path
 
-from sesh.models import Message, MoveReport, Project, SessionMeta
+from sesh.models import LiveProcess, Message, MoveReport, Project, SessionMeta
 from sesh.prompt_history import HistoryReport
 
 
@@ -62,6 +62,16 @@ class SessionProvider(ABC):
         empty one (e.g. an unrecognized database schema).
         """
         return []
+
+    def live_session_id(self, process: LiveProcess) -> str | None:
+        """Return the id of the session a running CLI process has open.
+
+        Non-abstract: only providers whose CLI records which session a
+        process holds (a pid-keyed file, a lock the process keeps open)
+        override it. Returning None means "no such record", and the caller
+        falls back to weaker evidence. Must never guess.
+        """
+        return None
 
     def delete_session(self, session: SessionMeta) -> None:
         """Delete a session's stored data. Override per provider."""

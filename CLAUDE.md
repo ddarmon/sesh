@@ -968,19 +968,52 @@ Layout:
     `_run_osascript`, `_resolve_cwd` (via `ps` + `lsof`), and
     AppleScript snippets for capture and restore.
 
-Resume metadata is resolved at **save time**, not at restore time:
+Resume metadata is resolved at **save time**, not at restore time, and
+starts from the tab's processes rather than its scrollback
+(`snapshots/live.py`, `core._resolve_resume`). The backend lists every
+process on the tab's tty (`CapturedTab.processes`); `live.find_agent` picks
+the earliest-started one whose binary is a provider CLI (seeing through a
+`node` launcher). `SnapshotResume.source` records which tier answered:
 
-1.  Scrollback is scanned for the LAST explicit `claude --resume <id>`,
-    `codex resume <id>`, `agent --resume=<id>`, `copilot --resume=<id>`,
-    `agy --conversation <uuid>`,
-    `gemini --resume <uuid>` (full UUIDs only --- `latest` and index
-    numbers are not session ids), or `pi --session <id>` line
-    (`_parse_explicit_resume`).
-2.  If no explicit line is found, distinctive scrollback phrases are fed
-    to `sesh.search.ripgrep_search` until one returns a result whose
-    `project_path` matches the tab's CWD (`_search_recover`).
-    Tie-breaker cascade: index mtime → on-disk file mtime → ripgrep
-    result order.
+1.  `process` --- the provider's own record of what that process has open,
+    through the optional `SessionProvider.live_session_id(LiveProcess)` hook.
+    It follows in-app session switches. Implemented where the CLI keeps such
+    a record (each verified against a live process):
+    -   **Claude**: `~/.claude/sessions/{pid}.json` (`sessionId`; a record
+        whose `startedAt` is more than 300 s from the process start is a
+        reused pid and is ignored).
+    -   **Copilot**: `session-state/{id}/inuse.{pid}.lock`, where the pid is
+        the native child of the `node` launcher, so the whole process tree
+        (`LiveProcess.pids`) is tried.
+    -   **agy**: the `presence/{id}.lock` the process holds open (`lsof`).
+        The files are empty and outlive the process, so only an open one
+        counts; sub-agent locks map to their root.
+    Codex, pi, Gemini, and opencode keep no such record (Codex's
+    `thread-writer-locks/{id}.lock` carries no pid and is not held open; the
+    opencode TUI is a client of a shared `opencode serve` process).
+2.  `argv` --- a session id on the agent's command line (`codex resume <id>`,
+    `pi --session <id>`, ...). Exact at launch, stale if the session was
+    switched in-app afterward. A fork (`--fork-session`, `codex fork`) is
+    skipped: it names the session it copied.
+3.  `activity` --- the only session of that provider in the tab's cwd whose
+    last activity is after the process started (fresh discovery, run only
+    when a tab reaches this tier).
+4.  `search` --- several such sessions (or none): scrollback phrases are fed
+    to `ripgrep_search`, and a hit counts only for that provider, that cwd,
+    and, when there are candidates, one of them.
+
+A tab with no agent process (or a backend that lists no processes) falls
+back to its scrollback: the LAST explicit resume line
+(`_parse_explicit_resume`, source `explicit`), then phrase search over every
+resumable provider. When no tier answers, the tab gets **no** resume command
+rather than a doubtful one.
+
+`activity` and `search` are guesses (`SnapshotResume.is_guess`): the snapshot
+JSON carries `"guess": true`, and the restore plan marks the row
+`(guessed session)` in the TUI preview and in `sesh snapshot reopen` output.
+Scrollback phrases are cut from the longest run of words free of regex
+metacharacters (`_longest_literal_run`), because `ripgrep_search` treats any
+query holding one as a regex.
 
 Snapshot files live at `$XDG_DATA_HOME/sesh/snapshots/<id>.json`
 (default `~/.local/share/sesh/snapshots/`). Files include
@@ -988,7 +1021,9 @@ Snapshot files live at `$XDG_DATA_HOME/sesh/snapshots/<id>.json`
 `SnapshotsSchemaError`.
 
 Tests stub `_run_osascript`, `_resolve_cwd`, and `ripgrep_search`; no
-real Terminal.app or `osascript` calls happen in the suite. The
+real Terminal.app or `osascript` calls happen in the suite. An autouse
+`isolate_live_processes` fixture stubs `_tty_processes` and
+`live.list_open_files`, so no test runs real `ps` or `lsof`. The
 `fake_backend` and `tmp_snapshots_dir` fixtures in `tests/conftest.py`
 let cross-platform tests exercise the core, CLI, and TUI paths.
 

@@ -606,9 +606,11 @@ class SnapshotsScreen(ModalScreen[None]):
 
         def _after():
             self._refresh_list()
+            guessed = sum(1 for t in snap.tabs if t.resume and t.resume.is_guess)
+            guess_note = f", {guessed} guessed" if guessed else ""
             self._set_status(
                 f"Saved {snap.id} ({len(snap.tabs)} tabs, "
-                f"{sum(1 for t in snap.tabs if t.resume) } resumable)"
+                f"{sum(1 for t in snap.tabs if t.resume) } resumable{guess_note})"
             )
 
         self.app.call_from_thread(_after)

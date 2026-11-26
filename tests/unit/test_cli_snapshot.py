@@ -49,6 +49,7 @@ def test_snapshot_save_writes_file_and_prints_summary(
     out = json.loads(capsys.readouterr().out)
     assert out["tab_count"] == 1
     assert out["resumable"] == 1
+    assert out["guessed"] == 0
     assert out["id"].startswith("snapshot-")
     assert Path(out["path"]).is_file()
 
