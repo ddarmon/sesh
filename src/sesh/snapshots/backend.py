@@ -37,6 +37,14 @@ class RestoreOutcome:
     note: str | None = None
 
 
+class TerminalBackendError(Exception):
+    """Raised when a backend could not talk to the terminal application.
+
+    The message is shown to the user, so it should carry the underlying
+    error text (e.g. osascript's stderr).
+    """
+
+
 class TerminalBackend(Protocol):
     name: str
 

@@ -22,7 +22,7 @@ from typing import Literal
 from sesh.models import Provider
 from sesh.paths import SNAPSHOTS_DIR
 from sesh.resume import RESUME_COMMANDS, resume_argv
-from sesh.snapshots.backend import RestoreOutcome, get_backend
+from sesh.snapshots.backend import RestoreOutcome, TerminalBackendError, get_backend
 
 
 SCHEMA_VERSION = 1
@@ -46,6 +46,10 @@ class SnapshotsError(Exception):
 
 class SnapshotsUnsupportedError(SnapshotsError):
     """Raised on platforms where no terminal backend is available."""
+
+
+class SnapshotsBackendError(SnapshotsError):
+    """Raised when the terminal backend failed to capture or reopen tabs."""
 
 
 class SnapshotsNotFoundError(SnapshotsError):
@@ -496,7 +500,10 @@ def capture() -> Snapshot:
             "terminal backend on this platform"
         )
 
-    captured = backend.capture()
+    try:
+        captured = backend.capture()
+    except TerminalBackendError as exc:
+        raise SnapshotsBackendError(f"Could not capture terminal tabs: {exc}") from exc
     index_mtimes = _index_mtime_lookup()
 
     tabs: list[SnapshotTab] = []
@@ -687,7 +694,10 @@ def restore(
             "terminal backend on this platform"
         )
 
-    outcome: RestoreOutcome = backend.restore(runnable)
+    try:
+        outcome: RestoreOutcome = backend.restore(runnable)
+    except TerminalBackendError as exc:
+        raise SnapshotsBackendError(f"Could not reopen terminal tabs: {exc}") from exc
 
     return RestoreReport(
         snapshot_id=snapshot.id,
