@@ -960,13 +960,28 @@ Layout:
     JSON I/O (`Snapshot`, `SnapshotTab`, `SnapshotResume`,
     `RestorePlan`, `RestoreReport`), `capture` / `save` / `load` /
     `list_snapshots` / `delete` / `build_restore_plan` / `restore`, and
-    resume-info resolution (explicit-line parsing then ripgrep-based
-    search recovery).
+    resume-info resolution (`_resolve_resume`: the process tiers below,
+    then scrollback explicit-line parsing and ripgrep-based search).
+-   `src/sesh/snapshots/live.py` -- process-based resume resolution:
+    `find_agent` (the tab's agent process), `live_process` (the
+    `LiveProcess` handed to `SessionProvider.live_session_id`),
+    `descendant_pids`, `list_open_files` (`lsof`), and
+    `active_candidates` (the `activity` tier).
 -   `src/sesh/snapshots/backend.py` -- `TerminalBackend` Protocol,
-    `CapturedTab` / `RestoreOutcome` dataclasses, and `get_backend()`.
+    `CapturedTab` / `RestoreOutcome` dataclasses, `TerminalBackendError`,
+    and `get_backend()`.
 -   `src/sesh/snapshots/terminal_app.py` -- Darwin/Terminal.app backend.
-    `_run_osascript`, `_resolve_cwd` (via `ps` + `lsof`), and
-    AppleScript snippets for capture and restore.
+    `_run_osascript`, `_tty_processes` and `_resolve_cwd` (via `ps` +
+    `lsof`), and AppleScript snippets for capture and restore.
+
+Backend failures are reported, never saved as an empty snapshot. The
+capture script skips a window or tab it cannot read (Terminal can list
+windows with no id, name, or tabs; asking for their tabs raises -1728),
+so one such window no longer aborts the capture. `_run_osascript` raises
+`TerminalBackendError` on a non-zero exit (carrying osascript's stderr),
+a timeout, or a missing `osascript`; `capture()` and `restore()` re-raise
+it as `SnapshotsBackendError`, which the CLI prints before exiting 1 and
+the TUI shows in the status bar.
 
 Resume metadata is resolved at **save time**, not at restore time, and
 starts from the tab's processes rather than its scrollback
@@ -1249,6 +1264,12 @@ environment.
     at an empty tmp store, because discovery, move, and search construct every
     provider; without it a test that does not stub `AgyProvider` would read or
     rewrite the real `~/.gemini/antigravity-cli`.
+-   An autouse `isolate_cache_files` fixture points the cache file
+    constants (`CACHE_FILE`, `INDEX_FILE`, `PROJECT_PATHS_FILE`) in both
+    `sesh.cache` and `sesh.move` (which copies them at import) at
+    `tmp_path`, matching `tmp_cache_dir` / `tmp_move_dirs`. Without it a
+    test that reaches discovery or a move without those fixtures would
+    rewrite or delete the real `~/.cache/sesh/` files.
 -   An autouse `isolate_app_preferences` fixture stubs
     `load_preferences`/`save_preferences` on the app module so tests
     never read or write real preference files.

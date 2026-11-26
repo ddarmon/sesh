@@ -58,8 +58,8 @@ Textual and ripgrep both support Linux.
 **Windows** -- Partially supported. The core TUI and CLI will run, but
 the Cursor provider's workspace storage path may not resolve correctly
 (it defaults to a Linux-style path instead of `AppData/Roaming/Cursor`
-on Windows). Claude Code, Codex, Copilot, pi, Gemini, and Cline path
-resolution should work via `Path.home()`. Ripgrep is available on Windows via `winget` or
+on Windows). Claude Code, Codex, Copilot, pi, Gemini, opencode, Cline,
+and Antigravity CLI path resolution should work via `Path.home()`. Ripgrep is available on Windows via `winget` or
 `choco install ripgrep`.
 
 ## Usage
@@ -353,7 +353,10 @@ sesh snapshot delete <id> --force   # delete a saved snapshot
 Snapshots live under `~/.local/share/sesh/snapshots/` (or
 `$XDG_DATA_HOME/sesh/snapshots/`). On platforms without Terminal.app
 support, the CLI exits with an error and the TUI shows the unsupported
-message in the status bar.
+message in the status bar. If `osascript` cannot talk to Terminal.app
+(for example, macOS has not granted Automation permission to control
+Terminal), capture and reopen fail with osascript's error message (the
+CLI exits non-zero) rather than saving an empty snapshot.
 
 ### Aggregation mode (cross-machine browsing)
 
