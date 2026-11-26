@@ -1080,6 +1080,9 @@ falls back to a minimal session rebuilt from the matched file.
     query, so the SQLite paths then scan every row (`_like_filter`). A regex
     ripgrep accepts but Python's `re` cannot compile (e.g. `\p{L}`) leaves
     the matcher *unverified*: raw ripgrep hits are kept and no title matches.
+    The SQLite paths have no ripgrep prefilter, so there an unverified
+    matcher selects no rows (`_like_filter` returns `0`); a query neither
+    engine can compile (e.g. an unbalanced `(`) therefore matches nothing.
 -   **Text-only matching.** A hit counts only if the query appears in text the
     transcript renders (message text, tool input/output, thinking). Raw
     transcript lines also hold base64 payloads (Codex `encrypted_content`,

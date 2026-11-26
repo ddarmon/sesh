@@ -60,7 +60,9 @@ class _Matcher:
     and the Python check on extracted message text agree. A regex ripgrep
     accepts but Python's ``re`` cannot compile leaves the matcher *unverified*:
     it then accepts any non-empty text, so such a query degrades to the raw
-    ripgrep hits instead of silently returning nothing.
+    ripgrep hits instead of silently returning nothing. That is only sound
+    for text ripgrep already matched; a search with no ripgrep prefilter
+    (the SQLite paths, titles) must return nothing for an unverified matcher.
     """
 
     def __init__(self, query: str) -> None:
@@ -887,9 +889,16 @@ def _like_filter(column: str, matcher: _Matcher) -> tuple[str, tuple]:
     ``LIKE`` can only narrow a literal query. A regex query scans every row
     and leaves the decision to the matcher, which runs on the extracted text
     either way.
+
+    An unverified matcher (a regex Python's ``re`` cannot compile) selects no
+    rows. It accepts any text, which is sound only behind a ripgrep prefilter
+    that evaluated the query; here nothing has, so scanning every row would
+    report every session as a hit.
     """
     if matcher.literal:
         return f"{column} LIKE ? ESCAPE '!'", (f"%{_escape_like(matcher.query)}%",)
+    if not matcher.verified:
+        return "0", ()
     return "1", ()
 
 
