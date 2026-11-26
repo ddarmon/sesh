@@ -10,6 +10,7 @@ from pathlib import Path
 
 from sesh.cache import CACHE_FILE, INDEX_FILE, PROJECT_PATHS_FILE
 from sesh.models import MoveReport, Provider, encode_claude_path, encode_cursor_path, workspace_uri
+from sesh.providers.agy import AgyProvider
 from sesh.providers.claude import ClaudeProvider, PROJECTS_DIR
 from sesh.providers.cline import ClineProvider, is_valid_session_id
 from sesh.providers.codex import CODEX_DIR, CodexProvider
@@ -399,6 +400,14 @@ def _dry_run_cline(old_path: str) -> MoveReport:
     )
 
 
+def _dry_run_agy(old_path: str) -> MoveReport:
+    return MoveReport(
+        provider=Provider.AGY,
+        success=True,
+        files_modified=AgyProvider().move_candidates(old_path),
+    )
+
+
 def move_project(
     old_path: str,
     new_path: str,
@@ -417,6 +426,7 @@ def move_project(
             _dry_run_pi(old_path, new_path),
             _dry_run_opencode(old_path),
             _dry_run_cline(old_path),
+            _dry_run_agy(old_path),
         ]
 
     if full_move:
@@ -435,6 +445,7 @@ def move_project(
         (Provider.PI, PiProvider()),
         (Provider.OPENCODE, OpencodeProvider()),
         (Provider.CLINE, ClineProvider()),
+        (Provider.AGY, AgyProvider()),
     ]
 
     reports: list[MoveReport] = []

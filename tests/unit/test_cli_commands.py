@@ -287,6 +287,49 @@ def test_cmd_clean_codex_child_uses_root_path(monkeypatch, capsys) -> None:
     assert out["deleted"][0]["file_path"] == "/tmp/codex/child.jsonl"
 
 
+def test_cmd_clean_agy_child_hit_deletes_the_root_once(monkeypatch, capsys) -> None:
+    """A root hit and a sub-agent hit in one agy session are one delete."""
+    import sesh.providers.agy as agy_mod
+    import sesh.search as search_mod
+    import sesh.viewcache as viewcache_mod
+
+    deleted: list[tuple[str, str]] = []
+
+    class FakeAgyProvider:
+        def delete_session(self, session):
+            deleted.append((session.id, session.source_path or ""))
+
+    monkeypatch.setattr(
+        search_mod,
+        "ripgrep_search",
+        lambda q, **_kw: [
+            SearchResult(
+                session_id="root-1",
+                provider=Provider.AGY,
+                project_path="/repo",
+                matched_line="needle",
+                file_path="/tmp/agy/brain/root-1/transcript_full.jsonl",
+            ),
+            SearchResult(
+                session_id="root-1",
+                provider=Provider.AGY,
+                project_path="/repo",
+                matched_line="needle",
+                file_path="/tmp/agy/brain/child-1/transcript_full.jsonl",
+                agent_id="child-1",
+                root_file_path="/tmp/agy/brain/root-1/transcript_full.jsonl",
+            ),
+        ],
+    )
+    monkeypatch.setattr(agy_mod, "AgyProvider", FakeAgyProvider)
+    monkeypatch.setattr(viewcache_mod, "remove_view", lambda _session_id: None)
+
+    cli.cmd_clean(_ns(query="needle", dry_run=False, force=True))
+
+    json.loads(capsys.readouterr().out)
+    assert deleted == [("root-1", "/tmp/agy/brain/root-1/transcript_full.jsonl")]
+
+
 def test_cmd_clean_dedup_regression(monkeypatch, capsys) -> None:
     """Same Claude session matched in two JSONL files is deleted only once.
 

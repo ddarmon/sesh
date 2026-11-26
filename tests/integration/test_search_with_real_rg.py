@@ -664,3 +664,82 @@ def test_ripgrep_search_skips_cline_subagent_transcripts(tmp_search_dirs) -> Non
     results = search.ripgrep_search("shared needle text")
     hits = [r for r in results if r.provider is Provider.CLINE]
     assert [r.session_id for r in hits] == ["1_a"]
+
+
+def test_ripgrep_search_finds_agy_transcript(tmp_search_dirs) -> None:
+    """Real rg binary finds a query term inside an agy transcript, once."""
+    _require_rg()
+    from tests.helpers import agy_reply, agy_user, write_agy_conversation
+
+    conversation_id = "11111111-1111-4111-8111-111111111111"
+    transcript = write_agy_conversation(
+        tmp_search_dirs["agy_data"],
+        conversation_id=conversation_id,
+        workspace="/Users/me/agy repo",
+        records=[agy_user(0, "Agy needle token"), agy_reply(1, "found it")],
+    )
+    # agy also keeps chunked copies of the same records; they must not
+    # produce a second hit for the session.
+    chunk = transcript.parent / "chunks" / "transcript_full" / "00000000.jsonl"
+    chunk.parent.mkdir(parents=True)
+    chunk.write_text(transcript.read_text())
+
+    results = search.ripgrep_search("agy needle")
+    hits = [r for r in results if r.provider is Provider.AGY]
+    assert len(hits) == 1
+    assert hits[0].session_id == conversation_id
+    assert hits[0].project_path == "/Users/me/agy repo"
+    assert hits[0].file_path == str(transcript)
+    assert hits[0].agent_id is None
+    assert hits[0].root_file_path is None
+    assert hits[0].host is None
+
+
+def test_ripgrep_search_attributes_agy_subagent_hit_to_root(tmp_search_dirs) -> None:
+    """A hit inside a sub-agent conversation points at the listed root session."""
+    _require_rg()
+    from tests.helpers import agy_reply, write_agy_conversation
+
+    root_id = "11111111-1111-4111-8111-111111111111"
+    child_id = "22222222-2222-4222-8222-222222222222"
+    data_dir = tmp_search_dirs["agy_data"]
+    root_file = write_agy_conversation(
+        data_dir, conversation_id=root_id, workspace="/Users/me/agy-repo",
+    )
+    child_file = write_agy_conversation(
+        data_dir, conversation_id=child_id, parent_id=root_id,
+        workspace="/Users/me/agy-repo",
+        records=[agy_reply(0, "subagent only needle")],
+    )
+
+    results = search.ripgrep_search("subagent only needle")
+    hits = [r for r in results if r.provider is Provider.AGY]
+    assert len(hits) == 1
+    assert hits[0].session_id == root_id
+    assert hits[0].agent_id == child_id
+    assert hits[0].project_path == "/Users/me/agy-repo"
+    assert hits[0].file_path == str(child_file)
+    assert hits[0].root_file_path == str(root_file)
+
+
+def test_aggregated_search_includes_agy_host(tmp_aggregation_search_dirs) -> None:
+    """Aggregation mode scans each host's ~/.gemini/antigravity-cli."""
+    _require_rg()
+    from tests.helpers import agy_user, write_agy_conversation
+
+    for host in ("laptop", "desktop"):
+        write_agy_conversation(
+            tmp_aggregation_search_dirs[host]["agy_data"],
+            workspace=f"/Users/me/{host}",
+            records=[agy_user(0, "aggregated agy needle")],
+        )
+
+    results = search.ripgrep_search(
+        "aggregated agy needle",
+        aggregation_root=tmp_aggregation_search_dirs["root"],
+    )
+    hits = [r for r in results if r.provider is Provider.AGY]
+    assert {r.host for r in hits} == {"laptop", "desktop"}
+    assert {r.project_path for r in hits} == {
+        "/Users/me/laptop", "/Users/me/desktop",
+    }

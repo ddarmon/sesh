@@ -35,6 +35,7 @@ GEMINI_TMP = Path.home() / ".gemini" / "tmp"
 OPENCODE_DATA = Path.home() / ".local" / "share" / "opencode"
 # Honours CLINE_DATA_DIR / CLINE_DIR the same way the provider does.
 CLINE_SESSIONS = _cline_data_dir() / "sessions"
+AGY_DATA = Path.home() / ".gemini" / "antigravity-cli"
 
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _RG_REGEX_META = re.compile(r'[\\.*+?{}()\[\]|^$]')
@@ -64,6 +65,7 @@ class _SearchRoots:
     gemini_tmp: Path
     opencode_data: Path
     cline_sessions: Path
+    agy_data: Path
 
 
 def _local_roots() -> _SearchRoots:
@@ -83,6 +85,7 @@ def _local_roots() -> _SearchRoots:
         gemini_tmp=GEMINI_TMP,
         opencode_data=OPENCODE_DATA,
         cline_sessions=CLINE_SESSIONS,
+        agy_data=AGY_DATA,
     )
 
 
@@ -108,6 +111,7 @@ def _aggregated_roots(aggregation_root: Path):
             gemini_tmp=host_dir / ".gemini" / "tmp",
             opencode_data=host_dir / ".local" / "share" / "opencode",
             cline_sessions=host_dir / ".cline" / "data" / "sessions",
+            agy_data=host_dir / ".gemini" / "antigravity-cli",
         )
 
 
@@ -615,6 +619,88 @@ def _cline_project_path(session_dir: Path, session_id: str) -> str:
         if isinstance(value, str) and value:
             return value
     return ""
+
+
+def _search_agy(
+    rg: str,
+    query: str,
+    agy_data: Path,
+    host: str | None,
+) -> list[SearchResult]:
+    """Search Antigravity CLI transcripts under *agy_data* via ripgrep.
+
+    Only ``brain/{id}/.system_generated/logs/transcript_full.jsonl`` is
+    searched: the sibling ``transcript.jsonl`` and the ``chunks/`` copies
+    repeat the same records. The conversation id is the ``brain`` directory
+    name; the provider maps it to its root conversation and project, so a hit
+    inside a sub-agent is attributed to the session the tree actually lists.
+    """
+    brain = agy_data / "brain"
+    if not brain.is_dir():
+        return []
+
+    from sesh.providers.agy import AgyProvider
+
+    cmd = [
+        # --hidden: the transcripts sit under the dot-directory
+        # ``.system_generated``, which ripgrep skips by default.
+        rg, "--json", "-i", "-m", "1", "--hidden", "--no-ignore",
+        *(("-F",) if _is_literal(query) else ()),
+        "--glob", "**/.system_generated/logs/transcript_full.jsonl",
+        query,
+        str(brain),
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+    # The data dir is ``{home}/.gemini/antigravity-cli``; pointing the
+    # provider at that home keeps it on the same tree ripgrep just searched.
+    provider = AgyProvider(base_dir=agy_data.parent.parent, host=host)
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+
+    for line in proc.stdout.splitlines():
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("type") != "match":
+            continue
+
+        match_data = data.get("data", {})
+        file_path = match_data.get("path", {}).get("text", "")
+        matched_text = match_data.get("lines", {}).get("text", "").strip()
+        if not file_path or not matched_text or file_path in seen:
+            continue
+        seen.add(file_path)
+
+        conversation_id = Path(file_path).parents[2].name
+        located = provider.locate(conversation_id)
+        if located is None:
+            continue
+        root_id, project_path, agent_id = located
+
+        display_text = _extract_display_text(matched_text, query)
+        if not display_text:
+            display_text = matched_text[:200]
+
+        results.append(SearchResult(
+            session_id=root_id,
+            project_path=project_path,
+            provider=Provider.AGY,
+            matched_line=display_text,
+            file_path=file_path,
+            host=host,
+            agent_id=agent_id,
+            root_file_path=provider.transcript_path(root_id) if agent_id else None,
+        ))
+
+    return results
 
 
 def _escape_like(s: str) -> str:
@@ -1333,6 +1419,9 @@ def _search_one_host(
 
     # Cline search: one JSON transcript per session dir (separate rg pass)
     results.extend(_search_cline(rg, query, roots.cline_sessions, roots.host))
+
+    # agy search: one JSONL transcript per conversation dir (separate rg pass)
+    results.extend(_search_agy(rg, query, roots.agy_data, roots.host))
 
     # opencode: SQLite databases first, then the legacy JSON storage tree
     opencode_seen: set[str] = set()

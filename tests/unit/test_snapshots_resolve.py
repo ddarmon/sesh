@@ -305,3 +305,16 @@ def test_search_recover_no_phrases_returns_none(monkeypatch: pytest.MonkeyPatch)
     text = "$ ls\n> short"
     monkeypatch.setattr("sesh.search.ripgrep_search", lambda q: [])
     assert snapshots_core._search_recover(text, "/tmp/proj") is None
+
+
+def test_parse_explicit_resume_finds_agy() -> None:
+    sid = "4a8baeb1-8d7b-484a-a54a-7a6f66e44bdd"
+    r = snapshots_core._parse_explicit_resume(f"$ agy --conversation {sid}\n")
+    assert r is not None
+    assert r.provider == Provider.AGY
+    assert r.session_id == sid
+    assert r.cmd_args == ["agy", "--conversation", sid]
+
+
+def test_parse_explicit_resume_ignores_agy_without_a_uuid() -> None:
+    assert snapshots_core._parse_explicit_resume("$ agy --conversation latest\n") is None

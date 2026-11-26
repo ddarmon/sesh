@@ -17,6 +17,7 @@ def test_resume_argv_per_provider() -> None:
     assert resume.resume_argv(Provider.OPENCODE, "ses_1") == [
         "opencode", "--session", "ses_1",
     ]
+    assert resume.resume_argv(Provider.AGY, "aa") == ["agy", "--conversation", "aa"]
 
 
 def test_resume_argv_handles_uuid_with_dashes() -> None:
@@ -75,3 +76,4 @@ def test_resume_binary_name() -> None:
     assert resume.resume_binary_name(Provider.PI) == "pi"
     assert resume.resume_binary_name(Provider.GEMINI) == "gemini"
     assert resume.resume_binary_name(Provider.OPENCODE) == "opencode"
+    assert resume.resume_binary_name(Provider.AGY) == "agy"
