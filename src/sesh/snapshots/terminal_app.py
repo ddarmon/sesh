@@ -14,13 +14,15 @@ import shlex
 import subprocess
 from typing import TYPE_CHECKING
 
-from sesh.snapshots.backend import CapturedTab, RestoreOutcome
+from sesh.snapshots.backend import CapturedTab, RestoreOutcome, TerminalBackendError
 
 if TYPE_CHECKING:
     from sesh.snapshots.core import RestoreItem
 
 
 _SHELLS = ("zsh", "bash", "fish", "sh", "dash", "ksh")
+
+_OSASCRIPT_TIMEOUT = 30  # seconds
 
 
 _CAPTURE_APPLESCRIPT = r"""
@@ -30,17 +32,29 @@ tell application "Terminal"
     repeat with w in windows
         set winIdx to winIdx + 1
         set tabIdx to 0
-        repeat with t in tabs of w
+        -- Terminal can list windows that are not terminal windows: they
+        -- have no id, name, or tabs, and asking for their tabs raises
+        -- -1728. Skip such a window (and any tab that cannot be read)
+        -- instead of losing the whole capture.
+        try
+            set winTabs to tabs of w
+        on error
+            set winTabs to {}
+        end try
+        repeat with t in winTabs
             set tabIdx to tabIdx + 1
-            set tabTTY to tty of t
-            set tabHist to history of t
-            set out to out & "<<<TAB>>>" & linefeed
-            set out to out & "WINDOW: " & winIdx & linefeed
-            set out to out & "TAB: " & tabIdx & linefeed
-            set out to out & "TTY: " & tabTTY & linefeed
-            set out to out & "<<<HISTORY>>>" & linefeed
-            set out to out & tabHist & linefeed
-            set out to out & "<<<END>>>" & linefeed
+            try
+                set tabTTY to tty of t
+                set tabHist to history of t
+                set block to "<<<TAB>>>" & linefeed
+                set block to block & "WINDOW: " & winIdx & linefeed
+                set block to block & "TAB: " & tabIdx & linefeed
+                set block to block & "TTY: " & tabTTY & linefeed
+                set block to block & "<<<HISTORY>>>" & linefeed
+                set block to block & tabHist & linefeed
+                set block to block & "<<<END>>>" & linefeed
+                set out to out & block
+            end try
         end repeat
     end repeat
 end tell
@@ -262,10 +276,17 @@ class TerminalAppBackend:
                 input=script,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=_OSASCRIPT_TIMEOUT,
             )
-        except (OSError, subprocess.TimeoutExpired):
-            return ""
+        except subprocess.TimeoutExpired as exc:
+            raise TerminalBackendError(
+                f"osascript timed out after {_OSASCRIPT_TIMEOUT}s talking to Terminal.app"
+            ) from exc
+        except OSError as exc:
+            raise TerminalBackendError(f"could not run osascript: {exc}") from exc
+        if proc.returncode != 0:
+            detail = proc.stderr.strip() or f"exit code {proc.returncode}"
+            raise TerminalBackendError(f"osascript failed: {detail}")
         return proc.stdout
 
 

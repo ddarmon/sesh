@@ -1423,7 +1423,7 @@ def cmd_snapshot_save(args: argparse.Namespace) -> None:
 
     try:
         snap = snapshots.capture()
-    except snapshots.SnapshotsUnsupportedError as exc:
+    except (snapshots.SnapshotsUnsupportedError, snapshots.SnapshotsBackendError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1)
 
@@ -1477,7 +1477,7 @@ def cmd_snapshot_reopen(args: argparse.Namespace) -> None:
             include_shells=args.all,
             dry_run=args.dry_run,
         )
-    except snapshots.SnapshotsUnsupportedError as exc:
+    except (snapshots.SnapshotsUnsupportedError, snapshots.SnapshotsBackendError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1)
 

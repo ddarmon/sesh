@@ -6,7 +6,7 @@ import pytest
 
 from sesh.snapshots import core as snapshots_core
 from sesh.snapshots import terminal_app as ta_mod
-from sesh.snapshots.backend import RestoreOutcome
+from sesh.snapshots.backend import RestoreOutcome, TerminalBackendError
 from sesh.snapshots.core import RestoreItem
 from sesh.snapshots.terminal_app import TerminalAppBackend
 
@@ -155,3 +155,76 @@ def test_restore_skips_items_without_cwd(monkeypatch: pytest.MonkeyPatch) -> Non
     assert outcome.launched == 0
     assert called["n"] == 0
     assert outcome.note == "no tabs to reopen"
+
+
+# ----- osascript failures are surfaced, not saved as an empty capture -------
+
+
+class _FakeProc:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_run_osascript_raises_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    stderr = (
+        "157:696: execution error: Terminal got an error: "
+        "Can’t get every tab of item 10 of every window. (-1728)\n"
+    )
+    monkeypatch.setattr(
+        ta_mod.subprocess, "run", lambda *a, **k: _FakeProc(1, "", stderr)
+    )
+    with pytest.raises(TerminalBackendError) as excinfo:
+        TerminalAppBackend._run_osascript("script")
+    assert "-1728" in str(excinfo.value)
+
+
+def test_run_osascript_reports_exit_code_without_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ta_mod.subprocess, "run", lambda *a, **k: _FakeProc(3))
+    with pytest.raises(TerminalBackendError, match="exit code 3"):
+        TerminalAppBackend._run_osascript("script")
+
+
+def test_run_osascript_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _timeout(*a, **k):
+        raise ta_mod.subprocess.TimeoutExpired(cmd="osascript", timeout=30)
+
+    monkeypatch.setattr(ta_mod.subprocess, "run", _timeout)
+    with pytest.raises(TerminalBackendError, match="timed out"):
+        TerminalAppBackend._run_osascript("script")
+
+
+def test_run_osascript_raises_when_osascript_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _missing(*a, **k):
+        raise FileNotFoundError("osascript")
+
+    monkeypatch.setattr(ta_mod.subprocess, "run", _missing)
+    with pytest.raises(TerminalBackendError, match="could not run osascript"):
+        TerminalAppBackend._run_osascript("script")
+
+
+def test_run_osascript_returns_stdout_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ta_mod.subprocess, "run", lambda *a, **k: _FakeProc(0, "OK\n"))
+    assert TerminalAppBackend._run_osascript("script") == "OK\n"
+
+
+def test_capture_script_guards_unscriptable_windows() -> None:
+    # Terminal can list windows with no tabs property (error -1728); the tab
+    # lookup must sit inside a try so one such window cannot abort the capture.
+    script = ta_mod._CAPTURE_APPLESCRIPT
+    guard = script.index("try")
+    assert guard < script.index("set winTabs to tabs of w") < script.index("on error")
+    assert "repeat with t in winTabs" in script
+
+
+def test_core_capture_wraps_backend_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Failing:
+        name = "failing"
+
+        def capture(self):
+            raise TerminalBackendError("osascript failed: boom")
+
+    monkeypatch.setattr(snapshots_core, "get_backend", lambda: _Failing())
+    with pytest.raises(snapshots_core.SnapshotsBackendError, match="boom"):
+        snapshots_core.capture()
